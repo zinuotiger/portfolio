@@ -1,0 +1,303 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/platform_knowledge.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/platform_knowledge.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 303 行</span></nav><main class="wrap source-page"><h1>pyharness/application/platform_knowledge.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：655576518c58c033da680b49da013c2f94a48d73<br>SHA-256（内容校验）：ccbc092912495f6564219c6bba3cb200c8381a1710686b36a3251748a7f112e3</p><p><a href="../../../architecture-detailed.html?node=platform_knowledge">KnowledgeWorkbench（知识来源与连接管理）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 12 个类、函数与方法</summary><ul><li><a href="#L11">PlatformKnowledge（类） · L11–L302</a><ul><li><a href="#L14">PlatformKnowledge.add_knowledge（异步方法） · L14–L25</a></li><li><a href="#L27">PlatformKnowledge.knowledge_list（方法） · L27–L36</a></li><li><a href="#L38">PlatformKnowledge.knowledge_action（方法） · L38–L58</a></li><li><a href="#L60">PlatformKnowledge.delete_knowledge（方法） · L60–L68</a></li><li><a href="#L70">PlatformKnowledge.query_knowledge（异步方法） · L70–L108</a></li><li><a href="#L110">PlatformKnowledge.connection_definitions（方法） · L110–L111</a></li><li><a href="#L113">PlatformKnowledge.rag_provider（方法） · L113–L120</a></li><li><a href="#L122">PlatformKnowledge.sync_knowledge（异步方法） · L122–L182</a></li><li><a href="#L184">PlatformKnowledge.save_connection（方法） · L184–L220</a></li><li><a href="#L222">PlatformKnowledge.connections（方法） · L222–L236</a></li><li><a href="#L238">PlatformKnowledge.connection_action（异步方法） · L238–L302</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;PlatformKnowledge operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import asyncio</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import hashlib</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import httpx</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import uuid</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.platform_models import KnowledgeSource</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.core.sandbox import fail</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>class PlatformKnowledge:</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    &quot;&quot;&quot;PlatformKnowledge responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    async def add_knowledge(self, body):</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        name = str(body.get(&#x27;name&#x27;) or &#x27;&#x27;).strip()</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        text = str(body.get(&#x27;text&#x27;) or &#x27;&#x27;)</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        if not name or len(name) &gt; 150 or not text or len(text.encode()) &gt; 1048576:</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>            fail(&#x27;invalid_document&#x27;)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        ident = &#x27;k-&#x27; + uuid.uuid4().hex</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        record = KnowledgeSource(source_id=ident, name=name, size=len(text.encode()),</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>            sha256=hashlib.sha256(text.encode()).hexdigest())</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        with self.store.transaction() as data:</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>            data[&#x27;knowledge&#x27;][ident] = {**record.model_dump(), &#x27;text&#x27;:text}</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        await self.sync_knowledge()</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        return record.model_dump()</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    def knowledge_list(self):</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        data=self.store.read()</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        provider=data[&#x27;preferences&#x27;].get(&#x27;knowledge_provider&#x27;,&#x27;exact_keyword&#x27;)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        sync=data[&#x27;preferences&#x27;].get(&#x27;knowledge_sync&#x27;,{}).get(provider,{})</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        return {&#x27;sources&#x27;:[{k:v for k,v in row.items() if k != &#x27;text&#x27;} for row in data[&#x27;knowledge&#x27;].values()],</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>                &#x27;provider&#x27;:provider, &#x27;sync_error&#x27;:sync.get(&#x27;last_error&#x27;),</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>                &#x27;sync_pending&#x27;:sum(sync.get(&#x27;documents&#x27;,{}).get(k,{}).get(&#x27;sha256&#x27;) != v[&#x27;sha256&#x27;]</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                    for k,v in data[&#x27;knowledge&#x27;].items()) + len(set(sync.get(&#x27;documents&#x27;,{}))-set(data[&#x27;knowledge&#x27;]))</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                    if sync else 0,</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>                &#x27;status&#x27;:&#x27;available&#x27; if provider==&#x27;exact_keyword&#x27; else data[&#x27;connections&#x27;].get(provider,{}).get(&#x27;status&#x27;,&#x27;unavailable&#x27;)}</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    def knowledge_action(self, ident, action, body):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        with self.store.transaction() as data:</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>            if action==&#x27;provider&#x27;:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>                provider=body.get(&#x27;provider&#x27;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>                if provider!=&#x27;exact_keyword&#x27; and (provider not in data[&#x27;connections&#x27;] or not provider.startswith(&#x27;remote_rag:&#x27;)):</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>                    fail(&#x27;knowledge_provider_not_found&#x27;)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>                data[&#x27;preferences&#x27;][&#x27;knowledge_provider&#x27;]=provider</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            else:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                if ident not in data[&#x27;knowledge&#x27;]:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>                    fail(&#x27;knowledge_not_found&#x27;)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>                if action==&#x27;retry&#x27;:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>                    data[&#x27;knowledge&#x27;][ident][&#x27;status&#x27;]=&#x27;indexed&#x27;</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>                elif action==&#x27;replace&#x27;:</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                    text=body.get(&#x27;text&#x27;)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                    if not isinstance(text,str) or not text or len(text.encode())&gt;1048576:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                        fail(&#x27;invalid_document&#x27;)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                    row=data[&#x27;knowledge&#x27;][ident]</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                    row.update(text=text,size=len(text.encode()),sha256=hashlib.sha256(text.encode()).hexdigest(),</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                        version=row[&#x27;version&#x27;]+1,updated_at=datetime.now(timezone.utc).isoformat())</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                else: fail(&#x27;invalid_action&#x27;)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        return {&#x27;ok&#x27;:True}</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    def delete_knowledge(self, ident):</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        with self.store.transaction() as data:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            if ident not in data[&#x27;knowledge&#x27;]:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                fail(&#x27;knowledge_not_found&#x27;)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            definitions=list(data[&#x27;agents&#x27;].values())+[v[&#x27;snapshot&#x27;] for versions in data[&#x27;versions&#x27;].values() for v in versions]</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            if any(ident in a.get(&#x27;knowledge_sources&#x27;,[]) for a in definitions):</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                fail(&#x27;knowledge_in_use&#x27;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            del data[&#x27;knowledge&#x27;][ident]</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        return {&#x27;ok&#x27;:True}</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    async def query_knowledge(self, query, sources=None):</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        from pyharness.core.knowledge import (KnowledgeError, validate_query,</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            ExactKeywordKnowledgeProvider, RemoteRagKnowledgeProvider)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        data=self.store.read()</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        provider=data[&#x27;preferences&#x27;].get(&#x27;knowledge_provider&#x27;,&#x27;exact_keyword&#x27;)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        capabilities = (ExactKeywordKnowledgeProvider if provider == &#x27;exact_keyword&#x27;</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                        else RemoteRagKnowledgeProvider).capabilities</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        try:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            validate_query(query, capabilities)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        except KnowledgeError as error:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            fail(error.code)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        if provider != &#x27;exact_keyword&#x27;:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            await self.sync_knowledge(provider)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        docs = list(data[&#x27;knowledge&#x27;].values())</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        if sources is not None:</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            docs = [d for d in docs if d[&#x27;source_id&#x27;] in sources]</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        if provider==&#x27;exact_keyword&#x27;:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            result=await self.knowledge.query(query,docs)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        else:</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            from pyharness.core.knowledge import RemoteRagKnowledgeProvider</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            row=data[&#x27;connections&#x27;].get(provider)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            if not row or not row[&#x27;config&#x27;].get(&#x27;enabled&#x27;):</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                fail(&#x27;knowledge_unavailable&#x27;)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            try:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                result=await asyncio.wait_for(self.rag_provider(row).query(query,docs),6)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            except KnowledgeError as error:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                if error.code not in (&#x27;invalid_query&#x27;, &#x27;invalid_query_length&#x27;):</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                    with self.store.transaction() as current:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                        current[&#x27;connections&#x27;][provider][&#x27;status&#x27;]=&#x27;unavailable&#x27;</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                fail(error.code)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            except (TimeoutError, httpx.TimeoutException):</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                with self.store.transaction() as current:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                    current[&#x27;connections&#x27;][provider][&#x27;status&#x27;]=&#x27;unavailable&#x27;</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                fail(&#x27;knowledge_timeout&#x27;)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            except Exception:</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                with self.store.transaction() as current:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                    current[&#x27;connections&#x27;][provider][&#x27;status&#x27;]=&#x27;unavailable&#x27;</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                fail(&#x27;knowledge_unavailable&#x27;)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        return {**result,&#x27;diagnostics&#x27;:{&#x27;documents&#x27;:len(docs),&#x27;strategy&#x27;:&#x27;exact evidence&#x27;,&#x27;semantic_default&#x27;:False}}</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    def connection_definitions(self):</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        return self.store.read()[&#x27;connections&#x27;]</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    def rag_provider(self, row):</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        from pyharness.core.knowledge import RemoteRagKnowledgeProvider</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        sync = self.store.read()[&#x27;preferences&#x27;].get(&#x27;knowledge_sync&#x27;, {}).get(row[&#x27;connection_id&#x27;], {}) if row[&#x27;config&#x27;].get(&#x27;sync_mode&#x27;) == &#x27;sync-enabled&#x27; else {}</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        return RemoteRagKnowledgeProvider(row[&#x27;config&#x27;][&#x27;endpoint&#x27;],</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            source_owner=sync.get(&#x27;owner&#x27;),</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            secret_ref=row[&#x27;config&#x27;].get(&#x27;secret_ref&#x27;),</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            secret_resolver=lambda ref, endpoint: self.service._settings_store.resolve_service_secret(</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                ref, self.service.tenant_id, endpoint))</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    async def sync_knowledge(self, connection_id=None):</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        &quot;&quot;&quot;Reconcile explicit sync-enabled connections. State survives restart.</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        No startup network dependency, hidden retries or manual-mode uploads.</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        Local mutation remains authoritative after a remote failure; the next</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        explicit sync/query retries the pending desired version idempotently.</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        data = self.store.read()</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        ident = connection_id or data[&#x27;preferences&#x27;].get(&#x27;knowledge_provider&#x27;)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        row = data[&#x27;connections&#x27;].get(ident)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        if not row or row[&#x27;type&#x27;] != &#x27;remote_rag&#x27; or row[&#x27;config&#x27;].get(&#x27;sync_mode&#x27;,&#x27;manual&#x27;) != &#x27;sync-enabled&#x27;:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            return {&#x27;status&#x27;:&#x27;manual&#x27;,&#x27;operations&#x27;:0}</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        if not row[&#x27;config&#x27;].get(&#x27;enabled&#x27;):</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            return {&#x27;status&#x27;:&#x27;disabled&#x27;,&#x27;operations&#x27;:0}</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        lock = self.locks.setdefault(&#x27;knowledge-sync:&#x27;+ident, asyncio.Lock())</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        async with lock:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            with self.store.transaction() as current:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                sync = current[&#x27;preferences&#x27;].setdefault(&#x27;knowledge_sync&#x27;, {}).setdefault(ident,</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                    {&#x27;owner&#x27;:uuid.uuid4().hex,&#x27;documents&#x27;:{},&#x27;endpoint&#x27;:row[&#x27;config&#x27;][&#x27;endpoint&#x27;]})</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                if sync[&#x27;endpoint&#x27;] != row[&#x27;config&#x27;][&#x27;endpoint&#x27;]:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                    fail(&#x27;knowledge_sync_endpoint_conflict&#x27;)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            desired = self.store.read()[&#x27;knowledge&#x27;]</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            provider = self.rag_provider(row)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            completed = 0</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            try:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                for source in sorted(set(desired) | set(sync[&#x27;documents&#x27;])):</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                    saved = sync[&#x27;documents&#x27;].get(source)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                    document = desired.get(source)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                    if document and saved and saved[&#x27;sha256&#x27;] == document[&#x27;sha256&#x27;] and saved[&#x27;version&#x27;] == document[&#x27;version&#x27;]:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>                        continue</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                    if completed &gt;= 100:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>                        fail(&#x27;knowledge_sync_batch_pending&#x27;)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                    path = &#x27;/platform-sources/&#x27;+sync[&#x27;owner&#x27;]+&#x27;/&#x27;+source</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                    if document:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                        result = await provider.request(&#x27;PUT&#x27;,path,{k:document[k] for k in (&#x27;text&#x27;,&#x27;version&#x27;,&#x27;sha256&#x27;)})</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                        answer = result.get(&#x27;data&#x27;,{})</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                        if (result.get(&#x27;status&#x27;) != &#x27;ok&#x27; or answer.get(&#x27;source_id&#x27;) != source</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                                or answer.get(&#x27;version&#x27;) != document[&#x27;version&#x27;] or answer.get(&#x27;sha256&#x27;) != document[&#x27;sha256&#x27;]):</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>                            fail(&#x27;knowledge_sync_invalid_response&#x27;)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>                        entry = {k:document[k] for k in (&#x27;version&#x27;,&#x27;sha256&#x27;)}</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                    else:</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                        result = await provider.request(&#x27;DELETE&#x27;,path+&#x27;?version=&#x27;+str(saved[&#x27;version&#x27;]))</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                        if result.get(&#x27;status&#x27;) != &#x27;ok&#x27; or result.get(&#x27;data&#x27;,{}).get(&#x27;deleted&#x27;) is not True:</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                            fail(&#x27;knowledge_sync_invalid_response&#x27;)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                        entry = None</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>                    with self.store.transaction() as current:</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                        records = current[&#x27;preferences&#x27;][&#x27;knowledge_sync&#x27;][ident][&#x27;documents&#x27;]</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                        if entry is None: records.pop(source, None)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                        else: records[source] = entry</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                        current[&#x27;preferences&#x27;][&#x27;knowledge_sync&#x27;][ident][&#x27;last_error&#x27;] = None</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                    completed += 1</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>            except Exception as error:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                from pyharness.core.knowledge import KnowledgeError</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                code = error.code if isinstance(error, KnowledgeError) else (</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                    error.code if isinstance(error, PyHError) and error.code in (</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                        &#x27;knowledge_sync_batch_pending&#x27;,&#x27;knowledge_sync_invalid_response&#x27;) else &#x27;knowledge_sync_failed&#x27;)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                with self.store.transaction() as current:</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                    current[&#x27;preferences&#x27;][&#x27;knowledge_sync&#x27;][ident][&#x27;last_error&#x27;] = code</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                fail(code)</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>            return {&#x27;status&#x27;:&#x27;synced&#x27;,&#x27;operations&#x27;:completed}</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code></code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>    def save_connection(self, body):</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        import re</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        from pyharness.config import McpServerCfg</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        kind=body.get(&#x27;type&#x27;)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        if kind==&#x27;mcp&#x27;:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>            config=McpServerCfg.model_validate(body.get(&#x27;config&#x27;,{})).model_dump()</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>            name=config[&#x27;name&#x27;]</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>            if not re.fullmatch(r&#x27;[a-z][a-z0-9_]{1,40}&#x27;,name):</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                fail(&#x27;invalid_connection_name&#x27;)</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            if any(len(arg)&gt;2000 or re.search(r&#x27;(?i)(sk-[a-z0-9]{12}|--?(token|password|secret|api[-_]?key))&#x27;,arg) for arg in config[&#x27;command&#x27;]):</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                fail(&#x27;secret_in_command_not_supported&#x27;)</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>        elif kind==&#x27;remote_rag&#x27;:</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>            from pyharness.core.knowledge import RemoteRagKnowledgeProvider</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>            name=str(body.get(&#x27;name&#x27;) or &#x27;&#x27;)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            if not re.fullmatch(r&#x27;[a-z][a-z0-9_]{1,40}&#x27;,name):</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>                fail(&#x27;invalid_connection_name&#x27;)</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            provider=RemoteRagKnowledgeProvider(str(body.get(&#x27;endpoint&#x27;) or &#x27;&#x27;))</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>            from urllib.parse import urlsplit</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            url=urlsplit(provider.endpoint)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            if url.username or url.password or url.query or url.fragment:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                fail(&#x27;secret_in_url_not_supported&#x27;)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            previous = self.connection_definitions().get(&#x27;remote_rag:&#x27;+name, {}).get(&#x27;config&#x27;, {})</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>            mode = body.get(&#x27;sync_mode&#x27;, previous.get(&#x27;sync_mode&#x27;, &#x27;manual&#x27;))</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>            if mode not in (&#x27;manual&#x27;, &#x27;sync-enabled&#x27;):</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                fail(&#x27;invalid_sync_mode&#x27;)</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            config={&#x27;endpoint&#x27;:provider.endpoint,&#x27;enabled&#x27;:previous.get(&#x27;enabled&#x27;, False),</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                    &#x27;sync_mode&#x27;:mode, &#x27;secret_ref&#x27;:previous.get(&#x27;secret_ref&#x27;, &#x27;&#x27;)}</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>            if &#x27;bearer_token&#x27; in body:</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                config[&#x27;secret_ref&#x27;] = self.service._settings_store.set_service_secret(</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>                    self.service.tenant_id, &#x27;remote_rag:&#x27;+name, provider.endpoint, body[&#x27;bearer_token&#x27;])</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        else:</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            fail(&#x27;invalid_connection_type&#x27;)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        ident=kind+&#x27;:&#x27;+name</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        with self.store.transaction() as data:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>            data[&#x27;connections&#x27;][ident]={&#x27;connection_id&#x27;:ident,&#x27;name&#x27;:name,&#x27;type&#x27;:kind,</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>                &#x27;config&#x27;:config,&#x27;status&#x27;:&#x27;not_probed&#x27;,&#x27;last_test&#x27;:None,&#x27;last_used&#x27;:None}</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        return {&#x27;connection_id&#x27;:ident,&#x27;name&#x27;:name,&#x27;type&#x27;:kind,&#x27;status&#x27;:&#x27;not_probed&#x27;,&#x27;restart_required&#x27;:bool(self.service._engines)}</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code></code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>    def connections(self):</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        rows=[]</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        agents=self.store.read()[&#x27;agents&#x27;].values()</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        for ident,row in self.connection_definitions().items():</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>            client=self.connection_clients.get(ident)</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>            rows.append({k:v for k,v in row.items() if k!=&#x27;config&#x27;}|{</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                &#x27;enabled&#x27;:row[&#x27;config&#x27;].get(&#x27;enabled&#x27;,False),</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                &#x27;has_secret&#x27;:bool(row[&#x27;config&#x27;].get(&#x27;secret_ref&#x27;)),</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                &#x27;sync_mode&#x27;:row[&#x27;config&#x27;].get(&#x27;sync_mode&#x27;,&#x27;manual&#x27;),</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                &#x27;endpoint&#x27;:row[&#x27;config&#x27;].get(&#x27;endpoint&#x27;) if row[&#x27;type&#x27;]==&#x27;remote_rag&#x27; else None,</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                &#x27;status&#x27;:&#x27;connected&#x27; if client and client.connected else (&#x27;disabled&#x27; if not row[&#x27;config&#x27;].get(&#x27;enabled&#x27;) else &#x27;not_probed&#x27;),</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                &#x27;tool_count&#x27;:len(client._tools) if client and client.connected else None,</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>                &#x27;scopes&#x27;:row[&#x27;config&#x27;].get(&#x27;allowed_tools&#x27;) or [],</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                &#x27;agents&#x27;:[a[&#x27;name&#x27;] for a in agents if row[&#x27;name&#x27;] in a[&#x27;mcp_connections&#x27;]]})</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        return rows</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code></code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>    async def connection_action(self, ident, action):</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        if ident.startswith(&#x27;model:&#x27;) and action==&#x27;test&#x27;:</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>            from pyharness.application.model_probe import probe</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>            profile=next((p for p in self.service.tenant_state()[&#x27;profiles&#x27;] if p[&#x27;id&#x27;]==ident[6:]),None)</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>            if profile is None: fail(&#x27;connection_not_found&#x27;)</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            lock=self.locks.setdefault(&#x27;probe:&#x27;+ident,asyncio.Lock())</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            if lock.locked(): fail(&#x27;model_probe_busy&#x27;)</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            async with lock:</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                result=await probe(self.service,profile)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>            with self.store.transaction() as data:</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>                data[&#x27;preferences&#x27;].setdefault(&#x27;model_probes&#x27;,{})[ident[6:]]={**result,&#x27;checked_at&#x27;:datetime.now(timezone.utc).isoformat()}</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>            return result</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        row=self.connection_definitions().get(ident)</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        if row is None:</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>            fail(&#x27;connection_not_found&#x27;)</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        if action == &#x27;sync&#x27; and row[&#x27;type&#x27;] == &#x27;remote_rag&#x27;:</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>            return await self.sync_knowledge(ident)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        if action in {&#x27;test&#x27;,&#x27;start&#x27;}:</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            if ident in self.connection_clients:</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>                await self.connection_clients.pop(ident).close()</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            if row[&#x27;type&#x27;]==&#x27;mcp&#x27;:</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>                from pyharness.core.mcp import McpClient,StdioTransport</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>                client=McpClient(row[&#x27;name&#x27;],StdioTransport(row[&#x27;config&#x27;][&#x27;command&#x27;],timeout_s=min(30,row[&#x27;config&#x27;][&#x27;timeout_s&#x27;])))</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>                try:</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>                    await asyncio.wait_for(client.connect(),35)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>                    self.connection_clients[ident]=client</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>                    status=&#x27;connected&#x27;</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>                except Exception:</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>                    await client.close()</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>                    status=&#x27;unavailable&#x27;</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>            else:</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>                try:</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>                    await self.rag_provider(row).probe()</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>                    status=&#x27;available&#x27;</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>                except Exception:</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>                    status=&#x27;unavailable&#x27;</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>            with self.store.transaction() as data:</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>                if ident in data[&#x27;connections&#x27;]:</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>                    data[&#x27;connections&#x27;][ident][&#x27;last_test&#x27;]=datetime.now(timezone.utc).isoformat()</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>                    data[&#x27;connections&#x27;][ident][&#x27;status&#x27;]=status</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>            return {&#x27;status&#x27;:status}</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        if action not in {&#x27;stop&#x27;,&#x27;enable&#x27;,&#x27;disable&#x27;,&#x27;delete&#x27;}:</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>            fail(&#x27;invalid_action&#x27;)</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        if action==&#x27;delete&#x27; and row[&#x27;type&#x27;]==&#x27;remote_rag&#x27;:</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>            synced=self.store.read()[&#x27;preferences&#x27;].get(&#x27;knowledge_sync&#x27;,{}).get(ident,{})</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>            if synced.get(&#x27;documents&#x27;):</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>                fail(&#x27;knowledge_sync_documents_remaining&#x27;)</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        if action in {&#x27;stop&#x27;,&#x27;disable&#x27;,&#x27;delete&#x27;}:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>            if ident in self.connection_clients:</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>                await self.connection_clients.pop(ident).close()</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            for spine in self.service._engines.values():</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                for client in list(getattr(spine,&#x27;_mcp_clients&#x27;,[])):</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                    if client.name==row[&#x27;name&#x27;]:</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                        await client.close()</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>        with self.store.transaction() as data:</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            if action==&#x27;delete&#x27;:</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                if row[&#x27;type&#x27;] == &#x27;remote_rag&#x27; and row[&#x27;config&#x27;].get(&#x27;secret_ref&#x27;):</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>                    self.service._settings_store.set_service_secret(self.service.tenant_id,</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>                        ident, row[&#x27;config&#x27;][&#x27;endpoint&#x27;], &#x27;&#x27;)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>                del data[&#x27;connections&#x27;][ident]</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>            else:</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                if action!=&#x27;stop&#x27;:</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                    data[&#x27;connections&#x27;][ident][&#x27;config&#x27;][&#x27;enabled&#x27;]=action==&#x27;enable&#x27;</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>                data[&#x27;connections&#x27;][ident][&#x27;status&#x27;]=&#x27;stopped&#x27; if action==&#x27;stop&#x27; else &#x27;not_probed&#x27;</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        return {&#x27;ok&#x27;:True,&#x27;restart_required&#x27;:bool(self.service._engines)}</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

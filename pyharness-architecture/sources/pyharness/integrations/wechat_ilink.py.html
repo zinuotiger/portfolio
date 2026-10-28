@@ -1,0 +1,92 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/integrations/wechat_ilink.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/integrations/wechat_ilink.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 92 行</span></nav><main class="wrap source-page"><h1>pyharness/integrations/wechat_ilink.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：379451c560133cfbf4ffd34149ceceb439fc79c5<br>SHA-256（内容校验）：ef20303a6af4480f991dbe2d56698cdc16c73972880e3bee1dc60dea9b36ba9f</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 13 个类、函数与方法</summary><ul><li><a href="#L19">ILinkError（类） · L19–L22</a><ul><li><a href="#L20">ILinkError.__init__（方法） · L20–L22</a></li></ul></li><li><a href="#L25">official_url（函数） · L25–L32</a></li><li><a href="#L35">WechatConfig（类） · L35–L45</a></li><li><a href="#L48">ILinkClient（类） · L48–L92</a><ul><li><a href="#L49">ILinkClient.__init__（方法） · L49–L52</a></li><li><a href="#L54">ILinkClient.headers（方法） · L54–L58</a></li><li><a href="#L60">ILinkClient.post（异步方法） · L60–L68</a></li><li><a href="#L70">ILinkClient.login_qr（异步方法） · L70–L71</a></li><li><a href="#L73">ILinkClient.login_status（异步方法） · L73–L78</a></li><li><a href="#L80">ILinkClient.updates（异步方法） · L80–L81</a></li><li><a href="#L83">ILinkClient.send（异步方法） · L83–L88</a></li><li><a href="#L90">ILinkClient.close（异步方法） · L90–L92</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Personal WeChat iLink HTTP adapter, verified against Tencent&#x27;s 2.4.10 source.</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Reference commit 874637a0dbc24050f72d1385add4fc6170a2d726, Tencent/openclaw-weixin.</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>This is an independent Python implementation of the public protocol. It never</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>reads another client&#x27;s login files, obtains a password, or exports chat history.</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import base64</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import secrets</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from urllib.parse import urlsplit</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>import httpx</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pydantic import BaseModel, ConfigDict, Field</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>BASE = &#x27;https://ilinkai.weixin.qq.com/&#x27;</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>VERSION = &#x27;2.4.10&#x27;</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>class ILinkError(RuntimeError):</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    def __init__(self, code):</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        self.code = code</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        super().__init__(code)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>def official_url(url: str) -&gt; str:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    parsed = urlsplit(url)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    host = parsed.hostname or &#x27;&#x27;</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    if (parsed.scheme != &#x27;https&#x27; or parsed.username or parsed.password or parsed.port not in (None,443)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        or parsed.query or parsed.fragment or parsed.path not in (&#x27;&#x27;,&#x27;/&#x27;)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        or not (host == &#x27;ilinkai.weixin.qq.com&#x27; or host.endswith(&#x27;.ilinkai.weixin.qq.com&#x27;))):</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        raise ILinkError(&#x27;wechat_untrusted_endpoint&#x27;)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    return url.rstrip(&#x27;/&#x27;)+&#x27;/&#x27;</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code></code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>class WechatConfig(BaseModel):</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    model_config = ConfigDict(extra=&#x27;forbid&#x27;)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    name: str = Field(default=&#x27;personal&#x27;,pattern=r&#x27;^[a-z][a-z0-9_]{1,30}$&#x27;)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    enabled: bool = False</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    agent_id: str | None = None</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    agent_version: int | None = Field(default=None,ge=1)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    allow_approvals: bool = False</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    allowed_users: list[str] = Field(default_factory=list,max_length=100)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    base_url: str = BASE</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    bot_id: str = &#x27;&#x27;</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    secret_ref: str = &#x27;&#x27;</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>class ILinkClient:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    def __init__(self, *, base_url=BASE, token=&#x27;&#x27;, transport=None):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        self.base_url = official_url(base_url)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        self.token = token</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        self.http = httpx.AsyncClient(timeout=40, follow_redirects=False, transport=transport)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    def headers(self):</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        return {&#x27;Content-Type&#x27;:&#x27;application/json&#x27;,&#x27;AuthorizationType&#x27;:&#x27;ilink_bot_token&#x27;,</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>            &#x27;Authorization&#x27;:&#x27;Bearer &#x27;+self.token if self.token else &#x27;&#x27;,</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            &#x27;X-WECHAT-UIN&#x27;:base64.b64encode(str(secrets.randbits(32)).encode()).decode(),</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            &#x27;iLink-App-Id&#x27;:&#x27;bot&#x27;,&#x27;iLink-App-ClientVersion&#x27;:str((2&lt;&lt;16)|(4&lt;&lt;8)|10)}</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    async def post(self, path, body, *, timeout=15):</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        response = await self.http.post(self.base_url+path, headers=self.headers(),</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            json={**body,&#x27;base_info&#x27;:{&#x27;channel_version&#x27;:VERSION,&#x27;bot_agent&#x27;:&#x27;PyHarness/0.1.0&#x27;}},timeout=timeout)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        response.raise_for_status()</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        value = response.json()</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        code = value.get(&#x27;errcode&#x27;) or value.get(&#x27;ret&#x27;) or 0</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        if code:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            raise ILinkError(&#x27;wechat_session_expired&#x27; if code == -14 else &#x27;wechat_api_&#x27;+str(code))</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        return value</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    async def login_qr(self):</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        return await self.post(&#x27;ilink/bot/get_bot_qrcode?bot_type=3&#x27;, {&#x27;local_token_list&#x27;:[]})</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    async def login_status(self, qrcode, *, verification_code=None):</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        response = await self.http.get(self.base_url+&#x27;ilink/bot/get_qrcode_status&#x27;,</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            headers={k:v for k,v in self.headers().items() if k.startswith(&#x27;iLink-&#x27;)},</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            params={&#x27;qrcode&#x27;:qrcode,**({&#x27;verify_code&#x27;:verification_code} if verification_code else {})},timeout=38)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        response.raise_for_status()</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        return response.json()</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    async def updates(self, cursor):</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        return await self.post(&#x27;ilink/bot/getupdates&#x27;,{&#x27;get_updates_buf&#x27;:cursor},timeout=38)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    async def send(self, user, context_token, text, ident):</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        if not context_token:</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            raise ILinkError(&#x27;wechat_reply_context_missing&#x27;)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        return await self.post(&#x27;ilink/bot/sendmessage&#x27;,{&#x27;msg&#x27;:{&#x27;from_user_id&#x27;:&#x27;&#x27;,</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            &#x27;to_user_id&#x27;:user,&#x27;client_id&#x27;:ident,&#x27;message_type&#x27;:2,&#x27;message_state&#x27;:2,</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            &#x27;context_token&#x27;:context_token,&#x27;item_list&#x27;:[{&#x27;type&#x27;:1,&#x27;text_item&#x27;:{&#x27;text&#x27;:text[:10000]}}]}})</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    async def close(self):</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        self.token = &#x27;&#x27;</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        await self.http.aclose()</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

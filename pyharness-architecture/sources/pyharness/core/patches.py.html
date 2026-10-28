@@ -1,0 +1,76 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/patches.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/patches.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 76 行</span></nav><main class="wrap source-page"><h1>pyharness/core/patches.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：0f7cc5cf889867a58b52e1292f1f32ff6bbc7b2f<br>SHA-256（内容校验）：afb2225359ef257b85a8d207541e5c3543c8c2c53601a0ab2cd5d64b6a52f995</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 2 个类、函数与方法</summary><ul><li><a href="#L9">digest（函数） · L9–L10</a></li><li><a href="#L13">apply_manifest（函数） · L13–L76</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Bounded patch manifests: baseline checks, path checks and failure rollback.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import hashlib</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.core.sandbox import fail, safe_path</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.core.tenant_settings import TenantSettingsStore</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>def digest(data: bytes | None):</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    return hashlib.sha256(data).hexdigest() if data is not None else None</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>def apply_manifest(root: Path, changes: list[dict], *, writer=None):</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    if not changes or len(changes) &gt; 50:</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        fail(&#x27;invalid_patch&#x27;)</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    writer = writer or TenantSettingsStore._atomic_write</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    prepared, paths, total = [], set(), 0</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    for change in changes:</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        if set(change) != {&#x27;path&#x27;,&#x27;before_sha256&#x27;,&#x27;after&#x27;} or (change[&#x27;after&#x27;] is not None and not isinstance(change[&#x27;after&#x27;],str)):</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>            fail(&#x27;invalid_patch&#x27;)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        path = safe_path(root,change[&#x27;path&#x27;])</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        if path in paths:</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>            fail(&#x27;invalid_patch&#x27;)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        paths.add(path)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        if path.exists() and (not path.is_file() or path.stat().st_size&gt;1048576):</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>            fail(&#x27;invalid_patch&#x27;)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        before = path.read_bytes() if path.exists() else None</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        if digest(before) != change[&#x27;before_sha256&#x27;]:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>            fail(&#x27;patch_baseline_changed&#x27;,change[&#x27;path&#x27;])</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        after=change[&#x27;after&#x27;].encode(&#x27;utf-8&#x27;) if change[&#x27;after&#x27;] is not None else None</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        total += len(after or b&#x27;&#x27;)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        if total&gt;5*1048576:</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            fail(&#x27;patch_too_large&#x27;)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        prepared.append((path,before,after,change[&#x27;path&#x27;]))</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    completed=[]</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    created_dirs=[]</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    try:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        for path,before,after,relative in prepared:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            safe_path(root,relative)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>            if digest(path.read_bytes() if path.exists() else None)!=digest(before):</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>                fail(&#x27;patch_baseline_changed&#x27;,relative)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            missing=[]</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>            parent=path.parent</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>            while not parent.exists() and parent!=root:</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>                missing.append(parent);parent=parent.parent</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>            path.parent.mkdir(parents=True,exist_ok=True)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            created_dirs.extend(reversed(missing))</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            # Include the current path: an injected writer can fail after replacement.</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            completed.append((path,before,after,relative))</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            if after is None:</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                path.unlink(missing_ok=True)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            else:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                writer(path,after)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    except BaseException as primary:</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        errors=[]</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        for path,before,after,relative in reversed(completed):</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            try:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                safe_path(root,relative)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                current=path.read_bytes() if path.exists() else None</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>                if current not in (after,before):</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                    fail(&#x27;patch_rollback_conflict&#x27;,relative)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                if before is None:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                    path.unlink(missing_ok=True)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                else:</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                    TenantSettingsStore._atomic_write(path,before)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            except BaseException as exc:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                errors.append(exc)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        for directory in reversed(created_dirs):</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            try:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                directory.rmdir()</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            except OSError:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                pass  # Concurrently populated directories must not be removed.</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        if errors:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            raise BaseExceptionGroup(&#x27;patch rollback requires recovery&#x27;,[primary,*errors])</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        raise</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    return {&#x27;changed_files&#x27;:[relative for _,_,_,relative in prepared]}</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

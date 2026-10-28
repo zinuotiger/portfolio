@@ -1,0 +1,336 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/governance/audit.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/governance/audit.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 336 行</span></nav><main class="wrap source-page"><h1>pyharness/governance/audit.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：005422e3fb78bb8783ed2c5f433b4e2cf98e5de5<br>SHA-256（内容校验）：cd7925db7740cf0c04db4bb245fb93569e714ad29fe056def01e630c16feb09b</p><p><a href="../../../architecture-detailed.html?node=audit">Governance Audit（治理因果重放审计）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 9 个类、函数与方法</summary><ul><li><a href="#L47">_receipt_expected（函数） · L47–L54</a></li><li><a href="#L57">AuditSystem（类） · L57–L333</a><ul><li><a href="#L70">AuditSystem._events（方法） · L70–L75</a></li><li><a href="#L77">AuditSystem._trace_call_id（方法） · L77–L79</a></li><li><a href="#L82">AuditSystem.causal_chain（方法） · L82–L173</a></li><li><a href="#L176">AuditSystem.denied_report（方法） · L176–L223</a></li><li><a href="#L227">AuditSystem._declared_holes（方法） · L227–L239</a></li><li><a href="#L241">AuditSystem.reconcile（异步方法） · L241–L318</a></li><li><a href="#L321">AuditSystem.legacy_session_audit（方法） · L321–L333</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/governance/audit.py — 治理审计视图(S5-3a)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>一句话职责:回答**&quot;某一条决策的完整因果链是什么&quot;**与**&quot;哪些调用被拒、依据什么&quot;**。</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>``AuditSystem`` 是**纯派生视图(derived view)**——不是新真源,不是缓存,不订阅、</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>不写事件、不跨调用保存状态。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>依赖方向(ADR-018:308,强制):只 import 标准库、``pyharness.errors`` 与本包;</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>**禁止** ``pyharness.core.*`` / ``engine`` / ``bus`` / ``persistence``。会话经</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>``ctx.session``/构造注入**鸭子类型**只读使用。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>**replay-only(仅重放,本模块的第一纪律)**:</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>- **不订阅**实时事件 —— 订阅态索引在重启后为空,审计必须**仅凭日志**可用;</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>- **不复用** ``EvidenceCollector`` 的索引 —— 其订阅面仅 5 类,缺</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>  ``tool.result`` / ``guard.*`` / ``approval.*``;且它按**段**组织,审计按**因果**串联;</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>- 每次调用**即时全量重放** ``_read_events(session)``(O(n);v1.0 接受,见 Change Report);</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>- 因此:同一日志 ⇒ 同一审计结果(可复现,不依时序、不依订阅先后)。</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>**与 EvidenceCollector 的边界**:Evidence 回答&quot;**这个任务**有哪些证据&quot;(段轴,</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>只覆盖**被归档**的证据);Audit 回答&quot;**这条决策**为什么发生、经过了什么&quot;</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>(因果轴,覆盖**全部**决策,含未归档者)。</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>**边界**：</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>- **S5-3**：``causal_chain``（因果链）与 ``denied_report``（拒绝清单）—— **零写**。</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>- **S5-4**：``reconcile``（三类一致性对账）+ ``legacy_session_audit``（旧面兼容，</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>  **经注入**）。``reconcile`` **默认纯只读**（``emit=False``）;仅 ``emit=True``</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>  且 findings 非空才追加**一条既有** ``syscheck.fail``（**唯一写点**，不新增事件类型）。</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>  ``CACHE-STALE`` **本版未实现**（deferred debt：避免依赖 ``EvidenceCollector`` 内部结构）。</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>- **S7**：``TraceabilityMatrix``。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>from dataclasses import dataclass</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>from pyharness.events.envelope import check_seq_gap, declared_ranges</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>from pyharness.governance.receipt import _read_events</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code># 因果链各段名(输出字典的键;``missing`` 里出现即表示&quot;应有而未找到&quot;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>CHAIN_SEGMENTS: tuple[str, ...] = (</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    &quot;request&quot;, &quot;policy&quot;, &quot;decision&quot;, &quot;approval&quot;, &quot;receipt&quot;, &quot;execution&quot;,</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>def _receipt_expected(verdict: str, approval_ref: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    &quot;&quot;&quot;该决策**是否应有凭证**。</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    与 ``receipt.receipt_kind_of`` **同一规则**(approval_ref 为空且 verdict=approval</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    ⇒ 审批请求决策 D1,不产生凭证);此处按**事件载荷**判定,故不复用对象级函数。</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    一致性由 ``tests/unit/test_governance_audit.py`` 守卫。</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    return not (str(verdict) == &quot;approval&quot; and approval_ref is None)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>class AuditSystem:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    &quot;&quot;&quot;治理审计视图(**默认纯只读**;无订阅、无状态)。</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code></code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    ``legacy_audit`` 是**注入**的旧审计适配入口(装配层传入</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    ``core.telemetry.session_audit``);本模块**不得** import ``pyharness.core.*``</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    (ADR-018:308)。未注入时 ``legacy_session_audit`` **fail-closed**(``CYC-999``)。</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code></code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    session: Optional[Any] = None</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    legacy_audit: Optional[Any] = None</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code></code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    # ------------------------------------------------------------ 只读重放</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    def _events(self, ctx: Any = None) -&gt; list:</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        &quot;&quot;&quot;即时全量重放(唯一数据来源)。无会话 ⇒ 空列表(降级,不抛)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        sess = getattr(ctx, &quot;session&quot;, None) if ctx is not None else self.session</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        if sess is None:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            return []</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        return _read_events(sess)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    def _trace_call_id(ev: Any) -&gt; str:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        return str((getattr(ev, &quot;trace&quot;, None) or {}).get(&quot;call_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    # ------------------------------------------------------------ 因果链</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    def causal_chain(self, decision_id: str, *, ctx: Any = None) -&gt; dict:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        &quot;&quot;&quot;由 ``decision_id`` 还原完整因果链(**replay-only**,无副作用)。</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        输出键(冻结):``decision_id`` / ``call_id`` / ``request`` / ``policy`` /</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        ``decision`` / ``approval`` / ``supersedes`` / ``receipt`` / ``execution`` /</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        ``denied`` / ``missing``。</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        **不臆造**:未命中的环节一律 ``None``,并按其&quot;是否应有&quot;记入 ``missing``;</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        ``decision.issued`` 本身缺失 ⇒ 直接返回并只记该段(**不抛**)。</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        out: dict = {</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            &quot;decision_id&quot;: str(decision_id), &quot;call_id&quot;: &quot;&quot;, &quot;request&quot;: None,</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            &quot;policy&quot;: None, &quot;decision&quot;: None, &quot;approval&quot;: None,</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            &quot;supersedes&quot;: None, &quot;receipt&quot;: None, &quot;execution&quot;: None,</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            &quot;denied&quot;: False, &quot;missing&quot;: [],</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        }</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        events = self._events(ctx)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        # ① 定位本决策事实</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        dec_ev = next((e for e in events</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                       if getattr(e, &quot;type&quot;, None) == &quot;decision.issued&quot;</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                       and str((getattr(e, &quot;payload&quot;, None) or {})</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                               .get(&quot;decision_id&quot;) or &quot;&quot;) == str(decision_id)), None)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        if dec_ev is None:</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>            out[&quot;missing&quot;] = [&quot;decision.issued&quot;]</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            return out</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        p = getattr(dec_ev, &quot;payload&quot;, None) or {}</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        verdict = str(p.get(&quot;verdict&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        approval_ref = p.get(&quot;approval_ref&quot;)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        call_id = self._trace_call_id(dec_ev)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        out[&quot;call_id&quot;] = call_id</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        out[&quot;denied&quot;] = verdict == &quot;reject&quot;</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        out[&quot;supersedes&quot;] = p.get(&quot;supersedes&quot;)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        out[&quot;decision&quot;] = {&quot;verdict&quot;: verdict, &quot;ts&quot;: p.get(&quot;ts&quot;),</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                           &quot;seq&quot;: getattr(dec_ev, &quot;seq&quot;, None),</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                           &quot;principal&quot;: {&quot;kind&quot;: p.get(&quot;principal_kind&quot;),</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                                         &quot;id&quot;: p.get(&quot;principal_id&quot;),</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                                         &quot;channel&quot;: p.get(&quot;principal_channel&quot;)}}</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        out[&quot;policy&quot;] = {&quot;fingerprint&quot;: p.get(&quot;policy_fingerprint&quot;),</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                         &quot;refs&quot;: list(p.get(&quot;policy_refs&quot;) or []),</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                         &quot;guards&quot;: list(p.get(&quot;guard_ids&quot;) or [])}</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        # ② 按 call_id 关联请求 / 执行(同一 call_id 可能有多次求值 → 取首个请求)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        if call_id:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            tc = next((e for e in events</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                       if getattr(e, &quot;type&quot;, None) == &quot;tool.call&quot;</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                       and str((getattr(e, &quot;payload&quot;, None) or {})</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                               .get(&quot;call_id&quot;) or &quot;&quot;) == call_id), None)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            if tc is None:</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>                out[&quot;missing&quot;].append(&quot;tool.call&quot;)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            else:</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                tp = getattr(tc, &quot;payload&quot;, None) or {}</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                out[&quot;request&quot;] = {&quot;tool&quot;: tp.get(&quot;name&quot;, &quot;&quot;),</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                                  &quot;seq&quot;: getattr(tc, &quot;seq&quot;, None)}</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            tr = next((e for e in events</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                       if getattr(e, &quot;type&quot;, None) == &quot;tool.result&quot;</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                       and str((getattr(e, &quot;payload&quot;, None) or {})</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                               .get(&quot;call_id&quot;) or &quot;&quot;) == call_id), None)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            if tr is not None:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                rp = getattr(tr, &quot;payload&quot;, None) or {}</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                out[&quot;execution&quot;] = {&quot;ok&quot;: bool(rp.get(&quot;ok&quot;)),</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                                    &quot;seq&quot;: getattr(tr, &quot;seq&quot;, None)}</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        # ③ 审批段:approval_ref(= approval.requested 的 seq) → 结果事件</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        if approval_ref is not None:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            ref = int(approval_ref)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            outcome = next((e for e in events</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                            if getattr(e, &quot;type&quot;, None) in (</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                                &quot;approval.granted&quot;, &quot;approval.denied&quot;,</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                                &quot;approval.timeout&quot;)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                            and int((getattr(e, &quot;payload&quot;, None) or {})</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                                    .get(&quot;approval_id&quot;) or -1) == ref), None)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>            if outcome is None:</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                out[&quot;missing&quot;].append(&quot;approval&quot;)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            else:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                op = getattr(outcome, &quot;payload&quot;, None) or {}</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                out[&quot;approval&quot;] = {</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                    &quot;approval_id&quot;: ref,</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                    &quot;outcome&quot;: str(getattr(outcome, &quot;type&quot;, &quot;&quot;)).rsplit(&quot;.&quot;, 1)[-1],</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                    &quot;by&quot;: op.get(&quot;by&quot;, &quot;&quot;),</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                    &quot;seq&quot;: getattr(outcome, &quot;seq&quot;, None)}</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        # ④ 凭证段:按 decision_id 关联</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        rc = next((e for e in events</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                   if getattr(e, &quot;type&quot;, None) == &quot;receipt.emitted&quot;</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                   and str((getattr(e, &quot;payload&quot;, None) or {})</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                           .get(&quot;decision_id&quot;) or &quot;&quot;) == str(decision_id)), None)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        if rc is not None:</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>            rp = getattr(rc, &quot;payload&quot;, None) or {}</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            out[&quot;receipt&quot;] = {&quot;receipt_id&quot;: rp.get(&quot;receipt_id&quot;),</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                              &quot;kind&quot;: rp.get(&quot;kind&quot;), &quot;digest&quot;: rp.get(&quot;digest&quot;),</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                              &quot;prev_hash&quot;: rp.get(&quot;prev_hash&quot;),</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                              &quot;seq&quot;: getattr(rc, &quot;seq&quot;, None)}</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        elif _receipt_expected(verdict, approval_ref):</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            out[&quot;missing&quot;].append(&quot;receipt.emitted&quot;)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        return out</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code></code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    # ------------------------------------------------------------ 拒绝报告</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>    def denied_report(self, *, session_id: str = &quot;&quot;, since_seq: int = 0,</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                      ctx: Any = None) -&gt; list[dict]:</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        &quot;&quot;&quot;被拒调用清单(**replay-only**;按事件 seq 升序)。</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code></code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        **两类来源必须可区分**(``source`` 字段):</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code></code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        - ``&quot;guard.rejected&quot;`` —— 规则级拒绝(``INV-05`` 的强同步留痕);</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        - ``&quot;decision.issued&quot;`` —— 治理级拒绝(``verdict=reject``)。</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code></code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        每条记录键(冻结):``source`` / ``seq`` / ``tool`` / ``call_id`` /</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        ``guard_id`` / ``policy_ref`` / ``decision_id`` / ``reason`` / ``executed``。</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        ``executed`` = 该 ``call_id`` 是否存在配对 ``tool.result``(审计可证</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        &quot;拦了且没执行&quot;;``INV-A3``)。</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        events = self._events(ctx)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        if session_id:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            events = [e for e in events</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                      if str(getattr(e, &quot;session_id&quot;, &quot;&quot;) or &quot;&quot;) == session_id]</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        executed = {str((getattr(e, &quot;payload&quot;, None) or {}).get(&quot;call_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                    for e in events</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                    if getattr(e, &quot;type&quot;, None) == &quot;tool.result&quot;}</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        rows: list[dict] = []</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        for e in events:</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            seq = int(getattr(e, &quot;seq&quot;, 0) or 0)</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            if seq &lt;= int(since_seq or 0):</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                continue</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            t = getattr(e, &quot;type&quot;, None)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            p = getattr(e, &quot;payload&quot;, None) or {}</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>            if t == &quot;guard.rejected&quot;:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                cid = self._trace_call_id(e)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>                rows.append({</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                    &quot;source&quot;: &quot;guard.rejected&quot;, &quot;seq&quot;: seq,</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                    &quot;tool&quot;: str(p.get(&quot;tool&quot;) or &quot;&quot;), &quot;call_id&quot;: cid,</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                    &quot;guard_id&quot;: str(p.get(&quot;guard_id&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                    &quot;policy_ref&quot;: str(p.get(&quot;policy_ref&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>                    &quot;decision_id&quot;: &quot;&quot;, &quot;reason&quot;: str(p.get(&quot;reason&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                    &quot;executed&quot;: bool(cid) and cid in executed})</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            elif t == &quot;decision.issued&quot; and str(p.get(&quot;verdict&quot;) or &quot;&quot;) == &quot;reject&quot;:</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>                cid = self._trace_call_id(e)</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>                rows.append({</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                    &quot;source&quot;: &quot;decision.issued&quot;, &quot;seq&quot;: seq,</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>                    &quot;tool&quot;: str(p.get(&quot;tool&quot;) or &quot;&quot;), &quot;call_id&quot;: cid,</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>                    &quot;guard_id&quot;: &quot;&quot;, &quot;policy_ref&quot;: &quot;&quot;,</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>                    &quot;decision_id&quot;: str(p.get(&quot;decision_id&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>                    &quot;reason&quot;: &quot;,&quot;.join(str(r) for r in (p.get(&quot;policy_refs&quot;) or [])),</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>                    &quot;executed&quot;: bool(cid) and cid in executed})</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        rows.sort(key=lambda r: r[&quot;seq&quot;])</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        return rows</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code></code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code></code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    # ------------------------------------------------------------ 对账</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>    def _declared_holes(events: list) -&gt; list:</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        &quot;&quot;&quot;合法空洞声明(**只读**):对账用 ``SEQ-GAP`` 判据。</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code></code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        2026-09-21 R14-9:判据**唯一来源** ``events.declared_ranges``。此前本处自写一份</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        且**漏掉** ``session.recovered.fixed`` 里的 ``&quot;seq-holes:[…]&quot;`` 词条 ⇒ repair</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        刚声明过的空洞在治理对账里仍被报成 ``SEQ-GAP``(**假一致性发现**:对账把一次</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        合法修复当成治理缺陷)。</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        out: list = []</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        for e in events:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>            out.extend(declared_ranges(e))</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        return out</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code></code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>    async def reconcile(self, *, session_id: str = &quot;&quot;, ctx: Any = None,</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>                        emit: bool = False) -&gt; list[str]:</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        &quot;&quot;&quot;治理一致性对账(**默认纯只读**)。</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code></code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        **三类检查**(判据)：</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code></code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        - ``SEQ-GAP`` —— 事件 seq 中**未被声明区间覆盖**的空洞(复用既有</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>          ``events.envelope.check_seq_gap``);</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        - ``NO-GUARD-EVENT`` —— 某 ``call_id`` 有 ``tool.result`` 但**无**同</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>          ``call_id``(经 ``trace``)的 ``guard.evaluated``(``INV-04``);</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        - ``NO-RECEIPT-FOR-GRANT`` —— 某 ``approval.granted(approval_id=N)``</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>          找不到对应 D2(``approval_ref=N``),**或**找到但其 ``decision_id``</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>          无 ``receipt.emitted``(**INV-G2** 的运行时哨兵)。</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code></code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        ``CACHE-STALE`` **本版未实现**(登记 deferred debt:避免依赖</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        ``EvidenceCollector`` 内部结构)。</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code></code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        **写点(默认关)**：仅当 ``emit=True`` **且** findings 非空 **且** 会话在位,</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        才追加**一条既有** ``syscheck.fail``(不新增事件类型)。``findings`` 是</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        建议性事实,可由重跑复得,故该事件为**普通攒批**(非强同步)。</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code></code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        返回:排序后的 findings(**确定性**;空列表 = 一致);无会话 ⇒ ``[]`` 不抛。</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        events = self._events(ctx)</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        if session_id:</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>            events = [e for e in events</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>                      if str(getattr(e, &quot;session_id&quot;, &quot;&quot;) or &quot;&quot;) == session_id]</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        if not events:</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>            return []</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        findings: list[str] = []</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code></code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        # ① SEQ-GAP</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        seqs = [int(getattr(e, &quot;seq&quot;, 0) or 0) for e in events]</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        holes = check_seq_gap(seqs, self._declared_holes(events))</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>        if holes:</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>            findings.append(&quot;SEQ-GAP:&quot; + &quot;,&quot;.join(str(h) for h in holes))</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code></code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        # ② NO-GUARD-EVENT(执行了但没有规则级求值留痕)</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        executed = {str((getattr(e, &quot;payload&quot;, None) or {}).get(&quot;call_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>                    for e in events</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                    if getattr(e, &quot;type&quot;, None) == &quot;tool.result&quot;}</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        guarded = {self._trace_call_id(e) for e in events</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>                   if getattr(e, &quot;type&quot;, None) == &quot;guard.evaluated&quot;}</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        for cid in sorted(c for c in executed if c and c not in guarded):</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            findings.append(f&quot;NO-GUARD-EVENT:call_id={cid}&quot;)</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code></code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        # ③ NO-RECEIPT-FOR-GRANT</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        d2_by_ref: dict[int, str] = {}</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        for e in events:</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>            if getattr(e, &quot;type&quot;, None) != &quot;decision.issued&quot;:</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                continue</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>            ref = (getattr(e, &quot;payload&quot;, None) or {}).get(&quot;approval_ref&quot;)</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            if ref is not None:</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                d2_by_ref[int(ref)] = str(</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>                    (getattr(e, &quot;payload&quot;, None) or {}).get(&quot;decision_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        receipt_dids = {str((getattr(e, &quot;payload&quot;, None) or {})</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>                            .get(&quot;decision_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                        for e in events</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                        if getattr(e, &quot;type&quot;, None) == &quot;receipt.emitted&quot;}</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        grants = {int((getattr(e, &quot;payload&quot;, None) or {}).get(&quot;approval_id&quot;) or -1)</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>                  for e in events if getattr(e, &quot;type&quot;, None) == &quot;approval.granted&quot;}</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        for aid in sorted(g for g in grants if g &gt;= 0):</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>            did = d2_by_ref.get(aid)</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>            if not did or did not in receipt_dids:</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>                findings.append(f&quot;NO-RECEIPT-FOR-GRANT:approval_id={aid}&quot;)</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code></code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        findings.sort()                              # 确定性(顺序稳定)</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        if emit and findings:</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            sess = (getattr(ctx, &quot;session&quot;, None) if ctx is not None</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>                    else self.session)</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>            if sess is not None:</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>                r = sess.append(&quot;syscheck.fail&quot;,</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>                                {&quot;findings&quot;: list(findings),</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>                                 &quot;trigger&quot;: &quot;governance.reconcile&quot;},</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>                                actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>                if hasattr(r, &quot;__await__&quot;):</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>                    await r                          # 真实 SessionLog.append 为 async</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        return findings</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code></code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>    # ------------------------------------------------------------ 旧面兼容</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>    def legacy_session_audit(self, session: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        &quot;&quot;&quot;旧审计面兼容适配(**经注入**,不 import ``core``)。</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code></code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        转调装配层注入的 ``legacy_audit``(生产值 = ``telemetry.session_audit``),</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        **输出语义完全等价**。**未注入 ⇒ ``CYC-999`` fail-closed**(不静默返回空</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        dict —— 那会掩盖装配缺失)。</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        if self.legacy_audit is None:</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>            raise_code(&quot;CYC-999&quot;, module=&quot;governance.audit&quot;,</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>                       field=&quot;legacy_audit&quot;,</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>                       why=&quot;legacy 审计适配未注入(fail-closed);装配层须注入 &quot;</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>                           &quot;core.telemetry.session_audit&quot;)</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        return self.legacy_audit(session)</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code></code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code></code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>__all__ = [&quot;CHAIN_SEGMENTS&quot;, &quot;AuditSystem&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

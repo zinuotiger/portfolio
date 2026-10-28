@@ -1,0 +1,209 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/guard_rules.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/guard_rules.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 209 行</span></nav><main class="wrap source-page"><h1>pyharness/core/guard_rules.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：88dfecda2e2600da17116d7e8734673571e72a46<br>SHA-256（内容校验）：fbd5f7ed6d5acaaaafbbbabd3ab676d572219d75f84becdb24abb3b6e5ca4621</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 15 个类、函数与方法</summary><ul><li><a href="#L11">g_schema_match（函数） · L11–L13</a></li><li><a href="#L15">g_schema_check（异步函数） · L15–L32</a></li><li><a href="#L34">g_danger_match（函数） · L34–L36</a></li><li><a href="#L38">g_danger_check（异步函数） · L38–L50</a></li><li><a href="#L52">g_fs_path_match（函数） · L52–L54</a></li><li><a href="#L56">g_fs_path_check（异步函数） · L56–L73</a></li><li><a href="#L75">g_credential_read_match（函数） · L75–L77</a></li><li><a href="#L79">g_credential_read_check（异步函数） · L79–L109</a></li><li><a href="#L111">g_net_outbound_match（函数） · L111–L113</a></li><li><a href="#L115">_normalize_domain（函数） · L115–L130</a></li><li><a href="#L132">g_net_outbound_check（异步函数） · L132–L152</a></li><li><a href="#L154">g_exec_match（函数） · L154–L156</a></li><li><a href="#L158">g_exec_check（异步函数） · L158–L179</a></li><li><a href="#L181">g_overwrite_match（函数） · L181–L183</a></li><li><a href="#L185">g_overwrite_check（异步函数） · L185–L209</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Guard rules: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import os</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from typing import Any, Callable, Iterable, Optional</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from urllib.parse import urlsplit</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.core.guard_models import DEFAULT_CREDENTIAL_FILES, FS_DOMAINS, NET_DOMAINS, _CRED_BASENAMES, _EXEC_PREFIXES, _READ_PREFIXES, _WRITE_PREFIXES, _danger_of, _is_domain, _policy_of</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.core.guard_paths import _fs_target, _inside_workspace, _normcase_path, _path_from_args, _resolve_geometry</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>def g_schema_match(call: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    &quot;&quot;&quot;g1 match:所有工具 + 内部调用(链内复查入口 F026 已验的契约)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    return True</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>async def g_schema_check(call: Any, scope: Any,</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>                         *, validator: Optional[Callable[..., dict]] = None</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>                         ) -&gt; tuple[str, Optional[str]]:</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    &quot;&quot;&quot;g1 check:schema 复查——validator 注入(registry.validate_args 同型)。</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    失败(TLB-803)= 内层绕过证据(入口已验仍败 → 直调旁路),转 reject;</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    validator 未装配 → allow(入口 F026 已验,注册表落地后由装配层注入,</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    见偏离 2)。policy_ref = TLB-803(错误码即策略标识,ERR §2.11 口径)。</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    if validator is None:</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        return (&quot;allow&quot;, None)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    try:</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        validator(call.name, getattr(call, &quot;raw_args&quot;, {}) or {})</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    except PyHError as exc:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        if exc.code == &quot;TLB-803&quot;:</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>            return (&quot;reject&quot;, &quot;TLB-803&quot;)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        raise                                  # 其它错误码:注册表层契约问题,上抛</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    return (&quot;allow&quot;, None)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>def g_danger_match(call: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    &quot;&quot;&quot;g2 match:danger≠none 的工具才进判定(none/low 也过 match 由 check 放行)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    return _danger_of(call) != &quot;none&quot;</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>async def g_danger_check(call: Any, scope: Any) -&gt; tuple[str, Optional[str]]:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    &quot;&quot;&quot;g2 check:danger 分级默认策略(high→approval;critical→reject 不可审批)。</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    与 evaluate 层降级分工:本函数只按&quot;有通道假设&quot;输出分级决策;无通道/</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    critical 强制转 reject 由 evaluate 统一兜底(插件 approval 也覆盖,</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    见 danger_default_policy 与偏离 3)。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    level = _danger_of(call)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    if level == &quot;critical&quot;:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        return (&quot;reject&quot;, &quot;POL-DGR-1&quot;)          # critical 直拒,人类无批准入口</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    if level == &quot;high&quot;:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        return (&quot;approval&quot;, &quot;POL-DGR-1&quot;)        # 转审批(通道判定在 evaluate 层)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    return (&quot;allow&quot;, None)                       # none/low → 不反对</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code></code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>def g_fs_path_match(call: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    &quot;&quot;&quot;g3 match:文件域工具(fs.*/workspace.*;按名前缀,不信任描述)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    return any(_is_domain(d, call.name) for d in FS_DOMAINS)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>async def g_fs_path_check(call: Any, scope: Any,</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                          *, link_resolver: Optional[Callable[[str], str]] = None</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                          ) -&gt; tuple[str, Optional[str]]:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    &quot;&quot;&quot;g3 check:路径几何三闸(POL-FS-1/2/3;单点 resolve,见 _resolve_geometry)。</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code></code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    非文件域 → allow(match 兜底);workspace 根取自 scope.policy.workspace_root</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    (F055 fresh workspace);越界即拒,零副作用(只读探测)。</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    pol = _policy_of(scope)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    ws = getattr(pol, &quot;workspace_root&quot;, None) or &quot;&quot;</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    # A2:只读例外目录**仅对读类工具**生效(写类仍一律越界拒);与 provider 同判。</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    target, policy = _resolve_geometry(</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        _fs_target(call), ws, link_resolver=link_resolver,</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        read_only=call.name.startswith(_READ_PREFIXES),</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        extra_read_dirs=getattr(pol, &quot;read_extra_dirs&quot;, None) or ())</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    if policy:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        return (&quot;reject&quot;, policy)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    return (&quot;allow&quot;, None)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>def g_credential_read_match(call: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    &quot;&quot;&quot;g4 match:读路径类工具(读文件内容才有凭据外泄面)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    return call.name.startswith(_READ_PREFIXES)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code></code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>async def g_credential_read_check(</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        call: Any, scope: Any,</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        *, credential_paths: Optional[Iterable[str]] = None,</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        link_resolver: Optional[Callable[[str], str]] = None</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>) -&gt; tuple[str, Optional[str]]:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    &quot;&quot;&quot;g4 check:读目标命中凭据文件清单 → 拒(POL-CRED-1)。</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    命中口径双轨(见偏离 1 注释/模块 docstring):①规范化绝对路径 ∈ 清单;</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    ②文件形态名(basename = credentials.yaml/yml 等,纵深:凭据文件拷进</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    workspace 的任何位置都拦)。清单由装配注入(credentials.yaml 等,F016</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    credentials 模块落地后同源);路径先过 g3 几何(g4 只做命中比较)。</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    paths = list(credential_paths or ())</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    if not paths:                                # 未装配清单 → 兜底默认凭据文件</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        paths = [os.path.expanduser(p) for p in DEFAULT_CREDENTIAL_FILES]</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    ws = getattr(_policy_of(scope), &quot;workspace_root&quot;, None) or &quot;&quot;</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    target, policy = _resolve_geometry(_fs_target(call), ws,</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                                       link_resolver=link_resolver)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    if policy:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        return (&quot;reject&quot;, policy)                # 越界读:g3 语义优先(g4 不越权)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    norm_target = _normcase_path(target)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    for c in paths:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        norm_c = _normcase_path(os.path.abspath(os.path.expanduser(str(c))))</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        if norm_target == norm_c:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            return (&quot;reject&quot;, &quot;POL-CRED-1&quot;)      # 命中清单精确路径</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    base = os.path.basename(norm_target).lower()</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    if base in _CRED_BASENAMES or any(</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            os.path.basename(os.path.normpath(str(c))).lower() == base</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            for c in paths if str(c).strip()):</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        return (&quot;reject&quot;, &quot;POL-CRED-1&quot;)          # 凭据文件形态(名字即证据)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    return (&quot;allow&quot;, None)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>def g_net_outbound_match(call: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    &quot;&quot;&quot;g5 match:外发网络工具(web.*/net.*;按名前缀)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    return any(_is_domain(d, call.name) for d in NET_DOMAINS)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code></code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>def _normalize_domain(raw: Any) -&gt; str:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    &quot;&quot;&quot;域名/URL 归一为可比对 hostname(小写、去尾点、剥 scheme/port/路径)。</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code></code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    URL 用 urlsplit 取 hostname;裸域名/IP/带端口原样取首段;解析不出 → 空串</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    (空串必不在 allowlist → 拒,禁外发默认)。</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    s = str(raw or &quot;&quot;).strip().lower().rstrip(&quot;.&quot;)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    if not s:</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        return &quot;&quot;</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    try:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        if &quot;://&quot; not in s:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>            s = &quot;http://&quot; + s                    # scheme 缺失补默认(仅解析用)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        host = urlsplit(s).hostname</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        return (host or &quot;&quot;).lower().rstrip(&quot;.&quot;)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    except ValueError:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        return &quot;&quot;</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code></code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>async def g_net_outbound_check(call: Any, scope: Any</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                               ) -&gt; tuple[str, Optional[str]]:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    &quot;&quot;&quot;g5 check:目标域不在 scope.policy.allowed_domains → 拒(POL-NET-1)。</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code></code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    默认空 = 禁一切外发;字面 hostname 精确匹配(见偏离 8:子域/IP/混淆不隐含</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    放行;通配 &quot;*&quot; 是越权配置,config 层已拒,此处纵深不构成放行)。</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    目标域取参数 url/domain/host(URL 或裸域都归一);无域参数 → 拒(禁外发)。</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    allowed = getattr(_policy_of(scope), &quot;allowed_domains&quot;, None) or set()</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    args = getattr(call, &quot;safe_args&quot;, {}) or {}</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    raw = next((args[k] for k in (&quot;url&quot;, &quot;domain&quot;, &quot;host&quot;, &quot;target&quot;)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                if isinstance(args.get(k), str) and args[k].strip()), &quot;&quot;)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>    if not raw and call.name == &quot;web.search&quot;:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        # web.search 无 url 参数,g5 无法从 args 取目标 → 取装配期记录的后端 host</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        # (operator 配置的搜索端点;P3:web.search 恒拒)。空=未配后端 → 仍拒。</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        raw = getattr(_policy_of(scope), &quot;search_host&quot;, &quot;&quot;) or &quot;&quot;</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    host = _normalize_domain(raw)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    if not host or host not in {str(d).strip().lower().rstrip(&quot;.&quot;)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                                for d in allowed}:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        return (&quot;reject&quot;, &quot;POL-NET-1&quot;)</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    return (&quot;allow&quot;, None)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code></code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>def g_exec_match(call: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    &quot;&quot;&quot;g6 match:exec 域工具(exec.subprocess/exec.pty 等;按名前缀)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    return call.name.startswith(_EXEC_PREFIXES)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code></code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>async def g_exec_check(call: Any, scope: Any) -&gt; tuple[str, Optional[str]]:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    &quot;&quot;&quot;g6 check:exec 执行约束(POL-EXEC-1)。</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code></code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    三条拒绝面(任一命中即拒,零执行):</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>      ① strict 沙箱直拒——scope 前置已把 exec.* 判不可见(域外),此处兜底</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        (偏离 6:strict 下 exec 无&quot;scope 显式授权&quot;可言);</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>      ② args.shell is True ——禁 shell=True(解释器注入面);</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>      ③ cwd 绝对路径越出 workspace ——进程工作目录限沙箱。</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    其余(basic/off + 无 shell + cwd 界内/缺省)→ allow。</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    pol = _policy_of(scope)</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    if getattr(pol, &quot;sandbox_level&quot;, &quot;strict&quot;) == &quot;strict&quot;:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        return (&quot;reject&quot;, &quot;POL-EXEC-1&quot;)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    args = getattr(call, &quot;safe_args&quot;, {}) or {}</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    if args.get(&quot;shell&quot;) is True:</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        return (&quot;reject&quot;, &quot;POL-EXEC-1&quot;)</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>    cwd = args.get(&quot;cwd&quot;)</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    if isinstance(cwd, str) and cwd.strip() and os.path.isabs(cwd):</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        ws = getattr(pol, &quot;workspace_root&quot;, None) or &quot;&quot;</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        if not _inside_workspace(os.path.normpath(cwd), ws):</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            return (&quot;reject&quot;, &quot;POL-EXEC-1&quot;)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    return (&quot;allow&quot;, None)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code></code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>def g_overwrite_match(call: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>    &quot;&quot;&quot;g7 match:写类工具(fs.write_file 等;按动作形态,不信任描述)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>    return call.name.startswith(_WRITE_PREFIXES)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code></code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>async def g_overwrite_check(</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        call: Any, scope: Any,</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        *, path_exists: Optional[Callable[[str], bool]] = None</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>) -&gt; tuple[str, Optional[str]]:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    &quot;&quot;&quot;g7 check:覆写既有文件(含 append 读改写)→ approval(POL-OVW-1)。</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code></code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    规则:目标不存在(新建)→ allow;目标已存在 → approval(无论 mode=write 整覆</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    还是 mode=append 读改写——append 是 read_text()+整体覆写,同为声明外后门,</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>    SECURITY §4.2 A3);目标探测走注入 path_exists(缺省 os.path.exists,测试可</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>    替身化),探测失败视同不存在(新建路径)。路径先过 g3 几何,越界轮不到 g7</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>    (链序保证)。</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    args = getattr(call, &quot;safe_args&quot;, {}) or {}</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>    ws = getattr(_policy_of(scope), &quot;workspace_root&quot;, None) or &quot;&quot;</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    target, policy = _resolve_geometry(_path_from_args(args), ws)</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    if policy:</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        return (&quot;reject&quot;, policy)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>    probe = path_exists or os.path.exists</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    try:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        exists = bool(probe(target))</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>    except OSError:</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        exists = False                              # 探测异常 → 视同不存在</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    if not exists:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        return (&quot;allow&quot;, None)                      # 新建路径:无覆写面</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>    return (&quot;approval&quot;, &quot;POL-OVW-1&quot;)                # 已存在:write/append 均转审批</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

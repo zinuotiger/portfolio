@@ -1,0 +1,176 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/approval_binding.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/approval_binding.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 176 行</span></nav><main class="wrap source-page"><h1>pyharness/core/approval_binding.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：16be2f8dd7de942802597af878b3b935f4b56490<br>SHA-256（内容校验）：e87d9bfac7496d2145d4c6f265e36ad22f3f696ac1e95f9257eda6ae77f7ca6a</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 15 个类、函数与方法</summary><ul><li><a href="#L12">ApprovalBinding（类） · L12–L175</a><ul><li><a href="#L15">ApprovalBinding.set_default_channel（方法） · L15–L18</a></li><li><a href="#L20">ApprovalBinding._ensure_channel（方法） · L20–L43</a></li><li><a href="#L45">ApprovalBinding._headless_of（方法） · L45–L53</a></li><li><a href="#L55">ApprovalBinding._fingerprint（方法） · L55–L58</a></li><li><a href="#L60">ApprovalBinding.grant_binding（方法） · L60–L66</a></li><li><a href="#L68">ApprovalBinding.approval_ref_of（方法） · L68–L79</a></li><li><a href="#L81">ApprovalBinding._sid_of（方法） · L81–L87</a></li><li><a href="#L89">ApprovalBinding._log_of（方法） · L89–L92</a></li><li><a href="#L94">ApprovalBinding._new_waiter（方法） · L94–L112</a></li><li><a href="#L114">ApprovalBinding._cancel_timer（方法） · L114–L122</a></li><li><a href="#L124">ApprovalBinding.enable_trust（方法） · L124–L134</a></li><li><a href="#L136">ApprovalBinding.clear_trust（方法） · L136–L148</a></li><li><a href="#L150">ApprovalBinding._trust_hit（方法） · L150–L161</a></li><li><a href="#L163">ApprovalBinding._remember（方法） · L163–L175</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;ApprovalBinding operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import asyncio</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import hashlib</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from typing import TYPE_CHECKING, Any, Optional</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.core.channel import default_channel_of, require_channel</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.core.approval_models import logger, CHANNELS, _TRUST_SET, _TRUST_ADDED, _TRUST_HIT, _TRUST_CLEARED, _danger_of, canonical_json, ApprovalRequest, TrustEntry</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>if TYPE_CHECKING:  # 仅类型标注:executor 传入的 ToolCall 鸭子契约,运行期不依赖</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    pass</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>class ApprovalBinding:</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    &quot;&quot;&quot;ApprovalBinding responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    def set_default_channel(self, value: Any) -&gt; None:</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        &quot;&quot;&quot;装配期覆写 provider 缺省通道(N5):与构造期**同一归一化**,避免直写</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        ``_channel`` 绕过契约(``&quot;acp:&lt;id&gt;&quot;`` 必须归一为 ``&quot;acp&quot;``)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        self._channel = default_channel_of(value)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    def _ensure_channel(self, ctx: Any) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        &quot;&quot;&quot;通道判定(**唯一实现 = ``core.channel`` 契约**;N5)。</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        返回:交互通道的**归一化名**(``&quot;acp:&lt;id&gt;&quot;`` → ``&quot;acp&quot;``,保留 ACP 身份);</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        显式 headless → ``None``(``APR-501`` 入口,既有语义不变)。</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        抛:``MISSING`` / ``INVALID`` / ``UNKNOWN`` ⇒ ``APR-503`` fail-closed。</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        **与治理层 ``GovernanceContext.principal_of`` 同契约**(逐状态一致性由</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        ``tests/invariants`` 的真值表断言钉死)。</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        **修复点(N5-b/N6)**:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        - 判据由&quot;精确名 ``ch in CHANNELS``&quot;改为**前缀归一** ⇒ ``&quot;acp:&lt;id&gt;&quot;`` 不再</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>          被误判为 headless;</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        - **删除 ``self._channel`` 回退** ⇒ 硬编码的 ``&quot;desktop&quot;`` 不再劫持</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>          &quot;ctx 未声明通道&quot;的情形(那会让审批层以为有 desktop 人类通道,而治理层</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>          对同一输入 fail-closed —— 同一状态两个相反判定)。</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        headless 标志(构造期或 ctx 注入)优先且压过通道名(既有语义,不变)。</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        headless = self._headless_of(ctx)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        if headless:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            return None</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        st = require_channel(ctx, module=&quot;approval&quot;, field=&quot;channel&quot;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        return None if st.is_headless else st.name</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    def _headless_of(self, ctx: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        &quot;&quot;&quot;headless 解析:ctx 显式注入优先,回落构造缺省(agent.py 同款两级解析)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        try:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            v = getattr(ctx, &quot;headless&quot;, None)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        except Exception:                        # noqa: BLE001 防御第三方 getattr</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            v = None</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        if v is not None:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            return bool(v)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        return self._headless</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    def _fingerprint(self, tool: str, args: Any) -&gt; str:</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        &quot;&quot;&quot;规范化指纹 = sha1(tool + canonical_json(args))(合并与信任共用的唯一键)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        canon = canonical_json(args or {})</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        return hashlib.sha1(f&quot;{tool}\n{canon}&quot;.encode(&quot;utf-8&quot;)).hexdigest()</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    def grant_binding(self, call_id: str) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        &quot;&quot;&quot;最近一次 granted(含信任命中)为该 call_id 记录的绑定指纹(None = 无)。</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        executor 重入 guard 得到 approval 决策时读取:与当前调用参数指纹不一致</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        即&quot;批准针对异参数&quot;,拒绝执行(GRD-403)。</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        return self._grant_slots.get(call_id)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    def approval_ref_of(self, call_id: str) -&gt; Optional[int]:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        &quot;&quot;&quot;该 call_id 关联的 **approval identity**(S4-P1-2,只读)。</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        值 = 该次 ``approval.requested`` 的 seq(60s 合并批内共享 lead 的 identity)。</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        结算后仍可查(与 ``grant_binding`` 同型生命周期)。``None`` = 该 call_id</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        **从未产生过** approval 请求(普通 allow/reject 路径,或信任名单命中路径</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        ——后者不落 ``approval.requested``,故无 identity,属正确语义)。</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        治理层经执行侧把该值填入审批后重新授权决策(D2)的 ``approval_ref``;</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        不新造 identity、不用 decision_id/call_id 代替。</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        return self._ref_slots.get(call_id)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    def _sid_of(ctx: Any, sess: Any) -&gt; str:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        &quot;&quot;&quot;会话 id 解析:会话日志 sid 优先,回落 ctx 显式。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        sid = getattr(sess, &quot;sid&quot;, &quot;&quot;) or &quot;&quot;</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        if not sid:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            sid = getattr(ctx, &quot;session_id&quot;, &quot;&quot;) or getattr(ctx, &quot;sid&quot;, &quot;&quot;) or &quot;&quot;</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        return sid</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    def _log_of(ctx: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        &quot;&quot;&quot;会话日志解析:ctx.session(装配注入)优先,None = 未接线。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        return getattr(ctx, &quot;session&quot;, None)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    def _new_waiter(self, fp: str, call: Any, args_summary: str, ch: str,</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                    ttl: int, *, sid: str, sess: Any,</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                    binding: Optional[str] = None) -&gt; ApprovalRequest:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        &quot;&quot;&quot;构造等待者(waiter Future 由运行中事件循环创建;批先含自身)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        req = ApprovalRequest(</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            tool=call.name,</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            call_id=getattr(call, &quot;call_id&quot;, &quot;&quot;) or &quot;&quot;,</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            args_summary=args_summary,</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            danger=_danger_of(call),</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            ttl_ms=ttl,</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            channel=ch,</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>            fingerprint=fp,</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            binding=binding or fp,               # 未绑定 → 回落规范化指纹</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            session_id=sid,</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            log=sess,</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        )</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        req.waiter = asyncio.get_running_loop().create_future()</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        req.batch = [req]</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        return req</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    def _cancel_timer(req: ApprovalRequest) -&gt; None:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        &quot;&quot;&quot;取消 TTL 定时器(幂等)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        if req.timer is not None:</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            try:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                req.timer.cancel()</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            except Exception:                    # noqa: BLE001 已触发/已取消</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                pass</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            req.timer = None</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code></code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    def enable_trust(self, on: bool, *, by: str) -&gt; None:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        &quot;&quot;&quot;信任名单开关(默认关;仅交互会话可开;headless 调用直接拒绝 APR-501)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        self._require_human(by)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        if on and (self._headless_of(None) or self._channel not in CHANNELS):</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            raise_code(&quot;APR-501&quot;, op=&quot;enable_trust&quot;,</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>                       hint=&quot;headless/无交互通道:信任名单仅交互 cli/web/acp 可开,&quot;</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                            &quot;headless 永不生效&quot;)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        self._enabled = bool(on)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        self._emit_trust(_TRUST_SET, {&quot;on&quot;: self._enabled, &quot;by&quot;: by})</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        logger.info(&quot;approval 信任名单 %s(by=%s)&quot;,</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                    &quot;启用&quot; if self._enabled else &quot;关闭&quot;, by)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code></code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    def clear_trust(self, tool: Optional[str] = None) -&gt; int:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        &quot;&quot;&quot;清除信任(全会话或单工具;用户可手动撤销)→ 返回清除条数。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        if tool is None:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            count = len(self._trust)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            self._trust.clear()</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        else:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            victims = [fp for fp, e in self._trust.items() if e.tool == tool]</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            count = len(victims)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            for fp in victims:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                self._trust.pop(fp, None)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        if count:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            self._emit_trust(_TRUST_CLEARED, {&quot;tool&quot;: tool, &quot;count&quot;: count})</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        return count</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code></code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    def _trust_hit(self, fp: str, sid: str, ch: str) -&gt; bool:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        &quot;&quot;&quot;信任命中:开关开 + 交互通道 + 指纹在表(同会话);命中计数 + 留痕。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        if not self._enabled or ch not in CHANNELS:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            return False</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        entry = self._trust.get(fp)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        if entry is None:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            return False</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        if sid and entry.session_id and entry.session_id != sid:</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            return False                         # 会话级:他会话信任不生效</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        entry.hits += 1</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        self._emit_trust(_TRUST_HIT, {&quot;tool&quot;: entry.tool, &quot;hits&quot;: entry.hits})</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        return True                              # 命中 ≠ 跳过 guard(executor 重入)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code></code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    def _remember(self, req: ApprovalRequest) -&gt; None:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        &quot;&quot;&quot;granted 后写信任表(≤N 条 FIFO 淘汰)+ 留痕;critical 绝不在名单。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        if req.danger == &quot;critical&quot;:</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>            return                               # critical 类绝不在名单</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        entry = TrustEntry(tool=req.tool, fingerprint=req.fingerprint,</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                           by=req.by or &quot;system&quot;, added_seq=req.approval_id or 0,</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                           session_id=req.session_id)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        self._trust[req.fingerprint] = entry</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        while len(self._trust) &gt; self._trust_max:  # FIFO 淘汰(按加入序)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            oldest = min(self._trust.values(), key=lambda e: e.added_seq)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>            self._trust.pop(oldest.fingerprint, None)</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        self._emit_trust(_TRUST_ADDED, {&quot;tool&quot;: entry.tool, &quot;by&quot;: entry.by,</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                                        &quot;seq&quot;: entry.added_seq})</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

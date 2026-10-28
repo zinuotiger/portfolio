@@ -1,0 +1,191 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/compaction_projection.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/compaction_projection.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 191 行</span></nav><main class="wrap source-page"><h1>pyharness/core/compaction_projection.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：81d097342dd755bb015018b91a3a377cda0740d5<br>SHA-256（内容校验）：234bb767fe10eeda0dfbfbf2bbda39141dc3081d7f201a03a829c0fd746a5718</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 10 个类、函数与方法</summary><ul><li><a href="#L37">FoldCandidate（类） · L37–L44</a></li><li><a href="#L46">SegmentSummary（类） · L46–L53</a></li><li><a href="#L55">CompactReport（类） · L55–L64</a></li><li><a href="#L66">PrefixPlan（类） · L66–L73</a></li><li><a href="#L75">_count_text_tokens（函数） · L75–L80</a></li><li><a href="#L82">estimate_tokens（函数） · L82–L95</a></li><li><a href="#L97">_payload_text（函数） · L97–L101</a></li><li><a href="#L103">_projection（函数） · L103–L132</a></li><li><a href="#L134">render_segment（函数） · L134–L174</a></li><li><a href="#L176">render_compacted_message（函数） · L176–L185</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Compaction projection: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import logging</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import re</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from typing import Optional, Union</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.events import Envelope</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>log = logging.getLogger(&quot;pyharness.compaction&quot;)</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>DEFAULT_KEEP_RECENT_ROUNDS: int = 12     # 保留最近 12 轮原文</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>DEFAULT_WINDOW_RATIO: float = 0.75       # 触发①:派生 ≥75% 窗口</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>DEFAULT_MIN_NEW_ROUNDS: int = 10         # 触发②:距上次压缩新增 ≥10 轮</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>DEFAULT_SUMMARY_BUDGET: int = 400        # 每段摘要 token 预算</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>DEFAULT_WINDOW_TOKENS: int = 65536       # 窗口兜底(scope.window_tokens 数据源优先)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>_DEGRADE_KEEP: frozenset = frozenset({</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    &quot;user.message&quot;, &quot;agent.message&quot;, &quot;session.renamed&quot;,</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    &quot;plan.proposed&quot;, &quot;plan.approved&quot;, &quot;plan.rejected&quot;,</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    &quot;plan.done&quot;, &quot;plan.aborted&quot;, &quot;goal.updated&quot;, &quot;goal.completed&quot;,</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    &quot;todo.updated&quot;, &quot;context.compacted&quot;,</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>})</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>_DEGRADE_MAX_CHARS: int = 600           # 降级摘要截断保底(spec)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code></code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>_ASCII_WORD = re.compile(r&quot;[A-Za-z0-9_./\\@:+-]+&quot;)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>_CJK_RANGE = range(0x4E00, 0x9FFF + 1)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code></code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>_MSG_OVERHEAD = 4                        # role/content 结构开销</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>class FoldCandidate:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    &quot;&quot;&quot;折叠候选:一个完整任务段(整段不切半)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    task_id: str</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    range: tuple[int, int]          # 段 [start_seq, end_seq] 闭区间</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    start_ts: str = &quot;&quot;</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    n_events: int = 0</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>class SegmentSummary:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    &quot;&quot;&quot;单段摘要产物(range + 摘要文本 + 降级标记 + token 数)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    range: tuple[int, int]</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    summary: str                    # ≤~800 字(spec;摘要预算 400 token 约束)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    degraded: bool = False          # True = 规则降级产物(非 LLM 摘要)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    tokens: int = 0</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>class CompactReport:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    &quot;&quot;&quot;压缩报告:fold 明细 + 前后 token + 保留轮数 + 触发原因。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    folds: list[SegmentSummary] = field(default_factory=list)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    tokens_before: int = 0</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    tokens_after: int = 0</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    kept_recent_rounds: int = DEFAULT_KEEP_RECENT_ROUNDS</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    reason: str = &quot;window:0 degraded&quot;</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    noop: bool = False</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code></code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>class PrefixPlan:</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    &quot;&quot;&quot;KV 缓存前缀规划:稳定前缀终点 = 最新 compacted 之后(其后只有尾部追加)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    stable_upto_seq: int = 0        # 稳定前缀终点 seq(0 = 无可复用锚)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    prefix_tokens: int = 0</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    cacheable: bool = False</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    blocks: list = field(default_factory=list)   # 历次折叠块 [[lo, hi], ...]</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>def _count_text_tokens(text: str) -&gt; int:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    &quot;&quot;&quot;纯文本 token 粗估(确定性;与 session._estimate_tokens 同口径):</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    中文逐字 1 token,西文词按 4 字符 ≈ 1 token。仅供相对比较与声明留痕。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    cjk = sum(1 for ch in text if ord(ch) in _CJK_RANGE)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    words = sum(max(1, (len(w) + 3) // 4) for w in _ASCII_WORD.findall(text))</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    return cjk + words</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>def estimate_tokens(value: Union[str, dict, list, tuple, None]) -&gt; int:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    &quot;&quot;&quot;token 估算入口:str = 文本;dict = 消息(取 content,含结构开销);</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    list/tuple = 逐元素累加(消息列表每条 +_MSG_OVERHEAD)。纯确定性,无 IO。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    if value is None:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        return 0</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    if isinstance(value, str):</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        return _count_text_tokens(value) + _MSG_OVERHEAD</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    if isinstance(value, dict):</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        content = value.get(&quot;content&quot;, &quot;&quot;) if value.get(&quot;role&quot;) else value</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        if isinstance(content, (list, tuple)):</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            import json</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            content = json.dumps(list(content), ensure_ascii=False)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        return _count_text_tokens(str(content)) + _MSG_OVERHEAD</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    return sum(estimate_tokens(item) for item in value)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>def _payload_text(env: Envelope) -&gt; str:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    &quot;&quot;&quot;事件载荷 → 摘要/降级可用的正文文本(取 content/标题/描述等决策字段)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    p = env.payload</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    return (p.get(&quot;content&quot;) or p.get(&quot;new_title&quot;) or p.get(&quot;desc&quot;)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            or p.get(&quot;summary&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code></code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>def _projection(events: list[Envelope]) -&gt; list[dict]:</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    &quot;&quot;&quot;区间事件 → 派生消息投影(会计/前缀规划用;语义 = session reducer 对区间的</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    映射,EVENT-SCHEMA §4.2:user→user、llm.response(有 content)→assistant、</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    空 content response + tool.result → tool 配对、context.compacted → system</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    摘要消息)。纯函数,不建历史,只用于 token 差值口径与前缀估算。</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    偏离:user.message_edited 的跨区间改写(target 可能在本区间外)不追,会计</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    近似(声明留痕用途,误差仅影响 tokens_after 数值精度,不影响任何决策)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    msgs: list[dict] = []</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    pending: Optional[int] = None       # 待配对 tool 的空 content response seq</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    for ev in events:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        t = ev.type</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        if t == &quot;user.message&quot;:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            msgs.append({&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: ev.payload[&quot;content&quot;]})</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        elif t == &quot;context.compacted&quot;:</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            msgs.append({&quot;role&quot;: &quot;system&quot;,</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                         &quot;content&quot;: f&quot;[已压缩 {ev.payload[&#x27;ranges&#x27;]}] &quot;</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                                    f&quot;{ev.payload.get(&#x27;summary&#x27;, &#x27;&#x27;)}&quot;})</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        elif t == &quot;llm.response&quot;:</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            c = ev.payload.get(&quot;content&quot;) or &quot;&quot;</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            if c:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                msgs.append({&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: c})</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            else:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                pending = ev.seq</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        elif t == &quot;tool.result&quot; and pending is not None:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            msgs.append({&quot;role&quot;: &quot;tool&quot;, &quot;content&quot;: ev.payload[&quot;summary&quot;],</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>                         &quot;name&quot;: ev.payload[&quot;name&quot;]})</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            pending = None</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        # 其余事件(guard.*/approval.*/plan.*/session.*/tool.call…)不进 LLM 投影</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    return msgs</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>def render_segment(events: list[Envelope], max_chars: int = 6000) -&gt; str:</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    &quot;&quot;&quot;任务段 → 可摘要文本(决策轮文本化;tool 结果截断,安全审计细节不入文本)。</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code></code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    SECURITY.md §3.1:guard.*/approval.* 细节一律不进入摘要输入——模型摘要</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    不可能编造其未见内容(结构上保证 guard 拒绝记录不进摘要)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    lines: list[str] = []</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    for ev in events:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        t = ev.type</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        if t in (&quot;guard.rejected&quot;, &quot;guard.evaluated&quot;, &quot;approval.requested&quot;,</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                 &quot;approval.granted&quot;, &quot;approval.denied&quot;, &quot;approval.timeout&quot;,</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                 &quot;tool.call&quot;):</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            continue                    # 安全审计/审批细节不进摘要(§3.1)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        if t == &quot;user.message&quot;:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            lines.append(f&quot;用户: {ev.payload[&#x27;content&#x27;]}&quot;)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        elif t == &quot;agent.message&quot;:</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>            lines.append(f&quot;助手: {ev.payload[&#x27;content&#x27;]}&quot;)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        elif t == &quot;llm.response&quot;:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>            c = ev.payload.get(&quot;content&quot;) or &quot;&quot;</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            if c:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>                lines.append(f&quot;模型: {c}&quot;)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        elif t == &quot;tool.result&quot;:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>            summ = (ev.payload.get(&quot;summary&quot;) or &quot;&quot;)[:200]   # 工具原始结果截断</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            lines.append(f&quot;工具[{ev.payload.get(&#x27;name&#x27;, &#x27;?&#x27;)}]: {summ}&quot;)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        elif t == &quot;plan.proposed&quot;:</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            lines.append(f&quot;计划目标: {ev.payload.get(&#x27;goal&#x27;, &#x27;&#x27;)}&quot;)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        elif t == &quot;goal.updated&quot;:</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            gid = ev.payload.get(&quot;goal_id&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            st = ev.payload.get(&quot;status&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>            lines.append(f&quot;目标[{gid}]: {st} &quot;</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                         f&quot;{ev.payload.get(&#x27;note&#x27;) or ev.payload.get(&#x27;desc&#x27;) or &#x27;&#x27;}&quot;)</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        elif t == &quot;todo.updated&quot;:</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>            todos = ev.payload.get(&quot;todos&quot;) or []</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>            # payload 已 model_dump 归一:todo 项为 dict(兼容对象形态)</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            done_n = sum(1 for it in todos</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                         if (it.get(&quot;done&quot;) if isinstance(it, dict)</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                             else getattr(it, &quot;done&quot;, False)))</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>            lines.append(f&quot;待办更新: {done_n}/{len(todos)} 项完成&quot;)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        elif t == &quot;context.compacted&quot;:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            lines.append(f&quot;(此前折叠: {ev.payload[&#x27;ranges&#x27;]})&quot;)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    text = &quot;\n&quot;.join(x for x in lines if x).strip()</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>    return text[:max_chars]</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code></code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>def render_compacted_message(env: Envelope) -&gt; str:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    &quot;&quot;&quot;compacted 声明的人类可读渲染(EVENT-SCHEMA §4.2 摘要代区间锚文本)。</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code></code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    说明:会话 reducer 对 context.compacted 的实际插桩格式由 session.</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    _fold_history 决定(`[已压缩 {ranges}] {summary}`,ranges 为 Python 列表字面</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    量);本函数按 compaction 规格提供 [lo-hi] 紧凑形态,供压缩报告与</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>    kv_prefix_plan 前缀内容估算使用(与 reducer 无耦合,纯只读工具)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>    p = env.payload</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>    rng = &quot;,&quot;.join(f&quot;[{lo}-{hi}]&quot; for lo, hi in p.get(&quot;ranges&quot;, []))</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    return f&quot;[已压缩 {rng}] {p.get(&#x27;summary&#x27;, &#x27;&#x27;)}&quot;</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code></code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>FoldCandidate.__module__ = &#x27;pyharness.core.compaction&#x27;</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>SegmentSummary.__module__ = &#x27;pyharness.core.compaction&#x27;</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>CompactReport.__module__ = &#x27;pyharness.core.compaction&#x27;</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>PrefixPlan.__module__ = &#x27;pyharness.core.compaction&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

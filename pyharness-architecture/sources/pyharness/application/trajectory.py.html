@@ -1,0 +1,240 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/trajectory.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/trajectory.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 240 行</span></nav><main class="wrap source-page"><h1>pyharness/application/trajectory.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：1a4d934e20821df86354b78c79c1035817c5f643<br>SHA-256（内容校验）：8f67ac04faca7600042b22d01bfcee93771f1df477a2240ed291ec9dfe79003d</p><p><a href="../../../architecture-detailed.html?node=trajectory">ExecutionTrajectory（执行轨迹投影）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 5 个类、函数与方法</summary><ul><li><a href="#L11">project_trajectory（函数） · L11–L209</a><ul><li><a href="#L22">project_trajectory.ident（方法） · L22–L23</a></li><li><a href="#L25">project_trajectory.node（方法） · L25–L42</a></li><li><a href="#L44">project_trajectory.touch（方法） · L44–L49</a></li></ul></li><li><a href="#L212">trajectory_page（函数） · L212–L240</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Read-only public operation projection shared by all trajectory entry points.</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Event references remain session-qualified. No model bodies, tool arguments or</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>private reasoning are copied; relations must be backed by explicit identifiers.</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from datetime import datetime</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.platform_projection import project, subtask_history, summary</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.events import call_id_of</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>def project_trajectory(sid, events, live_tasks=(), active_children=(), active_workflows=()):</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    events = list(events)</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    view = project(sid, events, live_tasks, trace_limit=None)</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    spans = {s[&#x27;span_id&#x27;]: s for s in view[&#x27;trace&#x27;]}</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    steps = {s[&#x27;step_id&#x27;]: s for s in view[&#x27;steps&#x27;]}</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    children = {s[&#x27;session_id&#x27;]: s for s in subtask_history(sid, events, active_children)}</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    nodes, aliases, calls, approvals, workflows, artifacts = {}, {}, {}, {}, {}, {}</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    active_task = None</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    pause = None</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    questions = {}</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    def ident(seq):</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        return f&#x27;{sid}~{seq}&#x27;</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    def node(e, name, type_=None, node_id=None):</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        key = node_id or ident(e.seq)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        if key not in nodes:</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>            span = spans.get(ident(e.seq), {})</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>            nodes[key] = dict(span, span_id=key, session_id=sid,</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>                run_id=span.get(&#x27;run_id&#x27;) or (f&#x27;{sid}~{active_task}&#x27; if active_task else None),</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>                parent_span_id=span.get(&#x27;parent_span_id&#x27;), type=type_ or e.type,</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>                name=summary(name,120), status=span.get(&#x27;status&#x27;,&#x27;recorded&#x27;),</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>                started_at=e.ts, finished_at=span.get(&#x27;finished_at&#x27;),</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                duration_ms=span.get(&#x27;duration_ms&#x27;), output_summary=span.get(&#x27;output_summary&#x27;,&#x27;&#x27;),</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                input_summary=&#x27;&#x27;, event_seqs=[], transitions=[], lane=sid,</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>                error_code=span.get(&#x27;error_code&#x27;), token_usage=None, cost=None,</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                waits=[], artifacts=[])</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        aliases[ident(e.seq)] = key</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        item = nodes[key]</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        if e.seq not in item[&#x27;event_seqs&#x27;]:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            item[&#x27;event_seqs&#x27;].append(e.seq)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        return item</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    def touch(item,e,status=None):</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        aliases[ident(e.seq)]=item[&#x27;span_id&#x27;]</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        if e.seq not in item[&#x27;event_seqs&#x27;]:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            item[&#x27;event_seqs&#x27;].append(e.seq)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        if status:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            item[&#x27;transitions&#x27;].append({&#x27;ts&#x27;:e.ts,&#x27;status&#x27;:status})</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    for e in events:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        p,kind=e.payload,e.type</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        if kind==&#x27;segment.start&#x27;:active_task=p.get(&#x27;task_id&#x27;)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        if kind==&#x27;task.enqueued&#x27;:</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>            task=p.get(&#x27;task_id&#x27;) or getattr(e,&#x27;task_id&#x27;,None)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>            item=node(e,&#x27;排队等待&#x27;,&#x27;task.queue&#x27;,f&#x27;{sid}~queue~{task}&#x27;)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            item.update(run_id=f&#x27;{sid}~{task}&#x27;,status=&#x27;queued&#x27;)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            touch(item,e,&#x27;queued&#x27;)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        elif kind==&#x27;task.started&#x27;:</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            task=p.get(&#x27;task_id&#x27;) or getattr(e,&#x27;task_id&#x27;,None)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            item=nodes.get(f&#x27;{sid}~queue~{task}&#x27;)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            if item:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                item.update(status=&#x27;completed&#x27;,finished_at=e.ts)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                touch(item,e,&#x27;completed&#x27;)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        elif kind in {&#x27;llm.request&#x27;,&#x27;tool.call&#x27;}:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            role=(p.get(&#x27;diagnostics&#x27;) or {}).get(&#x27;role&#x27;) or p.get(&#x27;role&#x27;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            if role in {&#x27;title_generation&#x27;,&#x27;probe&#x27;,&#x27;other&#x27;}:continue</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            tool=p.get(&#x27;name&#x27;) or p.get(&#x27;tool&#x27;) or &#x27;工具调用&#x27;</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            item=node(e,&#x27;模型请求&#x27; if kind==&#x27;llm.request&#x27; else &#x27;等待子任务 · &#x27;+tool if tool in {&#x27;subagent.join&#x27;,&#x27;subagent_join&#x27;} else tool)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            touch(item,e,&#x27;running&#x27;)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            if kind==&#x27;tool.call&#x27; and call_id_of(e):calls[call_id_of(e)]=item</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            step=steps.get(ident(e.seq))</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            if step:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                item.update(status=step[&#x27;status&#x27;],finished_at=step[&#x27;finished_at&#x27;],error_code=step.get(&#x27;error_code&#x27;))</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        elif kind in {&#x27;llm.response&#x27;,&#x27;llm.error&#x27;,&#x27;llm.retry&#x27;,&#x27;llm.usage&#x27;}:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            request=p.get(&#x27;request_seq&#x27;) or (p.get(&#x27;diagnostics&#x27;) or {}).get(&#x27;request_seq&#x27;)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            item=nodes.get(ident(request)) if request else None</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            if item:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                status=&#x27;failed&#x27; if kind==&#x27;llm.error&#x27; else &#x27;retrying&#x27; if kind==&#x27;llm.retry&#x27; else &#x27;completed&#x27; if kind==&#x27;llm.response&#x27; else None</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                touch(item,e,status)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                if kind==&#x27;llm.response&#x27;:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                    item.update(status=&#x27;completed&#x27;,finished_at=e.ts)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                elif kind==&#x27;llm.error&#x27;:item.update(status=&#x27;failed&#x27;,finished_at=e.ts,error_code=p.get(&#x27;code&#x27;))</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                elif kind==&#x27;llm.usage&#x27;:item.update(token_usage=p.get(&#x27;in_tokens&#x27;,0)+p.get(&#x27;out_tokens&#x27;,0),cost=p.get(&#x27;cost_est&#x27;))</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            elif kind in {&#x27;llm.error&#x27;,&#x27;llm.retry&#x27;}:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                item=node(e,&#x27;模型失败&#x27; if kind==&#x27;llm.error&#x27; else &#x27;模型重试&#x27;)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                item[&#x27;status&#x27;]=&#x27;failed&#x27; if kind==&#x27;llm.error&#x27; else &#x27;recorded&#x27;</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                if kind==&#x27;llm.retry&#x27;:item[&#x27;output_summary&#x27;]=&#x27;已记录重试行为；缺少请求关联，无法确认对应结果。&#x27;</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        elif kind in {&#x27;tool.result&#x27;,&#x27;tool.error&#x27;}:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            item=calls.get(call_id_of(e))</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            if item:touch(item,e,&#x27;completed&#x27; if kind==&#x27;tool.result&#x27; and p.get(&#x27;ok&#x27;) else &#x27;failed&#x27;)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            else:node(e,&#x27;未配对的工具结果&#x27;)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        elif kind==&#x27;approval.requested&#x27;:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            item=calls.get(call_id_of(e)) or node(e,&#x27;等待审批&#x27;)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            approvals[e.seq]=item</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            item[&#x27;waits&#x27;].append({&#x27;approval_id&#x27;:f&#x27;{sid}~{e.seq}&#x27;,&#x27;started_at&#x27;:e.ts,&#x27;finished_at&#x27;:None,&#x27;status&#x27;:&#x27;pending&#x27;})</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            touch(item,e,&#x27;waiting_approval&#x27;)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            if not item.get(&#x27;finished_at&#x27;):item[&#x27;status&#x27;]=&#x27;waiting_approval&#x27;</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        elif kind in {&#x27;approval.granted&#x27;,&#x27;approval.denied&#x27;,&#x27;approval.timeout&#x27;}:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            item=approvals.get(p.get(&#x27;approval_id&#x27;))</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            if item:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                status=&#x27;running&#x27; if kind==&#x27;approval.granted&#x27; else &#x27;failed&#x27;</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                touch(item,e,status)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                wait=next((w for w in item[&#x27;waits&#x27;] if w[&#x27;approval_id&#x27;]==f&quot;{sid}~{p.get(&#x27;approval_id&#x27;)}&quot;),None)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                if wait:wait.update(finished_at=e.ts,status=&#x27;approved&#x27; if kind==&#x27;approval.granted&#x27; else &#x27;rejected&#x27;)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                if not item.get(&#x27;finished_at&#x27;):item[&#x27;status&#x27;]=status</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        elif kind==&#x27;subagent.spawned&#x27;:</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            child=children[p[&#x27;sub_id&#x27;]]</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            item=node(e,&#x27;子任务：&#x27;+summary(p.get(&#x27;task&#x27;) or p[&#x27;sub_id&#x27;],80),&#x27;subagent&#x27;)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            item.update(child_session_id=p[&#x27;sub_id&#x27;],lane=p[&#x27;sub_id&#x27;],parent_span_id=ident(p[&#x27;parent_seq&#x27;]),</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                run_id=child.get(&#x27;parent_run_id&#x27;),status=child[&#x27;status&#x27;],finished_at=child[&#x27;finished_at&#x27;],</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                output_summary=child.get(&#x27;summary&#x27;,&#x27;&#x27;),error_code=child.get(&#x27;error_code&#x27;))</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            if child.get(&#x27;error_code&#x27;)==&#x27;runtime_interrupted&#x27;:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                item.update(status=&#x27;unknown&#x27;,output_summary=&#x27;父会话未记录子任务结束，运行句柄不可得；展开查看子会话事实。&#x27;)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>            touch(item,e,&#x27;running&#x27;)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        elif kind in {&#x27;subagent.joined&#x27;,&#x27;subagent.failed&#x27;}:</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            item=next((n for n in nodes.values() if n.get(&#x27;child_session_id&#x27;)==p[&#x27;sub_id&#x27;]),None)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            if item:touch(item,e,&#x27;completed&#x27; if kind==&#x27;subagent.joined&#x27; else &#x27;failed&#x27;)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        elif kind==&#x27;workflow.step&#x27;:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            group=(p[&#x27;wf_name&#x27;],p[&#x27;step_idx&#x27;])</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            base_key=f&quot;{sid}~workflow~{p[&#x27;wf_name&#x27;]}~{p[&#x27;step_idx&#x27;]}&quot;</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            linked=f&quot;{sid}~{p[&#x27;task_id&#x27;]}&quot; if p.get(&#x27;task_id&#x27;) else None</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            existing=[n for n in nodes.values() if n.get(&#x27;workflow_name&#x27;)==group[0] and n.get(&#x27;step_index&#x27;)==group[1]]</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            exact=next((n for n in existing if linked and n.get(&#x27;linked_run_id&#x27;)==linked),None)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            unbound=[n for n in existing if not n.get(&#x27;linked_run_id&#x27;) and n[&#x27;status&#x27;]==&#x27;running&#x27;]</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>            if exact:key=exact[&#x27;span_id&#x27;]</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>            elif linked:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>                key=unbound[0][&#x27;span_id&#x27;] if len(unbound)==1 else base_key+&#x27;~task~&#x27;+p[&#x27;task_id&#x27;]</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            elif p.get(&#x27;state&#x27;)==&#x27;started&#x27;:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                key=base_key if not existing else base_key+&#x27;~start~&#x27;+str(e.seq)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            else:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                # Legacy endings without task identities can close only a unique</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                # currently open operation; concurrent ambiguous facts stay separate.</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                candidates=[n for n in existing if n[&#x27;status&#x27;]==&#x27;running&#x27;]</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                key=candidates[0][&#x27;span_id&#x27;] if len(candidates)==1 else base_key+&#x27;~end~&#x27;+str(e.seq)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            item=node(e,f&quot;步骤 {p[&#x27;step_idx&#x27;]+1}：{summary(p[&#x27;action&#x27;],100)}&quot;,&#x27;workflow.step&#x27;,key)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            status={&#x27;started&#x27;:&#x27;running&#x27;,&#x27;done&#x27;:&#x27;completed&#x27;,&#x27;failed&#x27;:&#x27;failed&#x27;}.get(p.get(&#x27;state&#x27;),&#x27;recorded&#x27;)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            item.update(workflow_name=p[&#x27;wf_name&#x27;],step_index=p[&#x27;step_idx&#x27;],status=status)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            if linked:item[&#x27;linked_run_id&#x27;]=linked</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            if status in {&#x27;completed&#x27;,&#x27;failed&#x27;}:item[&#x27;finished_at&#x27;]=e.ts</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            touch(item,e,status)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            workflows.setdefault(p[&#x27;wf_name&#x27;],[])</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            if key not in workflows[p[&#x27;wf_name&#x27;]]:workflows[p[&#x27;wf_name&#x27;]].append(key)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        elif kind==&#x27;platform.artifact&#x27;:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            record=p.get(&#x27;record&#x27;,{})</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            aid=record.get(&#x27;artifact_id&#x27;)</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            if aid:</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                if p.get(&#x27;action&#x27;)==&#x27;deleted&#x27;:artifacts.pop(aid,None)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                else:artifacts[aid]={k:summary(record[k],180) if k in {&#x27;filename&#x27;,&#x27;media_type&#x27;} else record[k]</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                    for k in (&#x27;artifact_id&#x27;,&#x27;run_id&#x27;,&#x27;filename&#x27;,&#x27;media_type&#x27;,&#x27;size&#x27;) if k in record}</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        elif kind==&#x27;queue.suspended&#x27;:</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            pause=node(e,&#x27;队列暂停等待&#x27;)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            pause.update(status=&#x27;paused&#x27;,output_summary=summary(p.get(&#x27;reason&#x27;,&#x27;&#x27;),400))</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>            touch(pause,e,&#x27;paused&#x27;)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        elif kind==&#x27;queue.resumed&#x27;:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            if pause:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                pause.update(status=&#x27;completed&#x27;,finished_at=e.ts)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                touch(pause,e,&#x27;completed&#x27;)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                pause=None</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            else:node(e,&#x27;队列恢复（未记录暂停起点）&#x27;)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        elif kind==&#x27;user.answer&#x27;:</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>            item=questions.get(p.get(&#x27;ask_id&#x27;))</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>            if item:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                item.update(status=&#x27;completed&#x27;,finished_at=e.ts)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                touch(item,e,&#x27;completed&#x27;)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        elif kind in {&#x27;agent.message&#x27;,&#x27;system.error&#x27;,&#x27;user.question&#x27;}:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            item=node(e,{&#x27;agent.message&#x27;:&#x27;已生成回复&#x27;,&#x27;system.error&#x27;:&#x27;执行异常&#x27;,&#x27;queue.suspended&#x27;:&#x27;队列已暂停&#x27;,&#x27;queue.resumed&#x27;:&#x27;队列已恢复&#x27;,&#x27;user.question&#x27;:&#x27;等待用户回答&#x27;}[kind])</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>            if kind==&#x27;agent.message&#x27;:item.update(status=&#x27;completed&#x27;,output_summary=summary(p.get(&#x27;content&#x27;,&#x27;&#x27;),800))</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            elif kind==&#x27;system.error&#x27;:item[&#x27;status&#x27;]=spans.get(ident(e.seq),{}).get(&#x27;status&#x27;,&#x27;failed&#x27;)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>            elif kind in {&#x27;queue.suspended&#x27;,&#x27;user.question&#x27;}:item[&#x27;status&#x27;]=&#x27;paused&#x27;</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>            item[&#x27;output_summary&#x27;]=summary(p.get(&#x27;reason&#x27;) or item[&#x27;output_summary&#x27;],800)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            if kind==&#x27;user.question&#x27;:questions[e.seq]=item</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        if kind in {&#x27;task.failed&#x27;,&#x27;task.completed&#x27;,&#x27;segment.end&#x27;,&#x27;system.cancelled&#x27;}:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            task=p.get(&#x27;task_id&#x27;) or getattr(e,&#x27;task_id&#x27;,None) or active_task</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>            for item in nodes.values():</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                if item[&#x27;run_id&#x27;]==f&#x27;{sid}~{task}&#x27;:touch(item,e)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        if kind==&#x27;segment.end&#x27;:active_task=None</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code></code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    # Map response/result anchors to the merged operation, never to neighboring events.</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    for item in nodes.values():</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        parent=item.get(&#x27;parent_span_id&#x27;)</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        item[&#x27;parent_span_id&#x27;]=aliases.get(parent,parent)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        if item[&#x27;parent_span_id&#x27;]==item[&#x27;span_id&#x27;]:item[&#x27;parent_span_id&#x27;]=None</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        if item.get(&#x27;finished_at&#x27;) and item.get(&#x27;duration_ms&#x27;) is None:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>            try:</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                elapsed=(datetime.fromisoformat(item[&#x27;finished_at&#x27;])-datetime.fromisoformat(item[&#x27;started_at&#x27;])).total_seconds()*1000</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                item[&#x27;duration_ms&#x27;]=elapsed if elapsed&gt;=0 else None</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            except (ValueError,TypeError):pass</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        if item[&#x27;type&#x27;]==&#x27;workflow.step&#x27;:</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>            # Explicit workflow order is a dependency, not a claim of parallel branches.</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>            prior=[n for n in nodes.values() if n.get(&#x27;workflow_name&#x27;)==item[&#x27;workflow_name&#x27;]</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                and n.get(&#x27;step_index&#x27;)==item[&#x27;step_index&#x27;]-1]</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            if len(prior)==1:item[&#x27;parent_span_id&#x27;]=prior[0][&#x27;span_id&#x27;]</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            if item[&#x27;status&#x27;]==&#x27;running&#x27; and item[&#x27;workflow_name&#x27;] not in active_workflows:</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                linked=next((r for r in view[&#x27;runs&#x27;] if r[&#x27;run_id&#x27;]==item.get(&#x27;linked_run_id&#x27;)),None)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                if not linked or linked[&#x27;status&#x27;] not in {&#x27;running&#x27;,&#x27;queued&#x27;,&#x27;waiting_approval&#x27;,&#x27;paused&#x27;,&#x27;retrying&#x27;}:</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>                    item[&#x27;status&#x27;]=&#x27;unknown&#x27;</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>                    item[&#x27;output_summary&#x27;]=&#x27;已记录步骤开始，但没有可确认的运行句柄或结束记录。&#x27;</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        if item[&#x27;run_id&#x27;]:</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            item[&#x27;artifacts&#x27;]=[a for a in artifacts.values() if a.get(&#x27;run_id&#x27;)==item[&#x27;run_id&#x27;]]</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        if item[&#x27;status&#x27;] in {&#x27;running&#x27;,&#x27;waiting_approval&#x27;,&#x27;retrying&#x27;,&#x27;queued&#x27;} and item[&#x27;type&#x27;] not in {&#x27;subagent&#x27;,&#x27;workflow.step&#x27;}:</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            run=next((r for r in view[&#x27;runs&#x27;] if r[&#x27;run_id&#x27;]==item[&#x27;run_id&#x27;]),None)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            if run and run[&#x27;status&#x27;] in {&#x27;failed&#x27;,&#x27;cancelled&#x27;}:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                item.update(status=run[&#x27;status&#x27;],error_code=run.get(&#x27;error_code&#x27;),finished_at=run[&#x27;finished_at&#x27;])</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        if item.get(&#x27;error_code&#x27;):item[&#x27;error_code&#x27;]=summary(item[&#x27;error_code&#x27;],120)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>    public_runs=[{k:summary(v,400) if k in {&#x27;name&#x27;,&#x27;error_code&#x27;,&#x27;error_message&#x27;} and isinstance(v,str) else v for k,v in r.items()</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        if k in {&#x27;run_id&#x27;,&#x27;session_id&#x27;,&#x27;task_id&#x27;,&#x27;name&#x27;,&#x27;status&#x27;,&#x27;started_at&#x27;,&#x27;queued_at&#x27;,&#x27;finished_at&#x27;,</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                 &#x27;error_code&#x27;,&#x27;error_message&#x27;,&#x27;usage_status&#x27;,&#x27;token_usage&#x27;,&#x27;estimated_cost&#x27;,&#x27;retry_count&#x27;}} for r in view[&#x27;runs&#x27;]]</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>    return {&#x27;nodes&#x27;:list(nodes.values()),&#x27;runs&#x27;:public_runs,&#x27;workflows&#x27;:workflows,&#x27;artifacts&#x27;:list(artifacts.values())}</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code></code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>def trajectory_page(sid, events, projection, *, after_seq=0, limit=200, run_id=None, workflow=None):</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>    events=list(events)</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>    later=[e for e in events if e.seq&gt;after_seq]</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>    batch=later[:limit]</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    end=batch[-1].seq if batch else after_seq</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>    nodes=projection[&#x27;nodes&#x27;]</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>    if workflow is not None:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        workflow_nodes=[n for n in nodes if n.get(&#x27;workflow_name&#x27;)==workflow]</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        linked={n.get(&#x27;linked_run_id&#x27;) for n in workflow_nodes if n.get(&#x27;linked_run_id&#x27;)}</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        nodes=[n for n in nodes if n in workflow_nodes or n.get(&#x27;run_id&#x27;) in linked]</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>    elif run_id is not None:nodes=[n for n in nodes if n.get(&#x27;run_id&#x27;)==run_id]</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>    relevant=({n.get(&#x27;run_id&#x27;) for n in nodes}|{n.get(&#x27;linked_run_id&#x27;) for n in nodes})-{None}</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>    runs=[r for r in projection[&#x27;runs&#x27;] if run_id==r[&#x27;run_id&#x27;] or (run_id is None and (workflow is None or r[&#x27;run_id&#x27;] in relevant))]</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>    active=next((r for r in reversed(runs) if r[&#x27;status&#x27;] in {&#x27;running&#x27;,&#x27;waiting_approval&#x27;,&#x27;queued&#x27;,&#x27;paused&#x27;,&#x27;retrying&#x27;}),None)</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    status=active[&#x27;status&#x27;] if active else runs[-1][&#x27;status&#x27;] if runs else &#x27;recorded&#x27;</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>    if workflow is None:</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        if any(n[&#x27;status&#x27;]==&#x27;waiting_approval&#x27; for n in nodes):status=&#x27;waiting_approval&#x27;</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        elif any(n[&#x27;status&#x27;]==&#x27;running&#x27; for n in nodes):status=&#x27;running&#x27;</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        elif not runs and any(n[&#x27;status&#x27;]==&#x27;failed&#x27; for n in nodes):status=&#x27;failed&#x27;</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    if workflow is not None:</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        states=[n[&#x27;status&#x27;] for n in nodes if n.get(&#x27;workflow_name&#x27;)==workflow]</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        status=&#x27;failed&#x27; if &#x27;failed&#x27; in states else &#x27;unknown&#x27; if &#x27;unknown&#x27; in states else &#x27;running&#x27; if &#x27;running&#x27; in states else &#x27;completed&#x27; if states and all(s==&#x27;completed&#x27; for s in states) else &#x27;recorded&#x27;</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>    selected=[n for n in nodes if any(after_seq&lt;s&lt;=end for s in n[&#x27;event_seqs&#x27;])]</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>    return {&#x27;session_id&#x27;:sid,&#x27;run_id&#x27;:run_id or sid,&#x27;workflow&#x27;:workflow,&#x27;name&#x27;:workflow or (runs[0][&#x27;name&#x27;] if run_id and runs else &#x27;会话执行轨迹&#x27;),</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        &#x27;status&#x27;:status,&#x27;started_at&#x27;:runs[0][&#x27;started_at&#x27;] if runs else events[0].ts if events else None,</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        &#x27;finished_at&#x27;:runs[-1][&#x27;finished_at&#x27;] if runs and not active and status in {&#x27;completed&#x27;,&#x27;failed&#x27;,&#x27;cancelled&#x27;} else None,</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        &#x27;trace&#x27;:selected,&#x27;trace_total&#x27;:len(nodes),&#x27;trace_truncated&#x27;:len(later)&gt;len(batch),</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        &#x27;trace_cursor&#x27;:end,&#x27;to_seq&#x27;:end,&#x27;latest_seq&#x27;:events[-1].seq if events else 0,</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        &#x27;steps&#x27;:[],&#x27;runs&#x27;:runs,&#x27;artifacts&#x27;:[a for a in projection[&#x27;artifacts&#x27;] if workflow is None and run_id is None or a.get(&#x27;run_id&#x27;) in relevant]}</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

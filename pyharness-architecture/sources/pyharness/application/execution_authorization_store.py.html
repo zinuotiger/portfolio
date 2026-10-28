@@ -1,0 +1,293 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/execution_authorization_store.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/execution_authorization_store.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 293 行</span></nav><main class="wrap source-page"><h1>pyharness/application/execution_authorization_store.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：884b670d2794a36e338bcbbaa4775d4557ea5053<br>SHA-256（内容校验）：dfa92e9a933b91af9db08fdc27d15d4c6e0d7321fb78b1433ccce48b2a7451c4</p><p><a href="../../../architecture-detailed.html?node=execution_authorization">ExecutionAuthorization（固定执行授权）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 19 个类、函数与方法</summary><ul><li><a href="#L8">ExecutionAuthorizationStore（类） · L8–L293</a><ul><li><a href="#L9">ExecutionAuthorizationStore.execution_for_attempt（异步方法） · L9–L21</a></li><li><a href="#L23">ExecutionAuthorizationStore._execution_read_state（异步方法） · L23–L28</a></li><li><a href="#L30">ExecutionAuthorizationStore._execution_request（方法） · L30–L36</a></li><li><a href="#L38">ExecutionAuthorizationStore._execution_attempt（方法） · L38–L43</a></li><li><a href="#L45">ExecutionAuthorizationStore._execution_confirmation（方法） · L45–L57</a></li><li><a href="#L59">ExecutionAuthorizationStore._execution_current（方法） · L59–L75</a></li><li><a href="#L77">ExecutionAuthorizationStore._validate_execution_authorization（方法） · L77–L103</a></li><li><a href="#L105">ExecutionAuthorizationStore._execution_historical_materials（方法） · L105–L127</a></li><li><a href="#L129">ExecutionAuthorizationStore._execution_summary（方法） · L129–L147</a></li><li><a href="#L149">ExecutionAuthorizationStore.preview_execution（异步方法） · L149–L157</a></li><li><a href="#L159">ExecutionAuthorizationStore.authorize_execution（异步方法） · L159–L195</a></li><li><a href="#L197">ExecutionAuthorizationStore.execution_submission（异步方法） · L197–L208</a></li><li><a href="#L210">ExecutionAuthorizationStore.read_product_session（异步方法） · L210–L221</a></li><li><a href="#L223">ExecutionAuthorizationStore.checked_execution（方法） · L223–L246</a></li><li><a href="#L248">ExecutionAuthorizationStore.read_product_child（异步方法） · L248–L259</a></li><li><a href="#L261">ExecutionAuthorizationStore.capture_execution_materials（异步方法） · L261–L269</a></li><li><a href="#L271">ExecutionAuthorizationStore.observe_execution（异步方法） · L271–L279</a></li><li><a href="#L281">ExecutionAuthorizationStore.observe_execution_pair（异步方法） · L281–L293</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Sole-log immutable authority. Repeated submissions only observe; never dispatch.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import time</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import uuid</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.execution_contracts import ExecutionAuthorization, ExecutionEnvironment</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>class ExecutionAuthorizationStore:</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    async def execution_for_attempt(self,project,ident,*,authorize):</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>            actor=authorize();resources,_,_=await self._execution_read_state()</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>            attempt=self._context_owned(resources,ident,&#x27;run_attempt&#x27;,project,actor)</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>            self._attempt_summary(resources,attempt,actor,authorize,started)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>            reference=self._s05_ref(attempt,&#x27;attempt_id&#x27;,&#x27;run_attempt&#x27;)</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>            rows=[r for r in resources.values() if r.get(&#x27;execution_authorization&#x27;,{}).get(&#x27;selection&#x27;,{}).get(&#x27;attempt_ref&#x27;)==reference]</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>            if len(rows)&gt;1:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;attempt_authorization_ambiguous&#x27;)</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>            value=self._execution_summary(resources,rows[0],actor,authorize,started) if rows else None</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>            self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>            return dict(schema_version=1,project_id=project,attempt_ref=reference,</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>                status=&#x27;authorized&#x27; if value else &#x27;not_authorized&#x27;,execution=value)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    async def _execution_read_state(self):</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        &quot;&quot;&quot;Full source validation over the same control bytes, without a writer/lease.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        events=self._strict_control_events()</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        resources,commands=self._project(events)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        from pyharness.application.execution_control_projection import ControlReadResources</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        return ControlReadResources(resources,events),commands,events</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    def _execution_request(project, command):</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        from pyharness.application.workspace_store import canonical, digest_of</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        from pyharness.application.continuation_execution_contracts import ContinuedStartExecution</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        if isinstance(command,ContinuedStartExecution):</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            return digest_of(canonical(dict(operation=&#x27;execution.continue&#x27;,project_id=project,command=command.continuation.command.model_dump())))</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        return digest_of(canonical(dict(operation=&#x27;execution.start&#x27;, project_id=project, command=command.model_dump())))</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    def _execution_attempt(self, resources, project, reference, actor):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        ref = reference.model_dump() if hasattr(reference, &#x27;model_dump&#x27;) else reference</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        row = self._context_owned(resources, ref[&#x27;attempt_id&#x27;], &#x27;run_attempt&#x27;, project, actor)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        if self._s05_ref(row, &#x27;attempt_id&#x27;, &#x27;run_attempt&#x27;) != ref:</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            raise_code(&#x27;EVT-101&#x27;, reason=&#x27;execution_attempt_reference&#x27;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        return row</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    def _execution_confirmation(self, project, command, actor, attempt, environment):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        from pyharness.application.workspace_store import canonical, digest_of</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        agent = command.agent_ref.model_dump()</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        value = environment.model_dump()</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        snapshot = value[&#x27;agent_snapshot&#x27;]</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        import hashlib, json</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        checksum = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        if (snapshot.get(&#x27;status&#x27;) != &#x27;published&#x27; or snapshot.get(&#x27;agent_id&#x27;) != agent[&#x27;agent_id&#x27;]</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                or snapshot.get(&#x27;current_version&#x27;) != agent[&#x27;version&#x27;] or checksum != agent[&#x27;sha256&#x27;]):</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            raise_code(&#x27;EVT-101&#x27;, reason=&#x27;execution_agent_reference&#x27;)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        return digest_of(canonical(dict(operation=&#x27;execution.preview&#x27;, tenant_id=self.tenant_id,</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>            actor_ref=actor, project_id=project, attempt_ref=command.attempt_ref.model_dump(),</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            attempt_binding_digest=attempt[&#x27;run_attempt&#x27;][&#x27;binding_digest&#x27;], agent_ref=agent, environment=value)))</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    def _execution_current(self, resources, project, command, actor, authorize, describe, started):</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        row = self._execution_attempt(resources, project, command.attempt_ref, actor)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        from pyharness.application.continuation_binding import validate_continued_selection</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        validate_continued_selection(command,row)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        from pyharness.application.task_graph_binding import validate_graph_selection</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        validate_graph_selection(command,row)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        observed = self._attempt_summary(resources, row, actor, authorize, started)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        if observed[&#x27;input_readiness&#x27;] != &#x27;current&#x27;:raise_code(&#x27;EVT-101&#x27;, reason=&#x27;execution_context_stale&#x27;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        environment = ExecutionEnvironment.model_validate(describe())</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        self._check_handoff_execution(resources,row,command,environment,actor,authorize)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        if row[&#x27;run_attempt&#x27;].get(&#x27;graph_node&#x27;):</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            from pyharness.application.task_graph_binding import graph_node_plan</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            _,plan=graph_node_plan(self,resources,project,row[&#x27;run_attempt&#x27;][&#x27;graph_node&#x27;],actor)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            if environment.model_dump()!=plan[&#x27;environment&#x27;]:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;graph_node_configuration_changed&#x27;)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        confirmation = self._execution_confirmation(project, command, actor, row, environment)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        if authorize() != actor:raise_code(&#x27;GRD-403&#x27;, reason=&#x27;execution_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        return row, environment, confirmation</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    def _validate_execution_authorization(self, definition, resources, previous, event):</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        value = definition.model_dump()</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        try:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            if previous is not None:raise ValueError(&#x27;immutable authorization&#x27;)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            actor = value[&#x27;created_by&#x27;]; project = value[&#x27;project_id&#x27;]; command = definition.selection</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            if actor != event.payload[&#x27;actor_ref&#x27;] or value[&#x27;submission_key&#x27;] != event.payload[&#x27;command_id&#x27;]:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                raise ValueError(&#x27;subject or key mismatch&#x27;)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            self._context_project(resources, project, value[&#x27;project_revision&#x27;])</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            row = self._execution_attempt(resources, project, command.attempt_ref, actor)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            from pyharness.application.continuation_binding import validate_continued_authorization</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            validate_continued_authorization(self,definition,resources,row)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            from pyharness.application.task_graph_binding import validate_graph_authorization</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            validate_graph_authorization(self,definition,resources,row)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            if (row[&#x27;run_attempt&#x27;][&#x27;project_revision&#x27;] != value[&#x27;project_revision&#x27;]</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                    or row[&#x27;run_attempt&#x27;][&#x27;binding_digest&#x27;] != value[&#x27;attempt_binding_digest&#x27;]):</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                raise ValueError(&#x27;attempt binding mismatch&#x27;)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            self._execution_historical_materials(resources, row[&#x27;run_attempt&#x27;], actor)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            self._validate_handoff_execution_lease(resources,definition,row)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            self._context_quota(resources, &#x27;execution_authorization&#x27;, project)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            if any(r.get(&#x27;execution_authorization&#x27;, {}).get(&#x27;selection&#x27;, {}).get(&#x27;attempt_ref&#x27;) == command.attempt_ref.model_dump()</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                   for r in resources.values()):raise ValueError(&#x27;attempt already authorized&#x27;)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            if value[&#x27;selection&#x27;][&#x27;confirmation_digest&#x27;] != self._execution_confirmation(project, command, actor, row, definition.environment):</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                raise ValueError(&#x27;confirmation mismatch&#x27;)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            if self._execution_request(project, command) != event.payload[&#x27;request_digest&#x27;]:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                raise ValueError(&#x27;request mismatch&#x27;)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        except (ValueError, KeyError, PyHError):</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;execution_authorization_binding&#x27;)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    def _execution_historical_materials(self, resources, attempt, actor):</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        &quot;&quot;&quot;Validate against facts before this commit, without future wall-clock or host reads.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        project = attempt[&#x27;project_id&#x27;]; prerequisites = attempt[&#x27;prerequisites&#x27;]</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        parent = resources[project]</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        if (parent[&#x27;digest&#x27;] != prerequisites[&#x27;project_digest&#x27;] or</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                parent[&#x27;source_seq&#x27;] != prerequisites[&#x27;project_source_seq&#x27;]):</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            raise ValueError(&#x27;project changed before execution authorization&#x27;)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        task = self._s05_exact(resources, project, &#x27;product_task&#x27;, prerequisites[&#x27;task_ref&#x27;], &#x27;product_task_id&#x27;, actor)[&#x27;product_task&#x27;]</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        if task[&#x27;retired&#x27;] or task[&#x27;input_binding&#x27;] != prerequisites[&#x27;input_binding&#x27;]:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            raise ValueError(&#x27;task changed before execution authorization&#x27;)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        wi = self._task_bound_input(resources, task, actor)[&#x27;workspace_input&#x27;]</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        self._input_manifest(resources, project, wi[&#x27;manifest_ref&#x27;], actor,</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                             manifest_schema=1 if wi[&#x27;schema_version&#x27;] == 2 else 2)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        if wi[&#x27;schema_version&#x27;] == 1:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            source = resources[wi[&#x27;source_ref&#x27;][&#x27;snapshot_id&#x27;]][&#x27;workspace_snapshot&#x27;]</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            if self._workspace_latest(resources, source) != wi[&#x27;source_ref&#x27;][&#x27;snapshot_id&#x27;]:</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                raise ValueError(&#x27;workspace snapshot changed before execution authorization&#x27;)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        if self._attempt_context_refs(resources, project, attempt[&#x27;selection&#x27;], actor).model_dump() != attempt[&#x27;context&#x27;]:</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            raise ValueError(&#x27;context changed before execution authorization&#x27;)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        grants = set(self._input_grant_ids(wi))</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        for ref in attempt[&#x27;context&#x27;][&#x27;document_refs&#x27;]:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>            grants.update(self._document_grants(resources, resources[ref[&#x27;document_id&#x27;]][&#x27;document&#x27;], actor))</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        if any(resources[g][&#x27;grant&#x27;][&#x27;revoked&#x27;] for g in grants):raise ValueError(&#x27;source withdrawn before execution authorization&#x27;)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code></code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    def _execution_summary(self, resources, row, actor, authorize, started):</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        value = row[&#x27;execution_authorization&#x27;]; project = value[&#x27;project_id&#x27;]</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        self._context_owned({value[&#x27;execution_id&#x27;]: row}, value[&#x27;execution_id&#x27;], &#x27;execution_authorization&#x27;, project, actor)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        attempt = self._execution_attempt(resources, project, value[&#x27;selection&#x27;][&#x27;attempt_ref&#x27;], actor)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        self._attempt_summary(resources, attempt, actor, authorize, started)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        self._context_finish(authorize, actor, resources)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        result=dict(schema_version=1, execution_id=value[&#x27;execution_id&#x27;], revision=1, project_id=project,</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            project_revision=value[&#x27;project_revision&#x27;], digest=row[&#x27;digest&#x27;], source_seq=row[&#x27;source_seq&#x27;],</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            created_at=row[&#x27;created_at&#x27;], request_digest=row[&#x27;request_digest&#x27;], submission_key=value[&#x27;submission_key&#x27;],</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            attempt_ref=value[&#x27;selection&#x27;][&#x27;attempt_ref&#x27;], agent_ref=value[&#x27;selection&#x27;][&#x27;agent_ref&#x27;],</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            boundary=value[&#x27;environment&#x27;][&#x27;boundary&#x27;], model_fingerprint=value[&#x27;environment&#x27;][&#x27;model_fingerprint&#x27;],</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            session_id=value[&#x27;session_id&#x27;], task_id=value[&#x27;task_id&#x27;], status=&#x27;authorized&#x27;,</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            persisted=True, execution_authorized=True, execution_started=False)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        if value[&#x27;schema_version&#x27;]==2:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            from pyharness.application.execution_continuation_store import continuation_receipt</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            result[&#x27;continuation&#x27;]=continuation_receipt(value)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        if (business:=self._delivery_business_status(resources,row,actor,authorize)) is not None:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            result[&#x27;business_acceptance&#x27;]=business</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        return result</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code></code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    async def preview_execution(self, project, command, *, authorize, describe):</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        started = time.monotonic()</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            actor = authorize(); resources, _, _ = await self._execution_read_state()</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            row, environment, confirmation = self._execution_current(resources, project, command, actor, authorize, describe, started)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>            return dict(schema_version=1, project_id=project, attempt_ref=command.attempt_ref.model_dump(),</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                agent_ref=command.agent_ref.model_dump(), boundary=environment.boundary,</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                model_fingerprint=environment.model_fingerprint, confirmation_digest=confirmation,</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                status=&#x27;confirmation_required&#x27;, persisted=False, execution_authorized=False)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code></code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    async def authorize_execution(self, project, command, *, command_id, authorize, describe):</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        started = time.monotonic()</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>            actor = authorize(); await self._open(initialize=False); resources, commands = self._grant_state()</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>            request = self._execution_request(project, command)</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>            self._context_envelope(&#x27;execution_authorization&#x27;, command.execution_id, 1, command_id, actor, request)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>            if old := commands.get((actor, command_id)):</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                if old[0] != request:raise_code(&#x27;EVT-100&#x27;, reason=&#x27;idempotency_conflict&#x27;)</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>                return self._execution_summary(resources, old[1], actor, authorize, started), False</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>            if command.execution_id in resources:raise_code(&#x27;EVT-101&#x27;, reason=&#x27;execution_id_reserved&#x27;)</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            row, environment, confirmation = self._execution_current(resources, project, command, actor, authorize, describe, started)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>            if confirmation != command.confirmation_digest:raise_code(&#x27;EVT-101&#x27;, reason=&#x27;execution_preview_stale&#x27;)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>            if environment.boundary == &#x27;host_unrestricted&#x27; and not command.confirm_host_boundary:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                raise_code(&#x27;GRD-403&#x27;, reason=&#x27;execution_host_confirmation_required&#x27;)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>            resources=await self._reserve_handoff_budget(resources,row,command,environment,actor,authorize)</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            from pyharness.application.task_graph_execution_contracts import GraphNodeStartExecution,GraphNodeExecutionAuthorization</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>            from pyharness.application.task_graph_binding import reserved_graph_identities</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            _,reserved=reserved_graph_identities(resources)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>            if command.execution_id in reserved and not isinstance(command,GraphNodeStartExecution):raise_code(&#x27;GRD-403&#x27;,reason=&#x27;graph_execution_identity_reserved&#x27;)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            model=GraphNodeExecutionAuthorization if isinstance(command,GraphNodeStartExecution) else ExecutionAuthorization</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>            definition = model(execution_id=command.execution_id, project_id=project,</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                project_revision=row[&#x27;run_attempt&#x27;][&#x27;project_revision&#x27;], created_by=actor, submission_key=command_id,</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                selection=command, attempt_binding_digest=row[&#x27;run_attempt&#x27;][&#x27;binding_digest&#x27;], environment=environment,</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                session_id=&#x27;s-pa-&#x27; + uuid.uuid4().hex, task_id=&#x27;p-&#x27; + uuid.uuid4().hex)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>            def gate():</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                fresh, _ = self._grant_state()</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                if command.execution_id in fresh:raise_code(&#x27;EVT-101&#x27;, reason=&#x27;execution_id_reserved&#x27;)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                if any(r.get(&#x27;execution_authorization&#x27;, {}).get(&#x27;selection&#x27;, {}).get(&#x27;attempt_ref&#x27;) == command.attempt_ref.model_dump()</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                       for r in fresh.values()):raise_code(&#x27;EVT-101&#x27;, reason=&#x27;attempt_already_authorized&#x27;)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                exact, current, digest = self._execution_current(fresh, project, command, actor, authorize, describe, started)</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                if digest != confirmation or current != environment:raise_code(&#x27;EVT-101&#x27;, reason=&#x27;execution_preview_stale&#x27;)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                self._context_quota(fresh, &#x27;execution_authorization&#x27;, project)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>            gate()</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            resources, row = await self._append_context(definition, &#x27;execution_authorization&#x27;, command.execution_id,</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                command_id, actor, request, gate)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            try:return self._execution_summary(resources, row, actor, authorize, started), True</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            except PyHError:raise_code(&#x27;PERS-202&#x27;, reason=&#x27;execution_receipt_unavailable&#x27;)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code></code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    async def execution_submission(self, project, key, *, authorize):</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        started = time.monotonic()</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            actor = authorize(); resources, commands, _ = await self._execution_read_state()</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>            self._context_project(resources, project)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            old = commands.get((actor, key)); row = old[1] if old else None</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            if row is not None and (not row.get(&#x27;execution_authorization&#x27;) or row[&#x27;execution_authorization&#x27;][&#x27;project_id&#x27;] != project):</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                raise_code(&#x27;GRD-403&#x27;, reason=&#x27;execution_submission_unavailable&#x27;)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            value = self._execution_summary(resources, row, actor, authorize, started) if row else None</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>            self._context_finish(authorize, actor, resources)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>            return dict(schema_version=1, project_id=project, submission_key=key, status=&#x27;committed&#x27; if row else &#x27;not_found&#x27;,</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                execution=value, writer_requires_reopen=self._failed)</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code></code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>    async def read_product_session(self, sid, *, authorize, read):</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        started = time.monotonic()</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            actor = authorize(); resources, _, _ = await self._execution_read_state()</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            rows = [r for r in resources.values() if r.get(&#x27;execution_authorization&#x27;, {}).get(&#x27;session_id&#x27;) == sid]</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            if len(rows) != 1:raise_code(&#x27;GRD-403&#x27;, reason=&#x27;product_execution_unavailable&#x27;)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>            row = rows[0]</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            self._execution_summary(resources, row, actor, authorize, started)</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>            result = await read(self._execution_read_row(resources,row))</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>            # Account/root I/O and journal reads are not authorization cache entries.</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>            self._execution_summary(resources, row, actor, authorize, started)</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>            return result</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code></code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>    def checked_execution(self, project, ident, *, authorize, describe, expected_digest=None):</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        &quot;&quot;&quot;Synchronous last boundary check, without yielding between authority and use.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        from pyharness.application.execution_effects import confirmed_events</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        from pyharness.application.execution_contracts import StartExecution</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        self._ensure_usable(); actor = authorize(); started = time.monotonic()</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        control,_=self._cancellation_state()</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        stop_target=self._context_owned(control,ident,&#x27;execution_authorization&#x27;,project,actor)</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        if expected_digest is not None and stop_target[&#x27;digest&#x27;]!=expected_digest:</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;execution_authorization_changed&#x27;)</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        if any(r.get(&#x27;execution_cancellation&#x27;,{}).get(&#x27;execution_ref&#x27;,{}).get(&#x27;execution_id&#x27;)==ident for r in control.values()):</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            import asyncio</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            raise asyncio.CancelledError(&#x27;execution_cancel_requested&#x27;)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        resources, _ = self._project(confirmed_events(self._session))</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        row = self._context_owned(resources, ident, &#x27;execution_authorization&#x27;, project, actor)</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        if expected_digest is not None and row[&#x27;digest&#x27;] != expected_digest:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>            raise_code(&#x27;GRD-403&#x27;, reason=&#x27;execution_authorization_changed&#x27;)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        from pyharness.application.continuation_execution_contracts import ContinuedStartExecution</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        from pyharness.application.task_graph_execution_contracts import GraphNodeStartExecution</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        parser={1:StartExecution,2:ContinuedStartExecution,3:GraphNodeStartExecution}[row[&#x27;execution_authorization&#x27;][&#x27;schema_version&#x27;]]</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        command = parser.model_validate(row[&#x27;execution_authorization&#x27;][&#x27;selection&#x27;])</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        attempt, environment, confirmation = self._execution_current(resources, project, command, actor, authorize, describe, started)</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        if environment.model_dump() != row[&#x27;execution_authorization&#x27;][&#x27;environment&#x27;] or confirmation != command.confirmation_digest:</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            raise_code(&#x27;EVT-101&#x27;, reason=&#x27;execution_configuration_changed&#x27;)</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        return row, attempt, resources, actor, started</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code></code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>    async def read_product_child(self,binding,*,authorize,read):</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>            actor=authorize();resources,_,_=await self._execution_read_state()</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>            row=resources.get(binding[&#x27;execution_id&#x27;]);value=row.get(&#x27;execution_authorization&#x27;) if row else None</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>            if (value is None or binding[&#x27;authorization_digest&#x27;]!=row[&#x27;digest&#x27;] or binding[&#x27;authorization_seq&#x27;]!=row[&#x27;source_seq&#x27;] or</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                    binding[&#x27;subject_ref&#x27;]!=actor or binding[&#x27;root_session_id&#x27;]!=value[&#x27;session_id&#x27;]):</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>                raise_code(&#x27;GRD-403&#x27;,reason=&#x27;product_child_owner_unavailable&#x27;)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            self._execution_summary(resources,row,actor,authorize,started)</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>            result=await read(self._execution_read_row(resources,row))</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            self._execution_summary(resources,row,actor,authorize,started)</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>            return result</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code></code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>    async def capture_execution_materials(self, project, command, *, authorize, describe):</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        from pyharness.application.execution_materials import captured_materials</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        started = time.monotonic()</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>            actor = authorize(); resources, _, _ = await self._execution_read_state()</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>            row, environment, confirmation = self._execution_current(resources, project, command, actor, authorize, describe, started)</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>            materials = captured_materials(self, resources, row, actor, authorize, started)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>            self._execution_current(resources, project, command, actor, authorize, describe, started)</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>            return materials</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code></code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>    async def observe_execution(self, project, ident, *, authorize, read):</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        started = time.monotonic()</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>            actor = authorize(); resources, _, _ = await self._execution_read_state()</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>            row = self._context_owned(resources, ident, &#x27;execution_authorization&#x27;, project, actor)</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>            summary = self._execution_summary(resources, row, actor, authorize, started)</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>            result = await read(self._execution_read_row(resources,row), summary)</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>            self._execution_summary(resources, row, actor, authorize, started)</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>            return result</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code></code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>    async def observe_execution_pair(self,project,idents,*,authorize,read):</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        &quot;&quot;&quot;One disposable original control snapshot; recheck BOTH after all reads.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            actor=authorize();resources,_,_=await self._execution_read_state();rows=[];views=[]</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>            for ident in idents:</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>                row=self._context_owned(resources,ident,&#x27;execution_authorization&#x27;,project,actor)</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>                summary=self._execution_summary(resources,row,actor,authorize,started)</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                attempt=self._execution_attempt(resources,project,row[&#x27;execution_authorization&#x27;][&#x27;selection&#x27;][&#x27;attempt_ref&#x27;],actor)</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                rows.append(row);views.append((self._execution_read_row(resources,row),summary,attempt[&#x27;run_attempt&#x27;]))</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>            result=await read(views)</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>            for row in rows:self._execution_summary(resources,row,actor,authorize,started)</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            return result</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

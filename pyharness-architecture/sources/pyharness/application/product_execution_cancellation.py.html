@@ -1,0 +1,95 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/product_execution_cancellation.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/product_execution_cancellation.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 95 行</span></nav><main class="wrap source-page"><h1>pyharness/application/product_execution_cancellation.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：035d30e5db508ac0e702cf62441e218bb838a2ab<br>SHA-256（内容校验）：35b2c916a403c098a899a68ac0100607ca57a7f2b518db08e8640aa71f3d9163</p><p><a href="../../../architecture-detailed.html?node=execution_cancellation">ExecutionCancellation（执行取消控制）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 7 个类、函数与方法</summary><ul><li><a href="#L10">ProductExecutionCancellation（类） · L10–L95</a><ul><li><a href="#L11">ProductExecutionCancellation.execution_control_for_attempt（异步方法） · L11–L18</a></li><li><a href="#L20">ProductExecutionCancellation._owned_stop_queue（方法） · L20–L32</a></li><li><a href="#L34">ProductExecutionCancellation._signal_execution_stop（异步方法） · L34–L42</a></li><li><a href="#L44">ProductExecutionCancellation._cancellation_observation（异步方法） · L44–L60</a></li><li><a href="#L62">ProductExecutionCancellation.cancel_execution（异步方法） · L62–L88</a></li><li><a href="#L90">ProductExecutionCancellation.cancellation_submission（异步方法） · L90–L95</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Stop only the exact owned live execution; observation never creates a runner.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.execution_contracts import CancelExecution</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.workspace_contracts import ProjectId</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.run_attempt_contracts import SubmissionKey,AttemptId</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.core.lifecycle import admitted</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.errors import PyHError,raise_code</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>class ProductExecutionCancellation:</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    @admitted</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    async def execution_control_for_attempt(self,project,ident):</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>        self._authorize(write=True)</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>        project=self._workspace_id(project,ProjectId);ident=self._workspace_id(ident,AttemptId)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        value=await self.store.execution_control_for_attempt(project,ident,authorize=lambda:self._authorize(write=True))</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        if value[&#x27;cancellation&#x27;] is not None:</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>            value[&#x27;cancellation&#x27;]=await self._cancellation_observation(project,value[&#x27;cancellation&#x27;])</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        return value</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    def _owned_stop_queue(self,target):</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        service=self.service;sid=target[&#x27;session_id&#x27;];spine=service._engines.get(sid)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        runtime=getattr(spine,&#x27;platform_runtime&#x27;,None);boundary=getattr(runtime,&#x27;product_execution&#x27;,None)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        bound=getattr(boundary,&#x27;receipt&#x27;,None);ref=target[&#x27;execution_ref&#x27;]</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        if not isinstance(bound,dict):return None</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        if (any(bound.get(k)!=v for k,v in ref.items()) or bound.get(&#x27;session_id&#x27;)!=sid or</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>                bound.get(&#x27;task_id&#x27;)!=target[&#x27;task_id&#x27;] or bound.get(&#x27;project_id&#x27;)!=target[&#x27;project_id&#x27;] or</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>                getattr(runtime,&#x27;session_id&#x27;,None)!=sid or service.tenant_id!=target[&#x27;tenant_id&#x27;] or</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>                getattr(runtime,&#x27;platform&#x27;,None) is not service.platform or</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>                getattr(getattr(spine,&#x27;session&#x27;,None),&#x27;sid&#x27;,None)!=sid or</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>                getattr(getattr(spine,&#x27;session&#x27;,None),&#x27;tenant_id&#x27;,None)!=target[&#x27;tenant_id&#x27;] or</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>                self._authorize(write=True)!=target[&#x27;subject&#x27;]):return None</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        return service._queues.get(sid)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    async def _signal_execution_stop(self,target,queue,by):</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        waiting=target[&#x27;task_id&#x27;] in queue.status().waiting</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        signalled=await queue.cancel(target[&#x27;task_id&#x27;],by=by)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        if signalled and waiting and self._owned_stop_queue(target) is queue:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            # Queue.cancel removes a waiting task before its first await, so</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            # no runner can publish a competing lifecycle terminal for it.</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>            spine=self.service._engines[target[&#x27;session_id&#x27;]]</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            ctx=SimpleNamespace(session=spine.session,task_id=target[&#x27;task_id&#x27;])</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            await spine.platform_runtime.product_execution.append_phase(ctx,&#x27;cancelled&#x27;,&#x27;cancelled_before_start&#x27;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    async def _cancellation_observation(self,project,receipt):</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        receipt,target=await self.store.cancellation_target(project,receipt[&#x27;cancellation_id&#x27;],authorize=lambda:self._authorize(write=True))</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        queue=self._owned_stop_queue(target)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        stopped=None;terminal=&#x27;unknown&#x27;</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        if queue is not None:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            state=queue.status()</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            if target[&#x27;task_id&#x27;]==state.running or target[&#x27;task_id&#x27;] in state.waiting:</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                stopped=False;terminal=&#x27;running&#x27; if target[&#x27;task_id&#x27;]==state.running else &#x27;queued&#x27;</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            else:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                try:result=await queue.wait_for(target[&#x27;task_id&#x27;],timeout=0)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                except PyHError:pass</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                else:</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                    stopped=True;terminal=&#x27;completed&#x27; if result.ok else &#x27;cancelled&#x27; if result.code==&#x27;cancelled&#x27; else &#x27;failed&#x27;</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        # Queue futures/summary text never replace source authorization or enter</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        # this minimal control response, even after sources were withdrawn.</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        if self._authorize(write=True)!=target[&#x27;subject&#x27;]:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;execution_cancel_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        return dict(receipt,execution_stopped=stopped,terminal_observation=terminal)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    @admitted</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    async def cancel_execution(self,project,body,command_id):</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        self._authorize(write=True);project=self._workspace_id(project,ProjectId)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        command=CancelExecution.model_validate(body);key=self._workspace_id(command_id,SubmissionKey)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        authorize=lambda:self._authorize(write=True)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        old=await self.store.execution_cancellation_submission(project,key,authorize=authorize)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        if old[&#x27;status&#x27;]==&#x27;committed&#x27;:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            if old[&#x27;cancellation&#x27;][&#x27;request_digest&#x27;]!=self.store._cancellation_request(project,command):</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                raise_code(&#x27;EVT-100&#x27;,reason=&#x27;idempotency_conflict&#x27;)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            return await self._cancellation_observation(project,old[&#x27;cancellation&#x27;])</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        target=await self.store.execution_stop_target(project,command.execution_ref,authorize=authorize)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        try:receipt,first=await self.store.cancel_execution(project,command,command_id=key,authorize=authorize)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        except PyHError as primary:</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            if primary.code==&#x27;PERS-202&#x27;:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                # Failure to acknowledge control persistence must not trap a</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                # previously verified owned task. Signal only this exact live</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                # runtime; keep the original persistence failure visible.</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                try:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                    queue=self._owned_stop_queue(target)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                    if queue is not None:await self._signal_execution_stop(target,queue,&#x27;product_execution_cancel_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                except BaseException as secondary:primary.add_note(&#x27;stop signal unavailable: &#x27;+type(secondary).__name__)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            raise</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        if first:</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            _,target=await self.store.cancellation_target(project,receipt[&#x27;cancellation_id&#x27;],authorize=authorize)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            queue=self._owned_stop_queue(target)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            if queue is not None:await self._signal_execution_stop(target,queue,&#x27;product_execution_cancel&#x27;)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        return await self._cancellation_observation(project,receipt)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    @admitted</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    async def cancellation_submission(self,project,key):</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        self._authorize(write=True);project=self._workspace_id(project,ProjectId);key=self._workspace_id(key,SubmissionKey)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        value=await self.store.execution_cancellation_submission(project,key,authorize=lambda:self._authorize(write=True))</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        if value[&#x27;status&#x27;]==&#x27;committed&#x27;:value[&#x27;cancellation&#x27;]=await self._cancellation_observation(project,value[&#x27;cancellation&#x27;])</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        return value</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

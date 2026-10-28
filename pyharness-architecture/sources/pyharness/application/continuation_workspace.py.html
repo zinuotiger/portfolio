@@ -1,0 +1,80 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/continuation_workspace.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/continuation_workspace.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 80 行</span></nav><main class="wrap source-page"><h1>pyharness/application/continuation_workspace.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：d2de473dfd0baf3f6c171c2e671609b9bc42b780<br>SHA-256（内容校验）：47f3fb2097bdceb30d59f529018ddf0851c4a77530231be26eb8bb38e0ac7c12</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 4 个类、函数与方法</summary><ul><li><a href="#L14">ContinuationWorkspace（类） · L14–L33</a><ul><li><a href="#L24">ContinuationWorkspace.exact_tree（方法） · L24–L33</a></li></ul></li><li><a href="#L36">validate_reference_workspace（函数） · L36–L54</a></li><li><a href="#L57">derive_continuation_workspace（函数） · L57–L80</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Derive new read-only attempt references while retaining every captured output.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import base64,os</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pathlib import PurePosixPath</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from typing import Literal</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pydantic import Field,model_validator</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.document_contracts import VersionOne</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.state_snapshot_contracts import StateFile,StateDirectory,MAX_STATE_TOTAL_FILE_BYTES</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.workspace_contracts import Digest</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.application.execution_workspace import workspace_plan</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>class ContinuationWorkspace(VersionOne):</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    capture_scope:Literal[&#x27;derived_continuation_workspace&#x27;]=&#x27;derived_continuation_workspace&#x27;</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    origin_state_digest:Digest</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    materials_digest:Digest</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    workspace_backend:Literal[&#x27;host_approved&#x27;,&#x27;isolated&#x27;]</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    filesystem_capture:Literal[&#x27;files_and_directories&#x27;]=&#x27;files_and_directories&#x27;</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    files:list[StateFile]=Field(max_length=4096)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    directories:list[StateDirectory]=Field(max_length=4096)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    digest:Digest</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    @model_validator(mode=&#x27;after&#x27;)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    def exact_tree(self):</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        files={f.path.casefold() for f in self.files};dirs={d.path.casefold() for d in self.directories}</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        if len(files)!=len(self.files) or len(dirs)!=len(self.directories) or files&amp;dirs or sum(f.size for f in self.files)&gt;MAX_STATE_TOTAL_FILE_BYTES:</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>            raise ValueError(&#x27;derived filesystem collision or limit&#x27;)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        for item in [*self.files,*self.directories]:</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>            if any(p.as_posix().casefold() not in dirs for p in PurePosixPath(item.path).parents if p.as_posix()!=&#x27;.&#x27;):</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>                raise ValueError(&#x27;derived filesystem parent missing&#x27;)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        if digest_of(canonical(self.model_dump(mode=&#x27;json&#x27;,exclude={&#x27;digest&#x27;})))!=self.digest:raise ValueError(&#x27;derived filesystem digest&#x27;)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        return self</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code></code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>def validate_reference_workspace(body,materials):</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    if body.materials_digest!=materials[&#x27;materials_digest&#x27;]:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_materials_binding&#x27;)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    if body.workspace_backend==&#x27;disabled&#x27;:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        if body.filesystem_capture!=&#x27;no_workspace&#x27; or body.files or body.directories:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_workspace_state_invalid&#x27;)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        return None</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    if body.filesystem_capture!=&#x27;files_and_directories&#x27; or body.workspace_backend not in (&#x27;host_approved&#x27;,&#x27;isolated&#x27;):</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_complete_filesystem_required&#x27;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    old=workspace_plan(materials);prefix=old[&#x27;context_directory&#x27;]</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    inside=lambda name:name==prefix or name.startswith(prefix+&#x27;/&#x27;)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    captured={f.path:f for f in body.files};captured_dirs={d.path:d for d in body.directories}</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    expected={path:raw for path,raw in old[&#x27;contents&#x27;].items() if inside(path)}</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    if set(expected)!={name for name in captured if inside(name)}:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_reference_set_changed&#x27;)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    for name,raw in expected.items():</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        f=captured[name]</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        if f.sha256!=digest_of(raw) or base64.b64decode(f.data_b64,validate=True)!=raw:</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_reference_bytes_changed&#x27;)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    expected_dirs={p.as_posix() for name in expected for p in PurePosixPath(name).parents if p.as_posix()!=&#x27;.&#x27;}</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    if {name for name in captured_dirs if inside(name)}!=expected_dirs:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_reference_directories_changed&#x27;)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    return old,captured,captured_dirs</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>def derive_continuation_workspace(body,old_materials,new_materials,state_digest):</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    before={k:v for k,v in old_materials[&#x27;bundle&#x27;].items() if k!=&#x27;attempt_ref&#x27;}</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    after={k:v for k,v in new_materials[&#x27;bundle&#x27;].items() if k!=&#x27;attempt_ref&#x27;}</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    if before!=after:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_materials_changed&#x27;)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    checked=validate_reference_workspace(body,old_materials)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    if checked is None:return None</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    old,captured,captured_dirs=checked;new=workspace_plan(new_materials);prefix=old[&#x27;context_directory&#x27;]</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    if prefix!=new[&#x27;context_directory&#x27;]:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_context_scope_changed&#x27;)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    inside=lambda name:name==prefix or name.startswith(prefix+&#x27;/&#x27;)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    files=[f.model_dump() for f in body.files if not inside(f.path)]</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    dirs={d.path:d.model_dump() for d in body.directories if not inside(d.path)}</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    for name,raw in new[&#x27;contents&#x27;].items():</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        if not inside(name):continue</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        mode=captured[name].mode if name in captured else 0o666 if os.name==&#x27;nt&#x27; else 0o600</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        files.append(dict(path=name,mode=mode,size=len(raw),sha256=digest_of(raw),data_b64=base64.b64encode(raw).decode(&#x27;ascii&#x27;)))</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        for parent in PurePosixPath(name).parents:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            relative=parent.as_posix()</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            if relative==&#x27;.&#x27;:continue</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            mode=captured_dirs[relative].mode if relative in captured_dirs else 0o777 if os.name==&#x27;nt&#x27; else 0o700</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            dirs[relative]=dict(path=relative,mode=mode)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    value=dict(schema_version=1,capture_scope=&#x27;derived_continuation_workspace&#x27;,origin_state_digest=state_digest,</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        materials_digest=new_materials[&#x27;materials_digest&#x27;],workspace_backend=body.workspace_backend,filesystem_capture=&#x27;files_and_directories&#x27;,</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        files=sorted(files,key=lambda f:f[&#x27;path&#x27;]),directories=sorted(dirs.values(),key=lambda d:d[&#x27;path&#x27;]))</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    return ContinuationWorkspace.model_validate(dict(value,digest=digest_of(canonical(value))))</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

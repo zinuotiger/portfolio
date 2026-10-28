@@ -1,0 +1,403 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/approval.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/approval.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 403 行</span></nav><main class="wrap source-page"><h1>pyharness/core/approval.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：d969a4aa453862c9d9626199a5c8da7a7342d9a9<br>SHA-256（内容校验）：7846bfc7e557d4b49d5cd5cb03d0b5ace6887a0e80237dc5282644f7834b5248</p><p><a href="../../../architecture-detailed.html?node=approval">Approval Lifecycle（审批请求与裁决）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 9 个类、函数与方法</summary><ul><li><a href="#L110">ApprovalProvider（类） · L110–L366</a><ul><li><a href="#L123">ApprovalProvider.__init__（方法） · L123–L178</a></li><li><a href="#L181">ApprovalProvider.request（异步方法） · L181–L245</a></li><li><a href="#L247">ApprovalProvider._register（异步方法） · L247–L323</a></li><li><a href="#L325">ApprovalProvider._deny_no_channel（方法） · L325–L330</a></li><li><a href="#L341">ApprovalProvider._queue（方法） · L341–L346</a></li><li><a href="#L348">ApprovalProvider._pause_queue_or_record（异步方法） · L348–L357</a></li><li><a href="#L359">ApprovalProvider._resume_queue_or_record_async（异步方法） · L359–L366</a></li></ul></li><li><a href="#L391">create_approval（函数） · L391–L397</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/approval.py — 人类审批服务:F015 审批通道核心 (specs/approval.py.md 契约;阶段 1 模块)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F015(人类审批核心)· 联动 F014(guard 重入)/F043(队列暂停)/F064(headless)/</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>F066(ACP approve);经 ctx.approval 注入,裁决按 approval_id=请求事件 seq 配对。</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code></code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>权威口径:specs/approval.py.md(编码契约)、EVENT-SCHEMA §3.4(approval.* 事件字段级)、</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>PARAMETER-ANCHOR(审批 TTL=120s,超时=denied 安全默认)、ERR.md §2.6(APR-5xx);</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>冲突以 PRD-Core §5.2 F015 / §6.7 为准。</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>职责一句话:danger≥high 调用的人类裁决服务——请求摘要化 → 人类裁决</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>(granted/denied/timeout=denied 安全默认,TTL 默认 120s)→ 事件强同步留痕;</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>granted 不等于放行(executor 重入 guard 链);60s 同工具同参合并防轰炸;</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>会话级信任名单(默认关、仅交互、headless 永不生效);APR-501/502/503 错误域。</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>核心语义:</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>1. 裁决流程:request(executor 关 2.5 唯一调用方)→ 强同步 approval.requested</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>   (approval_id=事件 seq,args_summary 摘要化)→ 等人类裁决(approve/deny 入口)/</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>   TTL 超时 → 结果事件强同步 → 返回 granted/denied/timeout;executor 对非 granted</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>   一律不执行(本模块无执行权)。</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>2. 安全默认:headless/无通道 → APR-501 直接拒(零事件零等待);TTL 到点无人 → timeout</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>   + approval.timeout(by=system);取消/会话关闭 → cancel_all 全置 denied(无悬挂 Future)。</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>3. 60s 合并防轰炸(R13):同工具同参数(规范化指纹)窗口内合并为一条 approval.requested,</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   每个等待者各自配对裁决结果(granted 后各自独立重入 guard 链)。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>4. 防重放(APR-503):approval_id 一次性消费;同一 id 二次裁决 → system.error/抛错忽略,</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   不重复执行。</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>5. 事件强同步:approval.requested/granted/denied/timeout 全 sync=True 落盘(崩溃不丢);</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>   by 由框架按通道打(cli:&lt;user&gt;/web:&lt;会话&gt;/acp:&lt;client_id&gt;),LLM/工具/插件无权自报</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   (假冒审批结构防线 S-2)。</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>6. 队列联动(F043):首请挂起(queue.suspended),末决恢复(queue.resumed),重复挂起合并。</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code></code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>依赖方向(单向,禁止反向):errors.raise_code(APR-5xx)← session(注入 log,强同步</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>append)← config(TTL/合并窗只读)← bus(裁决事件订阅 + queue 联动广播)。不依赖</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>guard 链/executor(重入由 executor 编排,本模块不 import)。</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code></code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>偏离说明(相对 spec 伪码;契约=spec,以下为与既有实现冲突处的取舍,均列理由):</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>1. approval.requested 载荷不含 channel/call_id:events/payload.py 的</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>   ApprovalRequestedPayload 为 extra=&quot;forbid&quot; 且只有 tool/args_summary/ttl_ms/risk</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   四字段(74 类型已锁定,实测超字段 append → EVT-100)→ channel/call_id 改经</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>   Envelope.trace 携带(信封 trace 为自由 dict 不触发载荷校验,tools_guard 偏离 1</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>   同款先例);risk 恒 &quot;high&quot;(guard 层只放行 high 进审批,critical 已转 reject)。</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>2. headless 分支以&quot;异常表 + ERR.md + DIS-SEAM §6.2 G2&quot;为准:request() 抛 APR-501</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>   (raise_code,零事件零等待),不用伪码 `return self._deny_no_channel(call)` 返回</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>   denied——伪码与异常表(APR-501 PyHError 行)冲突,异常表为规范面;且 approval.denied</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>   无对应 approval.requested 即孤儿裁决事件(EVENT-SCHEMA §3.4.5 锚点语义非法),</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>   不落孤儿事件。headless 拒绝审计面由 guard 层 guard.rejected(GRD-401,policy_ref=</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>   APR-501)负责(tools_guard 偏离 3 同口径)。_deny_no_channel 保留为内部实现,</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>   只负责 raise(签名标注 -&gt; str 但恒不返回,见 spec 函数速览表同名列)。</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>3. 裁决完成单点 = provider 拥有的 completion task:强同步裁决事件 → 必要队列</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>   恢复确认 → pending 移除与 waiter 完成。总线消费者仅观察本地裁决，不拥有</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>   状态迁移。approve_async/deny_async 等待整个完成边界;同步入口仅提交命令。</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>4. queue.suspended/resumed 已入 57 词表(可落盘)→ 经注入 session 落盘,</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>   reason 取 spec 伪码字面量 &quot;approval&quot;(EVENT-SCHEMA §3.5.3 示例值 approval-pending</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>   仅为示例,冲突以伪码为准);重复挂起合并(首请挂起、末决恢复)。队列转换失败</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>   必须上抛并拒绝工具执行，不能以仅写事件降级为成功。</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>5. approval.trust_*(trust_set/trust_added/trust_hit/trust_cleared)不在 57 词表</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>   (实测 session.append → EVT-102;词表扩展属 events 模块后续阶段门)→ 信任留痕经</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>   bus/日志尽力而为(scope.py 偏离 4 / tools_guard 偏离 1 同款先例),测试只断言</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>   信任行为(跳过再次询问/清除计数)不断言事件落盘。</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>6. &quot;全会话共享同一对象&quot;的多会话并发装配(跨会话同 seq 碰撞路由)属阶段 3 装配层</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>   职责:本模块按&quot;一会话一装配&quot;使用,请求在创建时记录自属 session log 与 sid,</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>   approve/deny/timeout 事件恒落请求所属会话;测试全为单会话。on_verdict 收到</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>   异会话信封(Envelope.session_id 与本请求 sid 不符)时按未知裁决忽略(APR-503)。</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code></code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>import asyncio</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>import hashlib</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>import inspect</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>import json</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>import logging</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>import sys</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>import time</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>from typing import TYPE_CHECKING, Any, Optional</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>from pyharness.core.channel import (default_channel_of, require_channel)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>from pyharness.events.vocab import is_registered  # 词表注册判定(trust_* 未入 77 词表,见偏离 5)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>from pyharness.core.approval_models import (logger, CHANNELS, VERDICTS, TERMINAL_STATES, _OUTCOME_EVENTS, _HUMAN_CHANNELS, DEFAULT_TRUST_MAX, _TRUST_SET, _TRUST_ADDED, _TRUST_HIT, _TRUST_CLEARED, _danger_of, _norm_value, canonical_json, ApprovalRequest, TrustEntry)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>if TYPE_CHECKING:  # 仅类型标注:executor 传入的 ToolCall 鸭子契约,运行期不依赖</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    pass</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code># ====================================================================== 常量</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code># 交互裁决通道(外壳装配注入:交互 CLI/Web/ACP);headless/管道/后台 job 无通道</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code># 三结果字面量(request 返回值/终态;超时=denied 安全默认但结果字面量仍为 timeout)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code># 审批结果 → 结果事件名(词表 §3.4.5 三结果同构)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code># 人类裁决通道白名单(假冒审批结构防线 S-2 收紧,P2):仅四通道可裁决——通道名</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code># 本身(&quot;desktop&quot;)或其 &quot;:&quot; 前缀(&quot;cli:alice&quot;)视为合法;任意其它自报身份拒</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code># (旧实现只拒 llm:/tool:/plugin: 黑名单,`by=&quot;hacker&quot;` 冒充人类可过)。</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code># 会话级信任名单容量上限(≤N 条 FIFO 淘汰;N 可经构造参数覆盖)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code># 信任留痕事件名(词表外,尽力而为出口,见偏离 5)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code></code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code></code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code># ---------------------------------------------------------------- 数据结构</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code># ================================================================== 服务类</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>from pyharness.core.approval_decisions import ApprovalDecisions</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>from pyharness.core.approval_binding import ApprovalBinding</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>from pyharness.core.approval_lifecycle import ApprovalLifecycle</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>class ApprovalProvider(ApprovalDecisions, ApprovalBinding, ApprovalLifecycle):</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    &quot;&quot;&quot;人类审批服务(脊柱子系统;DIS-SEAM §6.2 seam B)。</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    构造期注入装配(偏离 3/6 同款注入式先例):session = 默认会话日志(事件落点),</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    bus = EventBus(裁决事件订阅 + queue 联动),config = Settings(TTL/合并窗只读);</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    channel/headless = 装配上下文缺省通道(外壳可在 ctx 上注入显式 channel/headless,</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    request 时优先)。全会话共享同对象时按请求记录路由会话(见偏离 6)。</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code></code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    状态:_pending(approval_id→lead)、_merge((sid,指纹)→批,60s 窗口)、_trust(指纹→</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    信任记录)、_ttl_ms(默认 120_000)、_merge_window_ms(60_000)、_enabled(信任</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    名单开关,默认 False,仅交互可开)、_suspended(队列挂起水位,重复挂起合并)。</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code></code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    def __init__(self, *, session: Any = None, bus: Any = None,</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                 config: Any = None, channel: Optional[str] = None,</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                 headless: bool = False, trust_max: int = DEFAULT_TRUST_MAX,</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                 queue_getter: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        self._session: Any = session            # 默认会话日志(可 None;未接线事件降级)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        self._bus: Any = bus                    # EventBus(可 None = 纯内存模式)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        self._config: Any = config              # Settings(只读 TTL/合并窗)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        # 队列联动(R12-3):**惰性取值**而非构造期绑定 —— provider 常先于队列构造</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        # (装配序不定),取值函数保证&quot;用的时候才找队列&quot;。给定时,本 provider 只**驱动**</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        # `queue.pause/resume`(它俩是 queue.suspended/resumed 事件的唯一写者),</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        # 不再自行 append,避免双写。</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        self._queue_getter: Any = queue_getter</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        self._queue_driven: bool = False        # 本次挂起是否由队列驱动(决定谁来恢复)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        self._paused_queue: Any = None          # 恢复实际暂停过的队列，禁止重新取错对象</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        self._transition_lock = asyncio.Lock()  # 仅本 provider 的登记/队列转换边界</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        self._initializing: Any = None          # 当前 append 的日志与起始 seq，仅供路由</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        self._channel: Optional[str] = default_channel_of(channel)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        &quot;&quot;&quot;本 provider 服务的**交互外壳**归一化名(N5)。</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code></code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        ``&quot;acp:&lt;id&gt;&quot;`` → ``&quot;acp&quot;``;**非法/未知/None** → ``None``。</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code></code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        **纪律(N5 修复点)**:这是**provider 级缺省**,用于 ``user_choice`` 与信任</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        名单判定,**不得**作为&quot;ctx 未声明通道&quot;时的回退源 —— 那正是修复前的缺陷</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        (缺失通道被硬编码 ``&quot;desktop&quot;`` 劫持成人类通道,与治理层 fail-closed 矛盾)。</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        ctx 的声明是唯一权威;缺失即 fail-closed(见 ``_ensure_channel``)。</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        self._headless: bool = bool(headless)   # 缺省 headless 标志(装配上下文)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        self._pending: dict[int, ApprovalRequest] = {}</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        self._merge: dict[tuple[str, str], list[ApprovalRequest]] = {}</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        self._trust: dict[str, TrustEntry] = {}</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        self._trust_max: int = int(trust_max or DEFAULT_TRUST_MAX)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        self._enabled: bool = False             # 信任名单默认关(SECURITY §5.4)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        self._suspended: bool = False           # 队列挂起水位(F043;重复挂起合并)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        self._suspend_log: Any = None           # 挂起事件落点(恢复事件同落点)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        self._detached: bool = False            # detach 幂等标记</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        self._subscription_owner = f&#x27;approval:{id(self)}&#x27;</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        self._tasks: set = set()                # fire-and-forget 任务登记(防 GC)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        self._reviewer = None  # trusted assembly only; never provided by tool arguments</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        self._grant_slots: dict[str, str] = {}  # call_id → granted 绑定指纹(executor</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        # 重入校验用;call_id 每次调用唯一,单 slot 无生命周期问题)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        self._ref_slots: dict[str, int] = {}    # call_id → approval identity(S4-P1-2:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        # = 该次 approval.requested 的 seq(batch lead);结算后仍可查,供治理层把</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        # D2.approval_ref 关联到真实 approval lifecycle——不新造 identity)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        # 裁决事件订阅:approval.granted/denied/timeout → on_verdict(DIS-SEAM §6.2</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        # Definition.subscriptions 同款);owner=&quot;approval&quot; 供 detach 摘除。</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        if self._bus is not None:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            for t in (&quot;approval.granted&quot;, &quot;approval.denied&quot;, &quot;approval.timeout&quot;):</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                try:</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                    self._bus.subscribe(t, self.on_verdict, owner=self._subscription_owner)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                except Exception as exc:         # noqa: BLE001 订阅失败不阻断构造</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>                    logger.warning(&quot;approval 订阅 %s 失败: %s&quot;, t, exc)</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        # TTL / 合并窗配置编译(config 键面 security.approval.ttl_ms / merge_window_s)</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        self._ttl_ms: int = self._cfg_int(</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            (&quot;security&quot;, &quot;approval&quot;, &quot;ttl_ms&quot;), 120_000)          # 120s 超时=denied</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        self._merge_window_ms: int = self._cfg_int(</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            (&quot;security&quot;, &quot;approval&quot;, &quot;merge_window_s&quot;), 60) * 1000  # 60s 窗口</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code></code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    # ======================================================== 审批主入口</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    async def request(self, call: Any, args_summary: str, ctx: Any, *,</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                      ttl_ms: Optional[int] = None,</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                      binding: Optional[str] = None) -&gt; str:</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        &quot;&quot;&quot;审批主入口(F015;executor 关 2.5 唯一调用方)→ granted/denied/timeout。</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code></code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        binding:executor 传入的&quot;授权↔执行&quot;绑定指纹(本轮参数序列化),granted</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        时按 call_id 记录,供 executor 重入 guard 得到 approval 决策时校验一致</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        (批准针对同参数才放行);信任命中路径同样记录。None = 未绑定(旧调用方)。</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code></code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        流程:通道检查(headless → APR-501 直接拒)→ 信任名单命中(仅交互+开)返回</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        granted → 60s 合并或新建批(强同步 approval.requested,approval_id=事件 seq)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        → 等裁决/超时 → 返回结果字面量。denied/timeout 由 executor 解读为不执行,</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        本模块无执行权;granted 后 executor 仍重入 guard 链(单调性高于人类意志)。</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>        ch = self._ensure_channel(ctx)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        if ch is None:</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>            return self._deny_no_channel(call)   # 恒 raise APR-501(见偏离 2)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        sess = self._log_of(ctx) or self._session</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        if sess is None:</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            raise_code(&quot;CYC-999&quot;, module=&quot;approval&quot;,</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                       hint=&quot;会话日志未接线(ctx.session=None),审批请求被拒&quot;)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        sid = self._sid_of(ctx, sess)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        args = getattr(call, &quot;args&quot;, None)</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        if not isinstance(args, dict):</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            args = getattr(call, &quot;raw_args&quot;, {}) or {}</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        fp = self._fingerprint(call.name, args)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        ttl = self._ttl_ms if ttl_ms is None else int(ttl_ms)</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        # 信任名单命中:本会话内&quot;同工具同参已批准&quot; → 跳过再次询问(仅交互+开)</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        if self._trust_hit(fp, sid, ch):</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>            if binding:                             # 信任命中也记录绑定(重入校验面)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>                cid = getattr(call, &quot;call_id&quot;, &quot;&quot;) or &quot;&quot;</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                if cid:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>                    self._grant_slots[cid] = binding</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            return &quot;granted&quot;                     # executor 仍重入 guard 链</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        req = None</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        registered = []</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        try:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>            async with self._transition_lock:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>                if self._detached:</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>                    raise_code(&quot;APR-503&quot;, why=&quot;审批服务已关闭&quot;)</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>                req = await self._register(</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>                    call, args_summary, ch, ttl, sid, sess, fp, binding, registered,</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>                    getattr(ctx, &#x27;task_id&#x27;, None))</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            runtime = getattr(ctx, &#x27;platform_runtime&#x27;, None)</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>            if self._reviewer is not None and runtime is not None and req.approval_id is not None:</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                import copy</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                review = {&#x27;tool&#x27;: call.name, &#x27;args&#x27;: copy.deepcopy(args), &#x27;call_id&#x27;: req.call_id,</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                    &#x27;context&#x27;: [e.payload.get(&#x27;content&#x27;,&#x27;&#x27;) for e in sess.events_after(0) if e.type==&#x27;user.message&#x27;][-1:],</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                    &#x27;scope&#x27;: {&#x27;mode&#x27;: runtime.definition.sandbox_profile.mode,</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                        &#x27;allowed_tools&#x27;: list(runtime.definition.allowed_tools),</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                        &#x27;session_id&#x27;: sid, &#x27;task_id&#x27;: str(getattr(ctx,&#x27;task_id&#x27;,&#x27;&#x27;) or &#x27;&#x27;),</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                        &#x27;network&#x27;: runtime.definition.sandbox_profile.network}}</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                self._own(self._review_request(req, review))</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            return await self._wait_any(req)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        except BaseException:</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>            # Registration can fail/cancel while append or pause is suspended.</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>            # Only clean up a request this invocation actually registered.</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>            if req is None and registered:</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                req = registered[0]</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>            if req is not None:</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                try:</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>                    await self._cancel_request(req)</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>                except Exception:</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>                    logger.warning(&quot;approval cleanup failed; preserving primary error&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            raise</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code></code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>    async def _register(self, call, args_summary, ch, ttl, sid, sess, fp, binding, registered, task_id=None):</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        &quot;&quot;&quot;Called with the provider transition lock, through pause acknowledgement.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        # 60s 合并防轰炸(R13):同指纹且批未终态且在窗口内 → 挂批,不新增请求事件。</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        # **键含 sid**(F-28):provider 按 spine 共享,子会话与父会话的指纹可相同,</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        # 若只按指纹合并,子请求会挂进父批并被父的裁决唤醒(跨会话授权污染)。</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        # 与 _trust 的 `_trust_hit(fp, sid, ch)` 口径对齐——信任名单本就按会话判。</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        batch = self._merge.get((sid, fp))</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        if (batch and not batch[0].is_terminal</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>                and time.monotonic() - batch[0].batch_mono</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>                &lt; self._merge_window_ms / 1000.0):</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>            req = self._new_waiter(fp, call, args_summary, ch, ttl, sid=sid,</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>                                   sess=sess, binding=binding)</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>            batch.append(req)                    # 挂到既有批,等同一裁决</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>            req.batch = batch</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>            registered.append(req)</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>            return req</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        # 开新批:强同步 approval.requested(approval_id = append 返回 seq)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        payload = {&quot;tool&quot;: call.name, &quot;args_summary&quot;: args_summary,</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>                   &quot;ttl_ms&quot;: ttl, &quot;risk&quot;: &quot;high&quot;}</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        # Exact execution input is presented without the usual summary truncation.</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        # Secret redaction remains mandatory; reviewer receives a separate copy.</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        runtime = getattr(getattr(self, &#x27;_platform_runtime&#x27;, None), &#x27;definition&#x27;, None)</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        if runtime is not None:</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>            from pyharness.config import redact</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            raw = json.dumps(getattr(call,&#x27;args&#x27;,None) or getattr(call,&#x27;raw_args&#x27;,{}) or {}, ensure_ascii=False)</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>            shown = redact(raw)</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>            payload[&#x27;details&#x27;] = {&#x27;arguments&#x27;: shown, &#x27;redacted&#x27;: shown != raw,</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>                &#x27;execution&#x27;: runtime.sandbox_profile.mode,</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>                &#x27;reason&#x27;: &#x27;工具操作需要确认；批准后仍检查原有工具、文件与账户权限&#x27;}</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>            arguments=getattr(call,&#x27;args&#x27;,None) or getattr(call,&#x27;raw_args&#x27;,{}) or {}</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>            payload[&#x27;details&#x27;][&#x27;files&#x27;]=[redact(str(arguments[&#x27;path&#x27;]))] if &#x27;path&#x27; in arguments else []</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>            if call.name in (&#x27;workspace.export_artifact&#x27;,&#x27;workspace.apply_patch&#x27;):</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>                item=await self._platform_runtime.platform.artifact(arguments[&#x27;artifact_id&#x27;])</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>                payload[&#x27;details&#x27;][&#x27;files&#x27;]=[redact(item[&#x27;filename&#x27;])]</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                payload[&#x27;details&#x27;][&#x27;execution&#x27;]=&#x27;账户产物存储（服务端）&#x27;</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        trace: dict = {&quot;channel&quot;: ch}</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        if getattr(call, &quot;call_id&quot;, None):</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>            trace[&quot;call_id&quot;] = call.call_id</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        if getattr(call, &quot;parent_seq&quot;, None):</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>            trace[&quot;parent_seq&quot;] = call.parent_seq</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        stats = getattr(sess, &quot;stats&quot;, None)</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        self._initializing = (sess, stats()[&quot;seq&quot;]) if callable(stats) else None</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        try:</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>            env = await sess.append(&quot;approval.requested&quot;, payload,</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                                    actor=&quot;tool&quot;, sync=True, trace=trace,</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>                                    **({&#x27;task_id&#x27;: str(task_id)} if task_id else {}))</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>        finally:</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>            self._initializing = None</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        req = self._new_waiter(fp, call, args_summary, ch, ttl, sid=sid,</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>                               sess=sess, binding=binding)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        req.approval_id = env.seq                # approval_id=请求事件 seq</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        req.batch_mono = time.monotonic()</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>        # F-28 一级保护:approval_id 以**事件 seq** 为键,而 provider 跨会话共享、</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        # 子会话 seq 自 1 重数 ⇒ 父子可能同键。**禁止跨会话覆盖**(覆盖会让 A 的</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>        # 裁决去解决 B 的请求)。同会话重入仍按原语义放行。</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        # 已知副作用:此守卫位于 approval.requested 之后,拒绝时该事件已落盘而</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        # 无裁决留痕(工具侧会以 APR-503 记 tool.error 形成可追溯的失败记录)。</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>        # 结构性修法(复合键 (sid, approval_id))见 F1-X5/X6,本阶段不做。</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>        _prior = self._pending.get(env.seq)</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>        if _prior is not None and getattr(_prior, &quot;session_id&quot;, &quot;&quot;) != sid:</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>            raise_code(&quot;APR-503&quot;, approval_id=env.seq,</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>                       why=&quot;approval_id 跨会话碰撞:同 seq 已被另一会话占用&quot;,</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>                       advice=&quot;禁止跨会话覆盖 pending(fail-closed);&quot;</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>                              &quot;复合键设计见 F1-X5/X6&quot;)</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        self._pending[env.seq] = req</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        self._merge[(sid, fp)] = req.batch</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        registered.append(req)</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code></code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        if self._detached:</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>            self._settle(req, &quot;denied&quot;, by=&quot;system&quot;)</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>            return req</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        self._start_ttl(req)                     # TTL 包含等待 pause 确认的时间</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        if not self._suspended:</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>            self._suspended = True</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>            self._suspend_log = sess</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>            await self._pause_queue_or_record(sess)</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        return req</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code></code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>    def _deny_no_channel(self, call: Any) -&gt; str:</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        &quot;&quot;&quot;无通道直接拒(APR-501;零事件零等待,见偏离 2;恒 raise 不返回)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        raise_code(&quot;APR-501&quot;, tool=call.name,</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>                   call_id=getattr(call, &quot;call_id&quot;, &quot;&quot;),</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>                   hint=&quot;headless/无交互通道:审批不可用,直接拒&quot;</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>                        &quot;(接通道或不用 high 工具;不发 approval.requested,无等待)&quot;)</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code></code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>    # ================================================== 人类裁决入口(外壳)</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code></code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code></code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>    # ================================================== 终态迁移(一次性消费)</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code></code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>    # ================================================== TTL(超时=denied 安全默认)</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code></code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code></code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>    # ------------------------------------------------- 队列联动(R12-3)</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>    def _queue(self) -&gt; Any:</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        &quot;&quot;&quot;惰性取本会话队列;取值异常上抛，禁止伪装成未装配。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>        getter = self._queue_getter</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>        if getter is None:</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>            return None</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>        return getter() if callable(getter) else getter</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code></code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>    async def _pause_queue_or_record(self, sess: Any) -&gt; None:</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>        q = self._queue()</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>        if q is not None:</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>            # Record ownership before awaiting: failed/cancelled pause may have</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>            # already changed the real queue, so cleanup must reach that queue.</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>            self._paused_queue = q</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>            self._queue_driven = True</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>            await q.pause(&quot;approval&quot;, by=&quot;system&quot;)</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        else:</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>            await sess.append(&quot;queue.suspended&quot;, {&quot;reason&quot;: &quot;approval&quot;}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code></code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>    async def _resume_queue_or_record_async(self, sess: Any) -&gt; None:</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>        if self._queue_driven:</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>            await self._paused_queue.resume(&quot;approval&quot;, by=&quot;system&quot;)</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>            self._queue_driven = False</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>            self._paused_queue = None</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        else:</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>            await (self._suspend_log or sess).append(</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>                &quot;queue.resumed&quot;, {&quot;reason&quot;: &quot;approval&quot;}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code></code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>    # ================================================== 通道与指纹</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code></code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code></code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>    # ================================================== 等待者工厂</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code></code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code></code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>    # ================================================== 会话级信任名单</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code></code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code></code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>    # ================================================== 会话关闭/detach</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code></code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code></code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>    # ================================================== 查询与公共只读</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code></code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code></code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>    # ================================================== 内部辅助</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code></code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code></code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code># ---------------------------------------------------------------- 别名/工厂</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code># DIS-SEAM §6.2 seam B Provider 名;装配层经 ctx.approval 注入本对象</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>ApprovalService = ApprovalProvider</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code></code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code></code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>def create_approval(*, session: Any = None, bus: Any = None, config: Any = None,</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>                    channel: Optional[str] = None, headless: bool = False,</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>                    trust_max: int = DEFAULT_TRUST_MAX) -&gt; ApprovalProvider:</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>    &quot;&quot;&quot;装配工厂:构造审批服务并完成裁决事件订阅(bus 注入时)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>    return ApprovalProvider(session=session, bus=bus, config=config,</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>                            channel=channel, headless=headless,</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>                            trust_max=trust_max)</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code></code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code></code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>__all__ = [</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>    &quot;ApprovalProvider&quot;, &quot;ApprovalService&quot;, &quot;ApprovalRequest&quot;, &quot;TrustEntry&quot;,</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>    &quot;create_approval&quot;, &quot;canonical_json&quot;, &quot;CHANNELS&quot;, &quot;VERDICTS&quot;,</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

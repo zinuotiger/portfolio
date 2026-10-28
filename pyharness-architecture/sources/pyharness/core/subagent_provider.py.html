@@ -1,0 +1,57 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/subagent_provider.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/subagent_provider.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 57 行</span></nav><main class="wrap source-page"><h1>pyharness/core/subagent_provider.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：aff665d5370ac0e5b1ba167a531d41d8f8b06a65<br>SHA-256（内容校验）：9ff82883c1f12e310c92b707f2e525c7896d93777803fd475da1ddd125ca0748</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 3 个类、函数与方法</summary><ul><li><a href="#L11">SubagentSpawnProvider（类） · L11–L54</a><ul><li><a href="#L21">SubagentSpawnProvider.__init__（方法） · L21–L22</a></li><li><a href="#L24">SubagentSpawnProvider.handle（异步方法） · L24–L54</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Subagent provider: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from typing import TYPE_CHECKING</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>if TYPE_CHECKING:</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>    from pyharness.core.subagent import SubagentManager</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import asyncio</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from typing import Any</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.core.subagent_models import DEFAULT_BUDGET_RATIO, SubagentSpec</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>class SubagentSpawnProvider:</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    &quot;&quot;&quot;subagent.spawn 工具 Provider 适配器(DIS-SEAM §2.3 Consumer 管道内执行)。</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    handle = spawn + join:LLM 一次工具调用即&quot;派发并回收&quot;,返回 ≤2KB 摘要——摘要经</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    executor 关4 的 tool.result 管道以 tool 数据身份进入主会话派生历史(偏离 8);</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    子任务失败(join 上抛原 PyHError)→ executor 落 tool.error 回喂,不中断主循环。</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    深度由装配层按 manager 层级推(depth = manager.depth+1),不入 LLM 参数(防谎报</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    层级绕过递归闸,见 definition)。</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    def __init__(self, manager: SubagentManager) -&gt; None:</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        self._mgr = manager</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    async def handle(self, args: dict, ctx: Any = None) -&gt; str:</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        &quot;&quot;&quot;Provider 执行面(async;executor 关3 直接协程 wait_for)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        # 递归深度自装配层经 ctx.subagent_depth 传入(见 orchestration):子会话携带</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        # 自身层级 d → 此处计算 d+1,使嵌套 spawn 逐层递增至 ≤3 的硬上限;无该字段</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        # (交互主会话/未装配)= 顶层 d=0 → depth=1。LLM 无法自报 depth 绕过闸门。</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        base = self._mgr._depth</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        if ctx is not None:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            base = int(getattr(ctx, &quot;subagent_depth&quot;, base))</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        spec = SubagentSpec(</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            task=str(args.get(&quot;task&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            tools_subset=args.get(&quot;tools_subset&quot;),</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            deny_extra=list(args.get(&quot;deny_extra&quot;) or []),</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            budget_ratio=float(args.get(&quot;budget_ratio&quot;)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                               or DEFAULT_BUDGET_RATIO),</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            depth=int(args.get(&quot;depth&quot;) or base + 1),</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            creds_allowed=list(args.get(&quot;creds_allowed&quot;) or []),</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>            # N11:JSON-Schema 的 ``notify`` 默认值是 ``null``,经 pydantic 校验后</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            # ``args[&quot;notify&quot;]`` **存在但为 None** ⇒ ``args.get(&quot;notify&quot;, True)`` 拿到</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            # None(默认值 True 永不生效)→ ``bool(None)=False`` ⇒ LLM 工具路径上</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>            # ``subagent.joined`` **永不发出**(父会话丢失回收事实)。此处把&quot;缺省/显式</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>            # None&quot;统一收敛为 True(契约默认),只有显式传 False 才关闭。</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            notify=(True if args.get(&quot;notify&quot;) is None</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                    else bool(args.get(&quot;notify&quot;))))</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        sub_id = await self._mgr.spawn(spec, ctx)       # 四道闸内聚(spawn 校验)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        try:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            return await self._mgr.join(sub_id, ctx=ctx)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            # This provider owns its synchronous child. Independent join timeouts</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            # still leave detached work alive; cancellation must not orphan it.</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>            await self._mgr.cancel(sub_id, reason=&#x27;parent-cancelled&#x27;)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            raise</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>SubagentSpawnProvider.__module__ = &#x27;pyharness.core.subagent&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

@@ -1,0 +1,142 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/todo.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/todo.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 142 行</span></nav><main class="wrap source-page"><h1>pyharness/core/todo.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：66ade2bf500298bbee6e8b79403002b8b17fbaef<br>SHA-256（内容校验）：856679ff2d9798c0b2616e9f38a6dd73b60f90da9b43a391d9f4fb022a28677b</p><p><a href="../../../architecture-detailed.html?node=goals_todos">Goals and Todos（目标核对与待办管理）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 9 个类、函数与方法</summary><ul><li><a href="#L29">TodoManager（类） · L29–L139</a><ul><li><a href="#L36">TodoManager.__init__（方法） · L36–L40</a></li><li><a href="#L43">TodoManager.list_items（方法） · L43–L45</a></li><li><a href="#L47">TodoManager.active_count（方法） · L47–L49</a></li><li><a href="#L52">TodoManager.apply_op（异步方法） · L52–L99</a></li><li><a href="#L102">TodoManager._emit（异步方法） · L102–L107</a></li><li><a href="#L109">TodoManager._require_session（方法） · L109–L113</a></li><li><a href="#L116">TodoManager._render（方法） · L116–L122</a></li><li><a href="#L125">TodoManager.rebuild_from_events（方法） · L125–L139</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/todo.py — 会话级待办 TodoManager(#32 清单项)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>职责一句话:事件源派生的待办表(todo.updated 为唯一写事件,append-only 真源),</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>LLM 经 todo.* 工具消费(ctx.todos),外壳/桌面经同一管理器读看板。</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code></code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>设计约束:</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>- 状态只由事件派生:每次变更 append 一条 todo.updated {task_id, todos[]}(整表</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>  快照语义 = 简易事件溯源;EVENT-SCHEMA TodoUpdatedPayload 字段级权威);</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>- 单任务会话语义:task_id 缺省 &quot;main&quot;(与 goal 关联任务同口径,1 会话 1 任务);</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>- 每任务 ≤20 项(词表 max_length 同源);done 项保留在表内(compaction 清空);</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>- append 强类型二次校验(词表层),payload 非法即 EVT-100 拒写——不落脏事件。</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>import logging</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>log = logging.getLogger(&quot;pyharness.todo&quot;)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>DEFAULT_TASK_ID = &quot;main&quot;</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>MAX_ITEMS = 20</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>&quot;&quot;&quot;每任务待办上限(与 TodoUpdatedPayload.todos max_length=20 同源)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>_OPS = (&quot;add&quot;, &quot;list&quot;, &quot;done&quot;, &quot;remove&quot;, &quot;clear_done&quot;)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>class TodoManager:</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    &quot;&quot;&quot;会话级待办注册表:add/list/done/remove/clear_done + 事件重建。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code></code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    session = SessionLog 或同型 async append 协议(写事件落点);缺失时写操作</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    EVT-100 拒(只读重建实例)。_todos 为 {task_id: [TodoItem 型 dict]} 内存态,</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    可由事件全量重建(INV-01 不持第二份事实源)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    def __init__(self, session: Any = None, *, max_items: int = MAX_ITEMS) -&gt; None:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        self.session = session</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        self._max_items = int(max_items)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        self._todos: dict[str, list[dict]] = {}</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        self._id_seq: int = 0</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    # ============================================================ 只读看板</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    def list_items(self, task_id: str = DEFAULT_TASK_ID) -&gt; list[dict]:</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        &quot;&quot;&quot;某任务待办(副本,只读;按添加序)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        return [dict(x) for x in self._todos.get(task_id, [])]</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    def active_count(self, task_id: str = DEFAULT_TASK_ID) -&gt; int:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        &quot;&quot;&quot;未完成项计数(看板/预算徽章数据源)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        return sum(1 for x in self._todos.get(task_id, []) if not x.get(&quot;done&quot;))</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    # ============================================================ 写操作</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    async def apply_op(self, op: str, *, text: Optional[str] = None,</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                       todo_id: Optional[int] = None,</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                       task_id: Optional[str] = None) -&gt; str:</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        &quot;&quot;&quot;op 分发(LLM 工具面):返回用户可读 summary 文本(executor 关4 直用)。</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        op ∈ add/list/done/remove/clear_done;非法 op → EVT-100;id 不存在 →</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        EVT-101(与 goal 定位异常同族)。list 为只读(不 append)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        tid = task_id or DEFAULT_TASK_ID</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        if op not in _OPS:</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            raise_code(&quot;EVT-100&quot;, hint=f&quot;未知 todo op: {op}&quot;,</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                       advice=f&quot;op ∈ {_OPS}&quot;)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        if op == &quot;list&quot;:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            return self._render(tid)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        self._require_session()</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        items = self._todos.setdefault(tid, [])</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        if op == &quot;add&quot;:</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            text = str(text or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            if not text:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                raise_code(&quot;EVT-100&quot;, hint=&quot;todo add 缺 text&quot;, field=&quot;text&quot;)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            if len(items) &gt;= self._max_items:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                raise_code(&quot;EVT-100&quot;, hint=f&quot;待办超上限({self._max_items})&quot;,</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                           advice=&quot;先 done/remove 再添加&quot;)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            self._id_seq += 1</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            items.append({&quot;id&quot;: self._id_seq, &quot;text&quot;: text, &quot;done&quot;: False})</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            await self._emit(tid)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            return f&quot;已添加待办 [{self._id_seq}] {text}(共 {len(items)} 项)&quot;</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        # 其余 op 先定位 id(不存在 → EVT-101)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        if op == &quot;done&quot;:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            for x in items:</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                if x[&quot;id&quot;] == int(todo_id or -1):</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                    x[&quot;done&quot;] = True</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                    await self._emit(tid)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                    return f&quot;待办 [{x[&#x27;id&#x27;]}] {x[&#x27;text&#x27;]} 已完成&quot;</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            raise_code(&quot;EVT-101&quot;, todo_id=todo_id, hint=&quot;todo id 不存在&quot;)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        if op == &quot;remove&quot;:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            for i, x in enumerate(items):</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                if x[&quot;id&quot;] == int(todo_id or -1):</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                    items.pop(i)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                    await self._emit(tid)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                    return f&quot;已移除待办 [{x[&#x27;id&#x27;]}] {x[&#x27;text&#x27;]}&quot;</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            raise_code(&quot;EVT-101&quot;, todo_id=todo_id, hint=&quot;todo id 不存在&quot;)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        if op == &quot;clear_done&quot;:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            kept = [x for x in items if not x.get(&quot;done&quot;)]</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            dropped = len(items) - len(kept)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            self._todos[tid] = kept</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            await self._emit(tid)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            return f&quot;已清理 {dropped} 项已完成待办(剩 {len(kept)} 项)&quot;</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        raise_code(&quot;EVT-100&quot;, hint=f&quot;未知 todo op: {op}&quot;)  # pragma: no cover</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code></code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    # ============================================================ 事件落点</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    async def _emit(self, task_id: str) -&gt; None:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        &quot;&quot;&quot;todo.updated 强类型落盘(词表二次校验;失败上抛不静默)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        await self._require_session().append(</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>            &quot;todo.updated&quot;,</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            {&quot;task_id&quot;: task_id, &quot;todos&quot;: list(self._todos.get(task_id, []))},</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            actor=&quot;tool&quot;)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    def _require_session(self) -&gt; Any:</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        if self.session is None:</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;TodoManager 未注入 session,无法写事件&quot;,</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                       advice=&quot;构造时注入 SessionLog 或同型 append 协议对象&quot;)</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        return self.session</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code></code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    # ============================================================ 渲染</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    def _render(self, task_id: str = DEFAULT_TASK_ID) -&gt; str:</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        items = self._todos.get(task_id, [])</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        if not items:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            return &quot;当前无待办&quot;</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        lines = [f&quot;- [{&#x27;x&#x27; if x[&#x27;done&#x27;] else &#x27; &#x27;}] ({x[&#x27;id&#x27;]}) {x[&#x27;text&#x27;]}&quot;</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                 for x in items]</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        return &quot;\n&quot;.join(lines)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code></code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    # ============================================================ 事件重建</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    @classmethod</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    def rebuild_from_events(cls, events: list[Any]) -&gt; &quot;TodoManager&quot;:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        &quot;&quot;&quot;从事件流重建(崩溃恢复/新 ctx 接旧会话):逐条 todo.updated 重放</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        (last-wins 整表覆盖);未注入 session(只读实例,写操作将拒)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        mgr = cls(session=None)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        for ev in events:</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            if getattr(ev, &quot;type&quot;, &quot;&quot;) != &quot;todo.updated&quot;:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                continue</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            p = getattr(ev, &quot;payload&quot;, {}) or {}</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            tid = p.get(&quot;task_id&quot;) or DEFAULT_TASK_ID</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            raw = p.get(&quot;todos&quot;) or []</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            mgr._todos[tid] = [dict(x) for x in raw]</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            for x in mgr._todos[tid]:           # id 续号(单调不重号)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                mgr._id_seq = max(mgr._id_seq, int(x.get(&quot;id&quot;) or 0))</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        return mgr</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code></code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code></code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>__all__ = [&quot;TodoManager&quot;, &quot;DEFAULT_TASK_ID&quot;, &quot;MAX_ITEMS&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

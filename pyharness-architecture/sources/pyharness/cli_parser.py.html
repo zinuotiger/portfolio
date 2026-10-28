@@ -1,0 +1,139 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/cli_parser.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/cli_parser.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 139 行</span></nav><main class="wrap source-page"><h1>pyharness/cli_parser.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：34f8ae25055ce935ef89249df572b1205f3f403d<br>SHA-256（内容校验）：591eab55b03b7a5b4678b15cb3af5d79b22daf1f082f02c43c72eca6624b86b6</p><p><a href="../../architecture-detailed.html?node=cli">Command Line Interface（命令行入口）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 8 个类、函数与方法</summary><ul><li><a href="#L10">_add_global_flags（函数） · L10–L26</a><ul><li><a href="#L16">_add_global_flags.d（方法） · L16–L17</a></li></ul></li><li><a href="#L28">parse_args（函数） · L28–L83</a><ul><li><a href="#L37">parse_args.leaf（方法） · L37–L48</a></li></ul></li><li><a href="#L85">_positional_of（函数） · L85–L95</a></li><li><a href="#L97">CmdEntry（类） · L97–L104</a></li><li><a href="#L125">_args_json（函数） · L125–L127</a></li><li><a href="#L129">_run_text（异步函数） · L129–L136</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Cli parser: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import argparse</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import sys</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from dataclasses import dataclass</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from typing import Any</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.cli_output import ParseResult, ShellCtx</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>def _add_global_flags(p: argparse.ArgumentParser, *, suppress: bool = False) -&gt; None:</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    &quot;&quot;&quot;全局旗标定义:主解析器带真默认(None/False);叶子用 default=SUPPRESS ——</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    argparse 子解析器以全新 namespace 合并会用它自己的默认覆盖主解析器已解析值</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    (parents 复用会让 `--config x config validate` 的前置旗标被冲成 None);</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    SUPPRESS 缺省即不留键 → 前置值保留、后置旗标仍可覆盖(见偏离 1)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    def d(value: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        return argparse.SUPPRESS if suppress else value</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    p.add_argument(&quot;--config&quot;, &quot;-c&quot;, default=d(None),</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>                   help=&quot;配置文件路径(显式指定后不再搜其余路径,L4 最高优先级)&quot;)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;, default=d(False),</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>                   help=&quot;结构化输出(机器可读事件流)&quot;)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    p.add_argument(&quot;--session&quot;, default=d(None), metavar=&quot;SID&quot;,</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>                   help=&quot;恢复/指定会话 id&quot;)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    p.add_argument(&quot;--verbose&quot;, &quot;-v&quot;, action=&quot;store_true&quot;, default=d(False),</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>                   help=&quot;引擎日志级别 debug&quot;)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>def parse_args(argv: list[str]) -&gt; ParseResult:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    &quot;&quot;&quot;子命令分发解析:全局旗标 + 16 叶子子命令各带参数;未知子命令/缺参 → 用法</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    错误退出 2(argparse 惯例,不造码);--help 列全命令(DEP §5.1 以 --help 为准)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    p = argparse.ArgumentParser(prog=&quot;pyharness&quot;,</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>                                description=&quot;PyHarness Agent 框架(66 功能/6 阶段)&quot;)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    _add_global_flags(p)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    sub = p.add_subparsers(dest=&quot;cmd&quot;, required=True, metavar=&quot;&lt;子命令&gt;&quot;,</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                           title=&quot;子命令(16)&quot;)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    def leaf(name: str, *pos: tuple, **kw: Any) -&gt; argparse.ArgumentParser:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        &quot;&quot;&quot;叶子解析器:全局旗标(SUPPRESS 缺省)+ 通用 *args 位置参(可关)+ 专用</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        位置参;全局旗标放子命令前/后均合法(见偏离 1)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        has_args = bool(kw.pop(&quot;bare_args&quot;, False))</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        help_txt = kw.pop(&quot;help&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        s = sub.add_parser(name, help=help_txt, **kw)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        _add_global_flags(s, suppress=True)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        if has_args:</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            s.add_argument(&quot;args&quot;, nargs=&quot;*&quot;, help=&quot;位置参数&quot;)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        for argname, opt in pos:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            s.add_argument(argname, **opt)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        return s</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    # -- chat/run:交互/单发(会话产生者;run 无 text = headless 读 stdin)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    s = leaf(&quot;chat&quot;, help=&quot;交互对话(默认流式渲染;Ctrl-C 取消/二次退出)&quot;)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    s.add_argument(&quot;--once&quot;, default=None, metavar=&quot;TEXT&quot;,</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                   help=&quot;非交互单轮注入文本(配合 --session;缺省读 stdin)&quot;)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    leaf(&quot;run&quot;, (&quot;text&quot;, {&quot;nargs&quot;: &quot;?&quot;, &quot;help&quot;: &quot;单发任务文本(缺省读 stdin)&quot;}),</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>         bare_args=False, help=&quot;单发任务,无人值守&quot;)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    # -- 引擎单发命令(位置参专名)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    leaf(&quot;plan&quot;, (&quot;goal&quot;, {&quot;help&quot;: &quot;目标&quot;}), bare_args=False,</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>         help=&quot;方案→批准→执行(须交互)&quot;)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    leaf(&quot;search&quot;, (&quot;q&quot;, {&quot;help&quot;: &quot;FTS 检索词&quot;}), bare_args=False,</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>         help=&quot;FTS 全文检索旧会话&quot;)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    leaf(&quot;fork&quot;, (&quot;sid&quot;, {&quot;help&quot;: &quot;被分支会话 id&quot;}), bare_args=False,</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>         help=&quot;分支会话(COW)&quot;)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    leaf(&quot;session&quot;, bare_args=True,</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>         help=&quot;会话列表/show 回放(DEP §5.1: session | session show &lt;sid&gt;)&quot;)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    # -- 其余叶子(通用 args)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    leaf(&quot;schedule&quot;, bare_args=True, help=&quot;定时任务查看/管理&quot;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    leaf(&quot;job&quot;, bare_args=True, help=&quot;任务队列/记录查询&quot;)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    leaf(&quot;workflow&quot;, bare_args=True,</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>         help=&quot;顺序编排:workflow \&quot;步骤1\&quot; \&quot;步骤2\&quot; …(逐步进真 AgentLoop)&quot;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    leaf(&quot;skill&quot;, bare_args=True,</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>         help=&quot;本地技能包:skill | skill &lt;name&gt;(离线,零装配)&quot;)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    leaf(&quot;repair&quot;, bare_args=True, help=&quot;崩溃/损坏修复(F060)&quot;)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    leaf(&quot;desktop&quot;, bare_args=True, help=&quot;桌面程序(pywebview 壳,F065)&quot;)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    leaf(&quot;acp&quot;, bare_args=True, help=&quot;ACP 桥(JSON-RPC over stdio,F066)&quot;)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    leaf(&quot;config&quot;, bare_args=True, help=&quot;config init/validate/show(离线)&quot;)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    leaf(&quot;budget&quot;, bare_args=True, help=&quot;预算报表(离线,F032)&quot;)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    leaf(&quot;stats&quot;, bare_args=True, help=&quot;会话统计(离线,只读派生)&quot;)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code></code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    ns = p.parse_args(argv)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    positional = _positional_of(ns)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    flags = vars(ns)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    flags[&quot;positional&quot;] = positional            # offline_cmd 消费(见偏离 3)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    return ParseResult(cmd=ns.cmd, positional=positional, flags=flags)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>def _positional_of(ns: argparse.Namespace) -&gt; list[str]:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    &quot;&quot;&quot;位置参聚合:通用 args 优先;专名位置参命令聚合命名位置参(见偏离 2)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    args = getattr(ns, &quot;args&quot;, None)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    if args:</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        return list(args)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    out: list[str] = []</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    for name in (&quot;text&quot;, &quot;goal&quot;, &quot;q&quot;, &quot;sid&quot;):</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        val = getattr(ns, name, None)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        if val is not None:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            out.append(val)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    return out</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>class CmdEntry:</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    &quot;&quot;&quot;分发表条目:kind = offline|interactive|run|repair|shell|once;offline = 零装配;</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    need_session = bootstrap 需要装配会话。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code></code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    kind: str</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    offline: bool = False</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    need_session: bool = False</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>CMD_TABLE: dict[str, CmdEntry] = {</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    &quot;chat&quot;:     CmdEntry(&quot;interactive&quot;, need_session=True),</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    &quot;run&quot;:      CmdEntry(&quot;run&quot;, need_session=True),</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    &quot;plan&quot;:     CmdEntry(&quot;once&quot;, need_session=True),     # 引擎单发(真装配见 _cmd_plan)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    &quot;schedule&quot;: CmdEntry(&quot;once&quot;),</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    &quot;job&quot;:      CmdEntry(&quot;once&quot;),</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    &quot;workflow&quot;: CmdEntry(&quot;once&quot;),</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    &quot;skill&quot;:    CmdEntry(&quot;offline&quot;, offline=True),</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    &quot;search&quot;:   CmdEntry(&quot;once&quot;),</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    &quot;session&quot;:  CmdEntry(&quot;once&quot;),</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    &quot;fork&quot;:     CmdEntry(&quot;once&quot;),</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    &quot;repair&quot;:   CmdEntry(&quot;repair&quot;),</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    &quot;desktop&quot;:  CmdEntry(&quot;shell&quot;),</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    &quot;acp&quot;:      CmdEntry(&quot;shell&quot;),</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    &quot;config&quot;:   CmdEntry(&quot;offline&quot;, offline=True),</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    &quot;budget&quot;:   CmdEntry(&quot;offline&quot;, offline=True),</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    &quot;stats&quot;:    CmdEntry(&quot;offline&quot;, offline=True),</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>}</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>def _args_json() -&gt; bool:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    &quot;&quot;&quot;main 兜底路径的 --json 探测(parse 成功后才有值;失败侧不适用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    return bool(sys.argv and &quot;--json&quot; in sys.argv)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code></code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>async def _run_text(sh: ShellCtx, positional: list[str]) -&gt; str:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    &quot;&quot;&quot;run 文本解析(见偏离 4):位置参优先;缺省且 stdin 非 tty → 整读管道;</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    tty 且无参 → 空串(由 run_intent 抛 EVT-100)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    if positional:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        return &quot; &quot;.join(positional)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    if not sys.stdin.isatty():</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        return sys.stdin.read().strip()</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    return &quot;&quot;</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>CmdEntry.__module__ = &#x27;pyharness.cli&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

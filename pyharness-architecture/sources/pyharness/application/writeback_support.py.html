@@ -1,0 +1,198 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/writeback_support.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/writeback_support.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 198 行</span></nav><main class="wrap source-page"><h1>pyharness/application/writeback_support.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：5a9ca5951e3a4d6e0df874d0d3177327e284b713<br>SHA-256（内容校验）：79ae1cfae87c7c63794b5e5d7f8705077f47c3e1a1c81ad5fdb0d7c4e7c6c6dc</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 14 个类、函数与方法</summary><ul><li><a href="#L15">wb_request（函数） · L15–L17</a></li><li><a href="#L20">wb_id（函数） · L20–L20</a></li><li><a href="#L23">require_write_owner（函数） · L23–L30</a></li><li><a href="#L33">approval_digest（函数） · L33–L38</a></li><li><a href="#L41">merge_selection（函数） · L41–L43</a></li><li><a href="#L46">WritebackSupport（类） · L46–L198</a><ul><li><a href="#L47">WritebackSupport._wb_exact（方法） · L47–L53</a></li><li><a href="#L55">WritebackSupport._wb_grant_gate（方法） · L55–L67</a></li><li><a href="#L69">WritebackSupport._wb_basis（方法） · L69–L88</a></li><li><a href="#L90">WritebackSupport._wb_current（方法） · L90–L102</a></li><li><a href="#L104">WritebackSupport._wb_blob（方法） · L104–L108</a></li><li><a href="#L110">WritebackSupport._wb_summary（方法） · L110–L123</a></li><li><a href="#L125">WritebackSupport._wb_commit_summary（方法） · L125–L136</a></li><li><a href="#L138">WritebackSupport._validate_writeback_record（方法） · L138–L198</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Metadata history and current request authority are separate writeback gates.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import json</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import sqlite3</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from contextlib import closing</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from datetime import datetime,timezone</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.writeback_records import WRITEBACK_MODELS</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.writeback_contracts import MergePreviewCommand</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.application.source_grants import authorize_root,parse_expiry</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.application.source_snapshot import checked_private_bytes</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.application.delivery_support import selected_outputs</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.errors import PyHError,raise_code</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>def wb_request(project,operation,command):</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    return digest_of(canonical(dict(operation=&#x27;writeback.&#x27;+operation,project_id=project,command=command)))</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>def wb_id(value,kind):return getattr(value.selection,WRITEBACK_MODELS[kind][1])</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>def require_write_owner(service,subject):</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    from pyharness.application.accounts import Accounts</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    if subject==&#x27;local-operator&#x27; and service.tenant_id==&#x27;default&#x27; and not Accounts.manages_tenant(service._storage_root(),&#x27;default&#x27;):return</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    path=service._storage_root()/&#x27;accounts.sqlite3&#x27;</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    if not path.is_file():raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_owner_required&#x27;)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    with closing(sqlite3.connect(path.as_uri()+&#x27;?mode=ro&#x27;,uri=True)) as db:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        found=db.execute(&quot;SELECT 1 FROM members WHERE user_id=? AND tenant=? AND role=&#x27;owner&#x27;&quot;,(subject,service.tenant_id)).fetchone()</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    if not found:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_owner_required&#x27;)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code></code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>def approval_digest(row):</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    value=row[&#x27;merge_plan&#x27;]</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    return digest_of(canonical(dict(operation=&#x27;writeback.apply&#x27;,actor=value[&#x27;created_by&#x27;],</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        plan_ref=dict(plan_id=value[&#x27;selection&#x27;][&#x27;plan_id&#x27;],revision=value[&#x27;revision&#x27;],digest=row[&#x27;digest&#x27;],source_seq=row[&#x27;source_seq&#x27;]),</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        basis_digest=value[&#x27;basis_digest&#x27;])))</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code></code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>def merge_selection(command):</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    raw=command.model_dump() if hasattr(command,&#x27;model_dump&#x27;) else dict(command)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    return MergePreviewCommand.model_validate({k:raw[k] for k in MergePreviewCommand.model_fields})</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>class WritebackSupport:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    def _wb_exact(self,resources,project,kind,reference):</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        key=WRITEBACK_MODELS[kind][1];row=resources.get(reference[key],{});value=row.get(kind)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        if not value or value[&#x27;project_id&#x27;]!=project:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_reference_unavailable&#x27;)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        if kind==&#x27;writeback_grant&#x27; and value[&#x27;revoked&#x27;]:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_grant_revoked&#x27;)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        actual={key:value[&#x27;selection&#x27;][key],&#x27;revision&#x27;:value[&#x27;revision&#x27;],&#x27;digest&#x27;:row[&#x27;digest&#x27;],&#x27;source_seq&#x27;:row[&#x27;source_seq&#x27;]}</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        if actual!=reference:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;writeback_reference_changed&#x27;)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        return row</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    def _wb_grant_gate(self,resources,project,reference,actor,authorize,service):</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        from pyharness.application.delivery_identity import require_member</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        row=self._wb_exact(resources,project,&#x27;writeback_grant&#x27;,reference);value=row[&#x27;writeback_grant&#x27;]</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        self._context_project(resources,project,value[&#x27;project_revision&#x27;])</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        if actor!=value[&#x27;recipient_id&#x27;]:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_recipient_required&#x27;)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        require_write_owner(service,value[&#x27;created_by&#x27;]);require_member(service,actor)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        if authorize_root(value[&#x27;canonical_root&#x27;])!={k:value[k] for k in (&#x27;canonical_root&#x27;,&#x27;device&#x27;,&#x27;inode&#x27;,&#x27;root_identity&#x27;)}:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            raise_code(&#x27;EVT-101&#x27;,reason=&#x27;writeback_root_changed&#x27;)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        private=service._storage_root().resolve();root=Path(value[&#x27;canonical_root&#x27;])</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        if root.is_relative_to(private) or private.is_relative_to(root):raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_private_storage_overlap&#x27;)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        if parse_expiry(value[&#x27;selection&#x27;][&#x27;expires_at&#x27;])&lt;=datetime.now(timezone.utc):raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_grant_expired&#x27;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        return row</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code></code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    def _wb_basis(self,resources,project,command,actor):</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        grant=self._wb_exact(resources,project,&#x27;writeback_grant&#x27;,command.grant_ref.model_dump())</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        package=self._delivery_exact(resources,project,&#x27;delivery_package&#x27;,command.package_ref.model_dump())</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        accepted=self._delivery_exact(resources,project,&#x27;delivery_acceptance&#x27;,command.acceptance_ref.model_dump())</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        if grant[&#x27;writeback_grant&#x27;][&#x27;recipient_id&#x27;]!=actor or package[&#x27;delivery_package&#x27;][&#x27;created_by&#x27;]!=actor:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_subject_mismatch&#x27;)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        if accepted[&#x27;delivery_acceptance&#x27;][&#x27;selection&#x27;][&#x27;package_ref&#x27;]!=command.package_ref.model_dump() or self._acceptance_verdict(accepted[&#x27;delivery_acceptance&#x27;])!=&#x27;passed&#x27;:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_independent_acceptance_required&#x27;)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        from pyharness.application.delivery_contracts import DeliveryPackageCommand</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        selection=DeliveryPackageCommand.model_validate(package[&#x27;delivery_package&#x27;][&#x27;selection&#x27;])</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        execution,attempt,_=self._delivery_package_basis(resources,project,selection,actor)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        task=self._s05_exact(resources,project,&#x27;product_task&#x27;,attempt[&#x27;prerequisites&#x27;][&#x27;task_ref&#x27;],&#x27;product_task_id&#x27;,actor)[&#x27;product_task&#x27;]</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        wi=self._task_bound_input(resources,task,actor)[&#x27;workspace_input&#x27;]</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        paths=set(grant[&#x27;writeback_grant&#x27;][&#x27;selection&#x27;][&#x27;paths&#x27;]);outputs=selected_outputs(package[&#x27;delivery_package&#x27;])</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        for f in command.files:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            if f.target_path not in paths:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_path_not_granted&#x27;)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            if f.output_ref and f.output_ref.model_dump() not in outputs:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_output_not_in_package&#x27;)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            if f.input_path is not None and f.input_path not in {i[&#x27;path&#x27;] for i in wi[&#x27;files&#x27;]}:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_baseline_path_unavailable&#x27;)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        return grant,package,accepted,execution,wi</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    def _wb_current(self,resources,project,command,actor,authorize,service):</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        self._context_project(resources,project,command.project_revision)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        grant,package,accepted,execution,wi=self._wb_basis(resources,project,command,actor)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        self._wb_grant_gate(resources,project,command.grant_ref.model_dump(),actor,authorize,service)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        self._delivery_package_gate(resources,package,actor,authorize,service)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        if self._acceptance_current(resources,accepted,actor,authorize,service)!=&#x27;passed&#x27;:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_independent_acceptance_required&#x27;)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        for selected in command.files:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            if selected.deletion_ref:</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                from pyharness.application.writeback_previews import deleted_output</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                deleted_output(service,execution,selected.deletion_ref)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        return grant,package,accepted,execution,wi</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    def _wb_blob(self,digest,gate):</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        from pyharness.application.workspace_store import digest_of</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        gate();raw=checked_private_bytes(self._snapshot_content(digest),before_read=gate)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        if digest_of(raw)!=digest:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;writeback_blob_changed&#x27;)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        gate();return raw</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    def _wb_summary(self,row,kind):</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        value=row[kind]</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        result=dict(value[&#x27;selection&#x27;],project_id=value[&#x27;project_id&#x27;],revision=value[&#x27;revision&#x27;],digest=row[&#x27;digest&#x27;],</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            source_seq=row[&#x27;source_seq&#x27;],created_at=row[&#x27;created_at&#x27;],persisted=True,request_digest=row[&#x27;request_digest&#x27;],execution_authorized=False)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        result.update(project_revision=value[&#x27;project_revision&#x27;],submission_key=value[&#x27;submission_key&#x27;])</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        if kind==&#x27;writeback_grant&#x27;:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            result.update(status=&#x27;revoked&#x27; if value[&#x27;revoked&#x27;] else &#x27;granted&#x27;,recipient_id=value[&#x27;recipient_id&#x27;],root_identity=value[&#x27;root_identity&#x27;])</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        if kind==&#x27;merge_plan&#x27;:result.update(status=&#x27;frozen&#x27;,files=value[&#x27;files&#x27;],mappings=value[&#x27;selection&#x27;][&#x27;files&#x27;],</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            basis_digest=value[&#x27;basis_digest&#x27;],merge_version=value[&#x27;merge_version&#x27;],approval_digest=approval_digest(row),applicable=False)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        if kind==&#x27;writeback_application&#x27;:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            status=&#x27;unknown&#x27; if value[&#x27;status&#x27;]==&#x27;admitted&#x27; else value[&#x27;status&#x27;]</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            result.update(status=status,record_status=value[&#x27;status&#x27;],origin_key=value[&#x27;origin_key&#x27;],complete=status==&#x27;completed&#x27;,effects=value[&#x27;effects&#x27;],replay_allowed=False)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        if kind==&#x27;merge_export&#x27;:result.update(status=&#x27;authorized&#x27;,export_authorized=True)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        return result</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    def _wb_commit_summary(self,row,kind,actor,authorize,*,gate=None):</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        &quot;&quot;&quot;A committed fact is not a safe response after authority changed.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        try:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            self._context_finish(authorize,actor,{})</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            if gate is not None:gate()</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            resources,_,_=self._delivery_read_snapshot()</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        except PyHError:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            # Preserve the original-key ambiguity; a 4xx would incorrectly tell</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            # clients this already committed operation had never been accepted.</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            raise_code(&#x27;PERS-202&#x27;,reason=&#x27;writeback_commit_receipt_unavailable&#x27;)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        return self._wb_summary(row,kind)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    def _validate_writeback_record(self,definition,resources,previous,event,kind):</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        from pyharness.application.writeback_previews import preview_basis</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        value=definition.model_dump();actor=value[&#x27;created_by&#x27;];project=value[&#x27;project_id&#x27;]</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        try:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            if event.payload[&#x27;actor_ref&#x27;]!=actor or event.payload[&#x27;command_id&#x27;]!=value[&#x27;submission_key&#x27;]:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                raise ValueError(&#x27;writeback actor/key mismatch&#x27;)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            self._context_project(resources,project)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            if kind==&#x27;writeback_grant&#x27;:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                if previous is None:</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                    if definition.revision!=1:raise ValueError(&#x27;initial write grant revision&#x27;)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                    operation=&#x27;grant&#x27;;command=value[&#x27;selection&#x27;]</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                else:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>                    old=previous[kind]</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                    if old[&#x27;revoked&#x27;] or any(value[k]!=v for k,v in old.items() if k not in (&#x27;revision&#x27;,&#x27;revoked&#x27;,&#x27;submission_key&#x27;)):</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>                        raise ValueError(&#x27;write grant can only revoke&#x27;)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                    operation=&#x27;revoke&#x27;;command=dict(grant_id=value[&#x27;selection&#x27;][&#x27;grant_id&#x27;],schema_version=1,expected_revision=old[&#x27;revision&#x27;])</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>            elif kind==&#x27;merge_plan&#x27;:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                if previous is not None:raise ValueError(&#x27;immutable merge plan&#x27;)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                command=value[&#x27;selection&#x27;];operation=&#x27;plan&#x27;;selected=merge_selection(command)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                grant,_,_,_,wi=self._wb_basis(resources,project,selected,actor)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                if len(value[&#x27;files&#x27;])!=len(selected.files):raise ValueError(&#x27;merge file count&#x27;)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>                for item,selection in zip(value[&#x27;files&#x27;],selected.files):</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>                    base=next((f for f in wi[&#x27;files&#x27;] if f[&#x27;path&#x27;]==selection.input_path),None)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                    if (item[&#x27;target_path&#x27;]!=selection.target_path or item[&#x27;target&#x27;] and item[&#x27;target&#x27;][&#x27;path&#x27;]!=selection.target_path</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                            or item[&#x27;base_digest&#x27;]!=(base[&#x27;content_digest&#x27;] if base else None)</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                            or item[&#x27;delivery_digest&#x27;]!=(selection.output_ref.sha256 if selection.output_ref else None)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                            or item[&#x27;validation&#x27;][&#x27;status&#x27;]!=&#x27;passed&#x27; or item[&#x27;merged_digest&#x27;] is None and item[&#x27;merged_size&#x27;]!=0):</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                        raise ValueError(&#x27;merge file binding&#x27;)</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>                    before=item[&#x27;target&#x27;][&#x27;sha256&#x27;] if item[&#x27;target&#x27;] else None;after=item[&#x27;merged_digest&#x27;]</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                    action=&#x27;none&#x27; if before==after else &#x27;create&#x27; if before is None else &#x27;delete&#x27; if after is None else &#x27;replace&#x27;</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                    if item[&#x27;action&#x27;]!=action or action!=&#x27;none&#x27; and action not in grant[&#x27;writeback_grant&#x27;][&#x27;selection&#x27;][&#x27;actions&#x27;]:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                        raise ValueError(&#x27;merge action not granted&#x27;)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                if preview_basis(project,actor,selected,value[&#x27;files&#x27;])!=value[&#x27;basis_digest&#x27;] or value[&#x27;basis_digest&#x27;]!=command[&#x27;confirmation_digest&#x27;]:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                    raise ValueError(&#x27;merge confirmation mismatch&#x27;)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>            elif kind==&#x27;writeback_application&#x27;:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                command=value[&#x27;selection&#x27;];operation=&#x27;apply&#x27;</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                plan=self._wb_exact(resources,project,&#x27;merge_plan&#x27;,command[&#x27;plan_ref&#x27;])</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                if plan[&#x27;merge_plan&#x27;][&#x27;created_by&#x27;]!=actor or approval_digest(plan)!=command[&#x27;approval_digest&#x27;]:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                    raise ValueError(&#x27;application approval mismatch&#x27;)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                if previous is None:</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                    if value[&#x27;revision&#x27;]!=1 or value[&#x27;submission_key&#x27;]!=value[&#x27;origin_key&#x27;]:raise ValueError(&#x27;initial application&#x27;)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                    if any(r.get(kind,{}).get(&#x27;selection&#x27;,{}).get(&#x27;plan_ref&#x27;)==command[&#x27;plan_ref&#x27;] for r in resources.values()):</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                        raise ValueError(&#x27;plan already has an application&#x27;)</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                else:</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                    old=previous[kind]</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                    if old[&#x27;revision&#x27;]!=1 or any(value[k]!=old[k] for k in (&#x27;selection&#x27;,&#x27;origin_key&#x27;,&#x27;created_by&#x27;,&#x27;project_id&#x27;,&#x27;project_revision&#x27;)):</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                        raise ValueError(&#x27;application result transition&#x27;)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                    if len(value[&#x27;effects&#x27;])!=len(plan[&#x27;merge_plan&#x27;][&#x27;files&#x27;]):raise ValueError(&#x27;application effect count&#x27;)</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                    for effect,item in zip(value[&#x27;effects&#x27;],plan[&#x27;merge_plan&#x27;][&#x27;files&#x27;]):</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                        if any(effect[k]!=item[k] for k in (&#x27;target_path&#x27;,&#x27;action&#x27;)) or effect[&#x27;expected_digest&#x27;]!=item[&#x27;merged_digest&#x27;] or effect[&#x27;before_digest&#x27;]!=(item[&#x27;target&#x27;][&#x27;sha256&#x27;] if item[&#x27;target&#x27;] else None):</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                            raise ValueError(&#x27;application effect binding&#x27;)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                        if effect[&#x27;status&#x27;]==&#x27;verified&#x27; and effect[&#x27;observed_digest&#x27;]!=effect[&#x27;expected_digest&#x27;]:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                            raise ValueError(&#x27;unverified application&#x27;)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                    if (value[&#x27;status&#x27;]==&#x27;completed&#x27;)!=all(f[&#x27;status&#x27;]==&#x27;verified&#x27; for f in value[&#x27;effects&#x27;]):raise ValueError(&#x27;application completion mismatch&#x27;)</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            else:</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                if previous is not None:raise ValueError(&#x27;immutable merge export&#x27;)</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                command=value[&#x27;selection&#x27;];operation=&#x27;export&#x27;;plan=self._wb_exact(resources,project,&#x27;merge_plan&#x27;,command[&#x27;plan_ref&#x27;])</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                if plan[&#x27;merge_plan&#x27;][&#x27;created_by&#x27;]!=actor:raise ValueError(&#x27;merge export owner&#x27;)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>            if event.payload[&#x27;request_digest&#x27;]!=wb_request(project,operation,command):raise ValueError(&#x27;writeback request mismatch&#x27;)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        except (ValueError,KeyError,PyHError):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;writeback_record_binding&#x27;)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

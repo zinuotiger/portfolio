@@ -1,0 +1,582 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/tenant_settings.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/tenant_settings.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 582 行</span></nav><main class="wrap source-page"><h1>pyharness/core/tenant_settings.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：0294084f606b91db50ee9d4a1397bbf32c369ae5<br>SHA-256（内容校验）：01e30a534fc15e18b11dba016c415a2e6718158bb0c2d01ec689afee076439e4</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 35 个类、函数与方法</summary><ul><li><a href="#L37">_transactional（函数） · L37–L42</a><ul><li><a href="#L38">_transactional.call（方法） · L38–L41</a></li></ul></li><li><a href="#L45">tenants_dir（函数） · L45–L52</a></li><li><a href="#L55">_DataBlob（类） · L55–L57</a></li><li><a href="#L60">_blob（函数） · L60–L63</a></li><li><a href="#L66">_dpapi（函数） · L66–L84</a></li><li><a href="#L87">TenantSettingsStore（类） · L87–L566</a><ul><li><a href="#L90">TenantSettingsStore.__init__（方法） · L90–L92</a></li><li><a href="#L94">TenantSettingsStore.tenant_dir（方法） · L94–L98</a></li><li><a href="#L100">TenantSettingsStore._transaction（方法） · L100–L121</a></li><li><a href="#L124">TenantSettingsStore.token_path（方法） · L124–L126</a></li><li><a href="#L128">TenantSettingsStore.api_token（方法） · L128–L159</a></li><li><a href="#L161">TenantSettingsStore.verify_token（方法） · L161–L179</a></li><li><a href="#L181">TenantSettingsStore._paths（方法） · L181–L184</a></li><li><a href="#L186">TenantSettingsStore._atomic_write（方法） · L186–L216</a></li><li><a href="#L218">TenantSettingsStore._load_doc（方法） · L218–L230</a></li><li><a href="#L232">TenantSettingsStore._save_doc（方法） · L232–L235</a></li><li><a href="#L237">TenantSettingsStore._secret_path（方法） · L237–L247</a></li><li><a href="#L249">TenantSettingsStore._load_secrets（方法） · L249–L268</a></li><li><a href="#L270">TenantSettingsStore._save_secrets（方法） · L270–L274</a></li><li><a href="#L276">TenantSettingsStore._commit（方法） · L276–L306</a></li><li><a href="#L308">TenantSettingsStore._mask_ref（方法） · L308–L317</a></li><li><a href="#L319">TenantSettingsStore.public_profile（方法） · L319–L327</a></li><li><a href="#L329">TenantSettingsStore.list_tenants（方法） · L329–L336</a></li><li><a href="#L338">TenantSettingsStore.state（方法） · L338–L351</a></li><li><a href="#L353">TenantSettingsStore.upsert_profile（方法） · L353–L447</a></li><li><a href="#L449">TenantSettingsStore.activate_profile（方法） · L449–L459</a></li><li><a href="#L461">TenantSettingsStore.delete_profile（方法） · L461–L477</a></li><li><a href="#L479">TenantSettingsStore.active_profile（方法） · L479–L487</a></li><li><a href="#L489">TenantSettingsStore.set_service_secret（方法） · L489–L508</a></li><li><a href="#L510">TenantSettingsStore.resolve_service_secret（方法） · L510–L522</a></li><li><a href="#L524">TenantSettingsStore.resolve_ref（方法） · L524–L540</a></li><li><a href="#L542">TenantSettingsStore._validated_profile（方法） · L542–L553</a></li><li><a href="#L555">TenantSettingsStore.binding（方法） · L555–L561</a></li><li><a href="#L563">TenantSettingsStore.validate_binding（方法） · L563–L566</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Tenant-scoped model profiles and encrypted API-key storage.</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Metadata (provider/model/base_url/etc.) is separated from secrets.  On Windows</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>the secret map is protected with the current user&#x27;s DPAPI key; otherwise the</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>file is stored with POSIX mode 0600.  Secret values are never returned by the</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>public/list API.</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import ctypes</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>import json</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>import logging</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>import os</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>import re</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>import secrets</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>import stat</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>import tempfile</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>import threading</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>import uuid</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>from contextlib import contextmanager</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>from functools import wraps</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>from ctypes import wintypes</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>from pyharness.core.model_configuration_history import ModelConfigurationHistory</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code></code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>from pyharness.core.tenant_identity import (log, _TENANT_RE, _PROFILE_RE, _RESERVED, _STORES, _SESSION_TENANTS, normalize_tenant_id, normalize_profile_id, register_tenant_store, register_session_tenant, tenant_for_session, session_tenants, tenant_of_log, event_tenant_of, event_tenant_allowed, unregister_session_tenant, resolve_tenant_secret)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>_TRANSACTION_LOCKS: dict[str, threading.RLock] = {}</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>_TRANSACTION_GUARD = threading.Lock()</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>def _transactional(method):</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    @wraps(method)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    def call(self, tenant_id, *args, **kwargs):</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        with self._transaction(tenant_id):</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            return method(self, tenant_id, *args, **kwargs)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    return call</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>def tenants_dir(storage_root: Any) -&gt; Path:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    &quot;&quot;&quot;**租户根目录的唯一派生点**:``&lt;storage.root&gt;/tenants``。</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    R31-2:此前该表达式在 ``TenantSettingsStore`` 的构造处各写一遍;而 per-tenant</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    鉴权也要定位同一目录下的 ``token`` 文件,再抄一遍就又是一个&quot;同源规则多份实现&quot;</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    (R14-3 教训)。故收口到此,读写两侧共用。</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    return Path(str(storage_root)).expanduser() / &quot;tenants&quot;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>class _DataBlob(ctypes.Structure):</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    _fields_ = [(&quot;cbData&quot;, wintypes.DWORD),</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                (&quot;pbData&quot;, ctypes.POINTER(ctypes.c_byte))]</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>def _blob(data: bytes) -&gt; tuple[_DataBlob, Any]:</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    buf = ctypes.create_string_buffer(data)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    return (_DataBlob(len(data), ctypes.cast(</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        buf, ctypes.POINTER(ctypes.c_byte))), buf)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code></code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>def _dpapi(data: bytes, *, protect: bool) -&gt; bytes:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    if os.name != &quot;nt&quot;:</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        raise OSError(&quot;DPAPI unavailable&quot;)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    crypt32 = ctypes.windll.crypt32</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    kernel32 = ctypes.windll.kernel32</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    in_blob, keepalive = _blob(data)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    out_blob = _DataBlob()</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    description = ctypes.c_wchar_p(&quot;PyHarness tenant secret&quot;)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    desc_arg = ctypes.byref(description) if protect else None</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    ok = fn(ctypes.byref(in_blob), desc_arg, None, None, None,</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            0x01, ctypes.byref(out_blob))  # CRYPTPROTECT_UI_FORBIDDEN</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    del keepalive</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    if not ok:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        raise OSError(&quot;DPAPI operation failed&quot;)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    try:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        return ctypes.string_at(out_blob.pbData, out_blob.cbData)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    finally:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        kernel32.LocalFree(out_blob.pbData)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code></code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>class TenantSettingsStore(ModelConfigurationHistory):</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    &quot;&quot;&quot;Filesystem-backed tenant settings with write-only model secrets.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    def __init__(self, root: Path) -&gt; None:</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        self.root = Path(root).expanduser()</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        self.root.mkdir(parents=True, exist_ok=True)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    def tenant_dir(self, tenant_id: str) -&gt; Path:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        path = self.root / normalize_tenant_id(tenant_id)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        if not path.resolve().is_relative_to(self.root.resolve()):</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            raise_code(&#x27;CRED-703&#x27;, reason=&#x27;tenant_path_escape&#x27;)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        return path</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code></code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    @contextmanager</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    def _transaction(self, tenant_id):</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        from pyharness.persistence import _FileLock</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        directory = self.tenant_dir(tenant_id)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        directory.mkdir(parents=True, exist_ok=True, mode=0o700)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        key = str(directory.resolve())</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        with _TRANSACTION_GUARD:</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            mutex = _TRANSACTION_LOCKS.setdefault(key, threading.RLock())</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        with mutex:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            lock = _FileLock(directory / &#x27;.models.lock&#x27;)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            if not lock.try_acquire():</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                raise_code(&#x27;CRED-703&#x27;, reason=&#x27;tenant_settings_busy&#x27;)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>            try:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                yield</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            except BaseException as primary:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                try:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                    lock.release()</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                except BaseException as secondary:</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                    primary.add_note(f&#x27;transaction unlock failed: {type(secondary).__name__}&#x27;)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                raise</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            else:</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                lock.release()</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code></code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    # ---------------------------------------------------------- per-tenant 令牌</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    def token_path(self, tenant_id: str) -&gt; Path:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        &quot;&quot;&quot;本租户 API 令牌文件(**读写唯一落点**):``&lt;tenants&gt;/&lt;t&gt;/token``。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        return self.tenant_dir(tenant_id) / &quot;token&quot;</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code></code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    def api_token(self, tenant_id: str) -&gt; str:</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        &quot;&quot;&quot;读取本租户令牌;不存在则**生成**(32 字节 hex,原子写 + ``chmod 0600``,后者仅 POSIX 生效)。</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code></code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        R31-2:per-tenant 鉴权的凭证。**创建路径 = 引导页持操作者令牌时铸/取**</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        (``DesktopApp._index_page``);运维也可直接读取该文件交给外部客户端。</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        **不落日志、不进 API 响应**。</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code></code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        权限:POSIX 上为 0600;**Windows 上 ``chmod`` 不生效**,可读面由父目录 ACL</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        继承决定(见 ``DesktopApp.publish_operator_token`` 的实测说明)。</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        ``default`` 租户**不使用**本机制(沿用全局 ``shell.web.token``,保兼容),</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        故调用方只对非 default 租户取用。</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        p = self.token_path(tenant_id)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        try:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            if p.is_file():</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                tok = p.read_text(encoding=&quot;utf-8&quot;).strip()</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                if tok:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                    return tok</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        except OSError:</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            pass</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        tok = secrets.token_hex(32)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        try:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>            p.parent.mkdir(parents=True, exist_ok=True)   # 生成=显式行为,可建目录</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        except OSError:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            pass</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        self._atomic_write(p, tok.encode(&quot;utf-8&quot;))</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        try:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)     # POSIX 0600;Windows 无效(见 docstring)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        except OSError:</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            pass</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        return tok</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code></code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    def verify_token(self, tenant_id: str, given: str) -&gt; bool:</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        &quot;&quot;&quot;常数时间比对;未出示 / 无令牌文件 / 不匹配 → ``False``(**只读**)。</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code></code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        刻意**不调用** :meth:`api_token`:校验发生在**未认证**的请求路径上,若在那里</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        &quot;读不到就生成&quot;,任意人报一个租户名即可凭空造出令牌与目录(且能读到自己的</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        Set-Cookie),整条授权即为空转。故校验只读,生成只走壳/运维。</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        if not given:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            return False</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        p = self.token_path(tenant_id)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        try:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            if not p.is_file():</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>                return False</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            expected = p.read_text(encoding=&quot;utf-8&quot;).strip()</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        except OSError:</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            return False</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        if not expected:</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            return False</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        return secrets.compare_digest(str(given), expected)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code></code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    def _paths(self, tenant_id: str) -&gt; tuple[Path, Path]:</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        d = self.tenant_dir(tenant_id)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        d.mkdir(parents=True, exist_ok=True)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        return d / &quot;models.json&quot;, d / &quot;model-secrets.bin&quot;</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code></code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    def _atomic_write(path: Path, data: bytes) -&gt; None:</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        fd, name = tempfile.mkstemp(dir=path.parent, prefix=f&#x27;.{path.name}-&#x27;)</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        tmp = Path(name)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        try:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>            # mkstemp creates exclusively with mode 0600; verify before bytes exist.</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            if os.name != &#x27;nt&#x27;:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                os.fchmod(fd, 0o600)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                    raise PermissionError(&#x27;private file permissions unavailable&#x27;)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>            remaining = memoryview(data)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>            while remaining:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>                n = os.write(fd, remaining)</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>                if n &lt;= 0:</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>                    raise OSError(&#x27;short private file write&#x27;)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                remaining = remaining[n:]</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            os.fsync(fd)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            closing_fd, fd = fd, -1</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>            os.close(closing_fd)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            os.replace(tmp, path)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        except BaseException as primary:</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>            if fd != -1:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                try:</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                    os.close(fd)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                except BaseException as secondary:</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>                    primary.add_note(f&#x27;private descriptor cleanup failed: {type(secondary).__name__}&#x27;)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>            try:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>                tmp.unlink(missing_ok=True)</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            except OSError as secondary:</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>                primary.add_note(f&#x27;private temporary cleanup failed: {type(secondary).__name__}&#x27;)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>            raise</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code></code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>    def _load_doc(self, tenant_id: str) -&gt; dict:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        meta, _ = self._paths(tenant_id)</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        if not meta.exists():</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>            return {&quot;active&quot;: &quot;&quot;, &quot;profiles&quot;: []}</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        try:</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            data = json.loads(meta.read_text(encoding=&quot;utf-8&quot;))</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        except (OSError, ValueError) as exc:          # noqa: BLE001</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>            raise_code(&quot;CFG-601&quot;, reason=&quot;tenant_settings&quot;, file=str(meta),</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                       detail=f&quot;{type(exc).__name__}:{exc}&quot;)</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        if not isinstance(data, dict) or not isinstance(data.get(&quot;profiles&quot;), list):</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>            raise_code(&quot;CFG-601&quot;, reason=&quot;tenant_settings&quot;, file=str(meta),</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                       detail=&quot;models.json 必须包含 profiles 数组&quot;)</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        return data</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code></code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>    def _save_doc(self, tenant_id: str, doc: dict) -&gt; None:</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        meta, _ = self._paths(tenant_id)</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        self._atomic_write(meta, json.dumps(</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>            doc, ensure_ascii=False, indent=2).encode(&quot;utf-8&quot;))</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code></code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>    def _secret_path(self, tenant_id: str, doc: dict) -&gt; Path:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        _, legacy = self._paths(tenant_id)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        name = doc.get(&#x27;secret_generation&#x27;)</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        if name is None:</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>            return legacy</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        if not isinstance(name, str) or not re.fullmatch(r&#x27;model-secrets-[a-f0-9]{32}\.bin&#x27;, name):</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            raise_code(&#x27;CRED-703&#x27;, reason=&#x27;invalid_secret_generation&#x27;)</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        path = legacy.with_name(name)</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        if path.is_symlink() or not path.resolve().is_relative_to(legacy.parent.resolve()):</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>            raise_code(&#x27;CRED-703&#x27;, reason=&#x27;secret_path_escape&#x27;)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        return path</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code></code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>    def _load_secrets(self, tenant_id: str) -&gt; dict[str, str]:</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        doc = self._load_doc(tenant_id)</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        secret_path = self._secret_path(tenant_id, doc)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        if not secret_path.exists():</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>            if doc.get(&#x27;secret_generation&#x27;) or any(p.get(&#x27;has_api_key&#x27;) and not p.get(&#x27;api_key_ref&#x27;)</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                                                  for p in doc.get(&#x27;profiles&#x27;, [])):</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>                raise_code(&#x27;CRED-703&#x27;, reason=&#x27;committed_secret_generation_missing&#x27;)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            return {}</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        try:</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            raw = secret_path.read_bytes()</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>            plain = _dpapi(raw, protect=False) if os.name == &quot;nt&quot; else raw</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>            data = json.loads(plain.decode(&quot;utf-8&quot;))</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        except Exception as exc:                       # noqa: BLE001</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>            raise_code(&quot;CRED-703&quot;, reason=&quot;tenant_secret_decrypt&quot;,</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>                       detail=type(exc).__name__,</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>                       advice=&quot;无法解密当前租户的模型密钥文件&quot;)</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        if not isinstance(data, dict):</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>            raise_code(&quot;CRED-703&quot;, reason=&quot;tenant_secret_shape&quot;,</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>                       advice=&quot;租户密钥文件格式非法&quot;)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        return {str(k): str(v) for k, v in data.items()}</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code></code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>    def _save_secrets(self, tenant_id: str, secrets: dict[str, str], *, path=None) -&gt; None:</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        secret_path = path or self._secret_path(tenant_id, self._load_doc(tenant_id))</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        plain = json.dumps(secrets, ensure_ascii=False).encode(&quot;utf-8&quot;)</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        raw = _dpapi(plain, protect=True) if os.name == &quot;nt&quot; else plain</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        self._atomic_write(secret_path, raw)</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code></code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>    def _commit(self, tenant, doc, values):</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        old = self._secret_path(tenant, self._load_doc(tenant))</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        name = f&#x27;model-secrets-{uuid.uuid4().hex}.bin&#x27;</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        new = self.tenant_dir(tenant) / name</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        self._save_secrets(tenant, values, path=new)</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        doc[&#x27;secret_generation&#x27;] = name</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        try:</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>            self._save_doc(tenant, doc)  # sole commit point; old generation unchanged</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        except BaseException as primary:</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            try:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                new.unlink(missing_ok=True)</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>            except OSError as secondary:</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>                primary.add_note(f&#x27;uncommitted secret cleanup failed: {type(secondary).__name__}&#x27;)</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>            raise</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        pending = False</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>        candidates = [old, *self.tenant_dir(tenant).glob(&#x27;model-secrets-*.bin&#x27;)]</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>        for retired in set(candidates):</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            if retired == new:</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                continue</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>            if retired.name != &#x27;model-secrets.bin&#x27; and not re.fullmatch(r&#x27;model-secrets-[a-f0-9]{32}\.bin&#x27;, retired.name):</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>                continue</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>            try:</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                if retired.is_symlink():</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                    pending = True</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                    continue</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>                retired.unlink(missing_ok=True)</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>            except OSError:</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>                pending = True</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>        if pending:</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>            log.warning(&#x27;retired secret generation cleanup pending&#x27;)</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>        return pending</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code></code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>    def _mask_ref(profile: dict) -&gt; str:</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        ref = str(profile.get(&quot;api_key_ref&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        if ref.startswith(&quot;env:&quot;):</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>            return &#x27;env&#x27;</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        if ref.startswith(&quot;file:&quot;):</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>            return &#x27;file&#x27;</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        if profile.get(&quot;has_api_key&quot;):</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>            return &quot;encrypted&quot;</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        return &quot;&quot;</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code></code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>    def public_profile(self, profile: dict) -&gt; dict:</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        fields = (&#x27;id&#x27;, &#x27;label&#x27;, &#x27;provider&#x27;, &#x27;model&#x27;, &#x27;base_url&#x27;, &#x27;temperature&#x27;,</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>                  &#x27;max_tokens&#x27;, &#x27;fallback_models&#x27;, &#x27;supports_vision&#x27;, &#x27;has_api_key&#x27;, &#x27;created_at&#x27;, &#x27;updated_at&#x27;)</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        row = {k: profile[k] for k in fields if k in profile}</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        # Compatibility for older metadata written before has_api_key existed.</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        if not row.get(&quot;has_api_key&quot;) and row.get(&quot;api_key_source&quot;) == &quot;encrypted&quot;:</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>            row[&quot;has_api_key&quot;] = True</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        row[&quot;api_key_source&quot;] = self._mask_ref(profile)</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        return row</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code></code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>    def list_tenants(self) -&gt; list[str]:</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        names = {&quot;default&quot;}</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>        try:</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>            names.update(p.name for p in self.root.iterdir()</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>                         if p.is_dir() and _TENANT_RE.fullmatch(p.name))</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        except OSError:</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>            pass</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>        return sorted(names)</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code></code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>    @_transactional</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>    def state(self, tenant_id: str) -&gt; dict:</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>        tenant = normalize_tenant_id(tenant_id)</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>        doc = self._load_doc(tenant)</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        profiles = [self.public_profile(dict(p)) for p in doc[&quot;profiles&quot;]</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>                    if isinstance(p, dict)]</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>        if tenant != &#x27;default&#x27;:</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>            for row in profiles:</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>                if row.get(&#x27;api_key_source&#x27;) in (&#x27;env&#x27;, &#x27;file&#x27;):</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>                    row[&#x27;credential_status&#x27;] = &#x27;blocked_host_reference&#x27;</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>        return {&quot;tenant_id&quot;: tenant, &quot;active&quot;: str(doc.get(&quot;active&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>                &quot;profiles&quot;: profiles, &quot;count&quot;: len(profiles),</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>                &quot;tenants&quot;: self.list_tenants(),</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>                &quot;secure_storage&quot;: &quot;windows-dpapi&quot; if os.name == &quot;nt&quot; else &quot;posix-0600&quot;}</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code></code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>    @_transactional</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>    def upsert_profile(self, tenant_id: str, body: dict) -&gt; dict:</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>        tenant = normalize_tenant_id(tenant_id)</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        doc = self._load_doc(tenant)</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        profile_id = str((body or {}).get(&quot;id&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>        if not profile_id:</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>            profile_id = f&quot;p-{os.urandom(4).hex()}&quot;</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>        profile_id = normalize_profile_id(profile_id)</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>        model = str((body or {}).get(&quot;model&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>        base_url = str((body or {}).get(&quot;base_url&quot;) or &quot;&quot;).strip().rstrip(&quot;/&quot;)</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        if not model:</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;model&quot;, advice=&quot;模型名称不能为空&quot;)</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>        if not base_url.startswith((&quot;http://&quot;, &quot;https://&quot;)):</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;base_url&quot;,</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>                       advice=&quot;base_url 必须以 http:// 或 https:// 开头&quot;)</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>        if &#x27;supports_vision&#x27; in body and type(body[&#x27;supports_vision&#x27;]) is not bool:</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>            raise_code(&#x27;EVT-100&#x27;, field=&#x27;supports_vision&#x27;)</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>        if &#x27;fallback_models&#x27; in body and (not isinstance(body[&#x27;fallback_models&#x27;],list)</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>                or len(body[&#x27;fallback_models&#x27;])&gt;10</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>                or any(not isinstance(v,str) or not v.strip() for v in body[&#x27;fallback_models&#x27;])):</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>            raise_code(&#x27;EVT-100&#x27;,field=&#x27;fallback_models&#x27;)</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>        for name in (&#x27;api_key&#x27;, &#x27;api_key_ref&#x27;):</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>            if body.get(name) is not None and not isinstance(body[name], str):</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>                raise_code(&#x27;EVT-100&#x27;, field=name, advice=&#x27;credential must be a string&#x27;)</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>        clear = body.get(&#x27;clear_api_key&#x27;, False)</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        if not isinstance(clear, bool):</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>            raise_code(&#x27;EVT-100&#x27;, field=&#x27;clear_api_key&#x27;)</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>        api_key = (body.get(&#x27;api_key&#x27;) or &#x27;&#x27;).strip()</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>        api_key_ref = (body.get(&#x27;api_key_ref&#x27;) or &#x27;&#x27;).strip()</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        if (api_key and api_key_ref) or (clear and (api_key or api_key_ref)):</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>            raise_code(&#x27;EVT-100&#x27;, field=&#x27;credential&#x27;, advice=&#x27;conflicting credential update&#x27;)</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>        if api_key.startswith((&quot;env:&quot;, &quot;file:&quot;)):</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>            api_key_ref, api_key = api_key, &quot;&quot;</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>        if api_key_ref and not api_key_ref.startswith((&quot;env:&quot;, &quot;file:&quot;)):</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;api_key_ref&quot;,</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>                       advice=&quot;api_key_ref 只允许 env:NAME 或 file:PATH&quot;)</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>        if api_key_ref and tenant != &#x27;default&#x27;:</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>            raise_code(&#x27;CRED-703&#x27;, reason=&#x27;host_reference_forbidden&#x27;)</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code></code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>        profiles = [dict(p) for p in doc.get(&quot;profiles&quot;, [])</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>                    if isinstance(p, dict)]</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>        current = next((p for p in profiles if str(p.get(&quot;id&quot;)) == profile_id), {})</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>        changed = bool(api_key or api_key_ref or clear)</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>        if current and current.get(&#x27;base_url&#x27;) != base_url and not changed:</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>            raise_code(&#x27;EVT-100&#x27;, field=&#x27;base_url&#x27;, advice=&#x27;endpoint change requires explicit credential replacement or clear&#x27;)</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>        secrets = self._load_secrets(tenant)</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>        if clear:</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>            secrets.pop(profile_id, None)</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>            api_key_ref = &#x27;&#x27;</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>        elif api_key:</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>            secrets[profile_id] = api_key</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>            api_key_ref = &quot;&quot;</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>        elif api_key_ref:</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>            secrets.pop(profile_id, None)</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>        elif current.get(&quot;api_key_ref&quot;):</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>            api_key_ref = str(current.get(&quot;api_key_ref&quot;))</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>        if api_key_ref and tenant != &#x27;default&#x27;:</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>            raise_code(&#x27;CRED-703&#x27;, reason=&#x27;host_reference_forbidden&#x27;)</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>        now = datetime.now(timezone.utc).isoformat()</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>        row = {</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>            &quot;id&quot;: profile_id,</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>            &quot;label&quot;: str((body or {}).get(&quot;label&quot;) or</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>                         current.get(&quot;label&quot;) or model),</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>            &quot;provider&quot;: str((body or {}).get(&quot;provider&quot;) or</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>                            current.get(&quot;provider&quot;) or &quot;OpenAI Compatible&quot;),</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>            &quot;model&quot;: model,</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>            &quot;base_url&quot;: base_url,</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>            &quot;temperature&quot;: float((body or {}).get(&quot;temperature&quot;,</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>                                                  current.get(&quot;temperature&quot;, 0.7))),</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>            &quot;max_tokens&quot;: int((body or {}).get(&quot;max_tokens&quot;,</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>                                               current.get(&quot;max_tokens&quot;, 4096))),</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>            &quot;fallback_models&quot;: list(body.get(&quot;fallback_models&quot;,</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>                                    current.get(&quot;fallback_models&quot;, []))),</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>            &quot;supports_vision&quot;: body.get(&#x27;supports_vision&#x27;, current.get(&#x27;supports_vision&#x27;, False)),</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>            &quot;api_key_ref&quot;: api_key_ref,</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>            &quot;has_api_key&quot;: bool(profile_id in secrets or api_key_ref),</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>            &quot;created_at&quot;: current.get(&quot;created_at&quot;) or now,</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>            &quot;updated_at&quot;: now,</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>            &#x27;credential_revision&#x27;: uuid.uuid4().hex if changed else current.get(&#x27;credential_revision&#x27;, uuid.uuid4().hex),</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>        }</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>        if not 0 &lt;= row[&quot;temperature&quot;] &lt;= 1.5:</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;temperature&quot;, advice=&quot;temperature 须在 0-1.5&quot;)</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>        if not 1 &lt;= row[&quot;max_tokens&quot;] &lt;= 32768:</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;max_tokens&quot;, advice=&quot;max_tokens 须在 1-32768&quot;)</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>        profiles = [p for p in profiles if str(p.get(&quot;id&quot;)) != profile_id]</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>        profiles.append(row)</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>        profiles.sort(key=lambda p: str(p.get(&quot;label&quot;) or p.get(&quot;id&quot;)))</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>        doc[&quot;profiles&quot;] = profiles</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>        if not doc.get(&quot;active&quot;):</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>            doc[&quot;active&quot;] = profile_id</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>        cleanup_pending = self._commit(tenant, doc, secrets)</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>        return {&quot;ok&quot;: True, &quot;tenant_id&quot;: tenant,</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>                &#x27;cleanup_pending&#x27;: cleanup_pending,</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>                &quot;profile&quot;: self.public_profile(row),</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>                &quot;active&quot;: str(doc.get(&quot;active&quot;) or &quot;&quot;)}</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code></code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>    @_transactional</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>    def activate_profile(self, tenant_id: str, profile_id: str) -&gt; dict:</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code>        tenant = normalize_tenant_id(tenant_id)</code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>        profile_id = normalize_profile_id(profile_id)</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>        doc = self._load_doc(tenant)</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>        if not any(str(p.get(&quot;id&quot;)) == profile_id for p in doc.get(&quot;profiles&quot;, [])):</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>            raise_code(&quot;EVT-101&quot;, profile_id=profile_id,</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>                       advice=&quot;模型档案不存在&quot;)</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>        doc[&quot;active&quot;] = profile_id</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>        self._save_doc(tenant, doc)</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>        return {&quot;ok&quot;: True, &quot;tenant_id&quot;: tenant, &quot;active&quot;: profile_id}</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code></code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>    @_transactional</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>    def delete_profile(self, tenant_id: str, profile_id: str) -&gt; dict:</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>        tenant = normalize_tenant_id(tenant_id)</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>        profile_id = normalize_profile_id(profile_id)</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>        doc = self._load_doc(tenant)</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>        before = len(doc.get(&quot;profiles&quot;, []))</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>        doc[&quot;profiles&quot;] = [p for p in doc.get(&quot;profiles&quot;, [])</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code>                           if str(p.get(&quot;id&quot;)) != profile_id]</code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code>        if doc.get(&quot;active&quot;) == profile_id:</code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>            doc[&quot;active&quot;] = str(doc[&quot;profiles&quot;][0].get(&quot;id&quot;)) if doc[&quot;profiles&quot;] else &quot;&quot;</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>        secrets = self._load_secrets(tenant)</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>        removed_secret = secrets.pop(profile_id, None) is not None</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>        cleanup_pending = self._commit(tenant, doc, secrets)</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>        return {&quot;ok&quot;: before != len(doc[&quot;profiles&quot;]), &quot;tenant_id&quot;: tenant,</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code>                &quot;profile_id&quot;: profile_id, &quot;active&quot;: str(doc.get(&quot;active&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>                &quot;secret_removed&quot;: removed_secret and not cleanup_pending,</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>                &#x27;credential_revoked&#x27;: removed_secret, &#x27;cleanup_pending&#x27;: cleanup_pending}</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code></code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code>    @_transactional</code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code>    def active_profile(self, tenant_id: str) -&gt; Optional[dict]:</code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>        tenant = normalize_tenant_id(tenant_id)</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>        doc = self._load_doc(tenant)</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>        active = str(doc.get(&quot;active&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>        if not active:</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code>            return None</code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>        return next((dict(p) for p in doc.get(&quot;profiles&quot;, [])</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code>                     if str(p.get(&quot;id&quot;)) == active), None)</code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code></code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>    @_transactional</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>    def set_service_secret(self, tenant_id: str, service_id: str, endpoint: str, value: str) -&gt; str:</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code>        &quot;&quot;&quot;Write-only service credential, using the existing atomic secret store.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code>        tenant = normalize_tenant_id(tenant_id)</code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code>        if not re.fullmatch(r&#x27;(?:(?:remote_rag|feishu|wechat):[a-z][a-z0-9_]{1,40}|wechat_context:[0-9a-f]{64})&#x27;, service_id):</code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code>            raise_code(&#x27;CRED-703&#x27;, reason=&#x27;invalid_service_id&#x27;)</code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code>        if not isinstance(value, str) or len(value) &gt; 8192 or any(c in value for c in &#x27;\r\n&#x27;):</code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code>            raise_code(&#x27;CRED-703&#x27;, reason=&#x27;invalid_service_secret&#x27;)</code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code>        doc = self._load_doc(tenant)</code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code>        values = self._load_secrets(tenant)</code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code>        key = &#x27;service:&#x27;+service_id</code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>        if value:</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code>            values[key] = value</code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code>            doc.setdefault(&#x27;service_credentials&#x27;, {})[service_id] = {</code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>                &#x27;endpoint&#x27;: endpoint, &#x27;credential_revision&#x27;: uuid.uuid4().hex}</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>        else:</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code>            values.pop(key, None)</code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code>            doc.setdefault(&#x27;service_credentials&#x27;, {}).pop(service_id, None)</code></div>
+<div class="code-line" id="L507"><a class="line-number" href="#L507">507</a><code>        self._commit(tenant, doc, values)</code></div>
+<div class="code-line" id="L508"><a class="line-number" href="#L508">508</a><code>        return &#x27;service:&#x27;+tenant+&#x27;:&#x27;+service_id if value else &#x27;&#x27;</code></div>
+<div class="code-line" id="L509"><a class="line-number" href="#L509">509</a><code></code></div>
+<div class="code-line" id="L510"><a class="line-number" href="#L510">510</a><code>    def resolve_service_secret(self, ref: str, tenant_id: str, endpoint: str) -&gt; str:</code></div>
+<div class="code-line" id="L511"><a class="line-number" href="#L511">511</a><code>        prefix = &#x27;service:&#x27;+normalize_tenant_id(tenant_id)+&#x27;:&#x27;</code></div>
+<div class="code-line" id="L512"><a class="line-number" href="#L512">512</a><code>        if not isinstance(ref, str) or not ref.startswith(prefix):</code></div>
+<div class="code-line" id="L513"><a class="line-number" href="#L513">513</a><code>            raise_code(&#x27;CRED-703&#x27;, reason=&#x27;service_secret_owner_mismatch&#x27;)</code></div>
+<div class="code-line" id="L514"><a class="line-number" href="#L514">514</a><code>        service_id = ref[len(prefix):]</code></div>
+<div class="code-line" id="L515"><a class="line-number" href="#L515">515</a><code>        with self._transaction(tenant_id):</code></div>
+<div class="code-line" id="L516"><a class="line-number" href="#L516">516</a><code>            record = self._load_doc(tenant_id).get(&#x27;service_credentials&#x27;, {}).get(service_id)</code></div>
+<div class="code-line" id="L517"><a class="line-number" href="#L517">517</a><code>            if not record or record.get(&#x27;endpoint&#x27;) != endpoint:</code></div>
+<div class="code-line" id="L518"><a class="line-number" href="#L518">518</a><code>                raise_code(&#x27;CRED-703&#x27;, reason=&#x27;service_secret_endpoint_mismatch&#x27;)</code></div>
+<div class="code-line" id="L519"><a class="line-number" href="#L519">519</a><code>            value = self._load_secrets(tenant_id).get(&#x27;service:&#x27;+service_id)</code></div>
+<div class="code-line" id="L520"><a class="line-number" href="#L520">520</a><code>            if not value:</code></div>
+<div class="code-line" id="L521"><a class="line-number" href="#L521">521</a><code>                raise_code(&#x27;CRED-701&#x27;, reason=&#x27;service_secret_missing&#x27;)</code></div>
+<div class="code-line" id="L522"><a class="line-number" href="#L522">522</a><code>            return value</code></div>
+<div class="code-line" id="L523"><a class="line-number" href="#L523">523</a><code></code></div>
+<div class="code-line" id="L524"><a class="line-number" href="#L524">524</a><code>    def resolve_ref(self, ref: str, *, binding=None) -&gt; str:</code></div>
+<div class="code-line" id="L525"><a class="line-number" href="#L525">525</a><code>        parts = str(ref or &quot;&quot;).split(&quot;:&quot;, 2)</code></div>
+<div class="code-line" id="L526"><a class="line-number" href="#L526">526</a><code>        if len(parts) != 3 or parts[0] != &quot;tenant&quot;:</code></div>
+<div class="code-line" id="L527"><a class="line-number" href="#L527">527</a><code>            raise_code(&quot;CRED-701&quot;, ref=ref, reason=&quot;tenant_ref&quot;)</code></div>
+<div class="code-line" id="L528"><a class="line-number" href="#L528">528</a><code>        tenant = normalize_tenant_id(parts[1])</code></div>
+<div class="code-line" id="L529"><a class="line-number" href="#L529">529</a><code>        profile_id = normalize_profile_id(parts[2])</code></div>
+<div class="code-line" id="L530"><a class="line-number" href="#L530">530</a><code>        with self._transaction(tenant):</code></div>
+<div class="code-line" id="L531"><a class="line-number" href="#L531">531</a><code>            profile = self._validated_profile(tenant, profile_id, binding=binding)</code></div>
+<div class="code-line" id="L532"><a class="line-number" href="#L532">532</a><code>            values = self._load_secrets(tenant)</code></div>
+<div class="code-line" id="L533"><a class="line-number" href="#L533">533</a><code>            value = str(values.get(profile_id) or &#x27;&#x27;)</code></div>
+<div class="code-line" id="L534"><a class="line-number" href="#L534">534</a><code>            if value:</code></div>
+<div class="code-line" id="L535"><a class="line-number" href="#L535">535</a><code>                return value</code></div>
+<div class="code-line" id="L536"><a class="line-number" href="#L536">536</a><code>            fallback = str(profile.get(&#x27;api_key_ref&#x27;) or &#x27;&#x27;)</code></div>
+<div class="code-line" id="L537"><a class="line-number" href="#L537">537</a><code>            if fallback:</code></div>
+<div class="code-line" id="L538"><a class="line-number" href="#L538">538</a><code>                from pyharness.core.llm import resolve_secret_ref</code></div>
+<div class="code-line" id="L539"><a class="line-number" href="#L539">539</a><code>                return resolve_secret_ref(fallback)</code></div>
+<div class="code-line" id="L540"><a class="line-number" href="#L540">540</a><code>        raise_code(&#x27;CRED-701&#x27;, reason=&#x27;missing&#x27;, advice=&#x27;模型档案未配置 API Key&#x27;)</code></div>
+<div class="code-line" id="L541"><a class="line-number" href="#L541">541</a><code></code></div>
+<div class="code-line" id="L542"><a class="line-number" href="#L542">542</a><code>    def _validated_profile(self, tenant, profile_id, *, binding=None):</code></div>
+<div class="code-line" id="L543"><a class="line-number" href="#L543">543</a><code>        profile = next((p for p in self._load_doc(tenant).get(&quot;profiles&quot;, [])</code></div>
+<div class="code-line" id="L544"><a class="line-number" href="#L544">544</a><code>                        if str(p.get(&quot;id&quot;)) == profile_id), None)</code></div>
+<div class="code-line" id="L545"><a class="line-number" href="#L545">545</a><code>        if profile is None:</code></div>
+<div class="code-line" id="L546"><a class="line-number" href="#L546">546</a><code>            raise_code(&#x27;CRED-701&#x27;, reason=&#x27;missing_profile&#x27;)</code></div>
+<div class="code-line" id="L547"><a class="line-number" href="#L547">547</a><code>        fallback = str((profile or {}).get(&quot;api_key_ref&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L548"><a class="line-number" href="#L548">548</a><code>        if fallback and tenant != &#x27;default&#x27;:</code></div>
+<div class="code-line" id="L549"><a class="line-number" href="#L549">549</a><code>            raise_code(&#x27;CRED-703&#x27;, reason=&#x27;host_reference_forbidden&#x27;)</code></div>
+<div class="code-line" id="L550"><a class="line-number" href="#L550">550</a><code>        if binding is not None and (profile.get(&#x27;credential_revision&#x27;, &#x27;&#x27;) != binding[&#x27;revision&#x27;]</code></div>
+<div class="code-line" id="L551"><a class="line-number" href="#L551">551</a><code>                                    or profile.get(&#x27;base_url&#x27;) != binding[&#x27;endpoint&#x27;]):</code></div>
+<div class="code-line" id="L552"><a class="line-number" href="#L552">552</a><code>            raise_code(&#x27;CRED-703&#x27;, reason=&#x27;stale_model_binding&#x27;, advice=&#x27;模型配置已变更;请创建新会话&#x27;)</code></div>
+<div class="code-line" id="L553"><a class="line-number" href="#L553">553</a><code>        return profile</code></div>
+<div class="code-line" id="L554"><a class="line-number" href="#L554">554</a><code></code></div>
+<div class="code-line" id="L555"><a class="line-number" href="#L555">555</a><code>    def binding(self, ref, endpoint):</code></div>
+<div class="code-line" id="L556"><a class="line-number" href="#L556">556</a><code>        _, tenant, profile = ref.split(&#x27;:&#x27;, 2)</code></div>
+<div class="code-line" id="L557"><a class="line-number" href="#L557">557</a><code>        with self._transaction(tenant):</code></div>
+<div class="code-line" id="L558"><a class="line-number" href="#L558">558</a><code>            row = self._validated_profile(tenant, profile)</code></div>
+<div class="code-line" id="L559"><a class="line-number" href="#L559">559</a><code>            if row.get(&#x27;base_url&#x27;) != endpoint:</code></div>
+<div class="code-line" id="L560"><a class="line-number" href="#L560">560</a><code>                raise_code(&#x27;CRED-703&#x27;, reason=&#x27;endpoint_binding_mismatch&#x27;)</code></div>
+<div class="code-line" id="L561"><a class="line-number" href="#L561">561</a><code>            return {&#x27;revision&#x27;: row.get(&#x27;credential_revision&#x27;, &#x27;&#x27;), &#x27;endpoint&#x27;: endpoint}</code></div>
+<div class="code-line" id="L562"><a class="line-number" href="#L562">562</a><code></code></div>
+<div class="code-line" id="L563"><a class="line-number" href="#L563">563</a><code>    def validate_binding(self, ref, binding):</code></div>
+<div class="code-line" id="L564"><a class="line-number" href="#L564">564</a><code>        _, tenant, profile = ref.split(&#x27;:&#x27;, 2)</code></div>
+<div class="code-line" id="L565"><a class="line-number" href="#L565">565</a><code>        with self._transaction(tenant):</code></div>
+<div class="code-line" id="L566"><a class="line-number" href="#L566">566</a><code>            self._validated_profile(tenant, profile, binding=binding)</code></div>
+<div class="code-line" id="L567"><a class="line-number" href="#L567">567</a><code></code></div>
+<div class="code-line" id="L568"><a class="line-number" href="#L568">568</a><code></code></div>
+<div class="code-line" id="L569"><a class="line-number" href="#L569">569</a><code>__all__ = [</code></div>
+<div class="code-line" id="L570"><a class="line-number" href="#L570">570</a><code>    &quot;TenantSettingsStore&quot;,</code></div>
+<div class="code-line" id="L571"><a class="line-number" href="#L571">571</a><code>    &quot;normalize_profile_id&quot;,</code></div>
+<div class="code-line" id="L572"><a class="line-number" href="#L572">572</a><code>    &quot;normalize_tenant_id&quot;,</code></div>
+<div class="code-line" id="L573"><a class="line-number" href="#L573">573</a><code>    &quot;register_session_tenant&quot;,</code></div>
+<div class="code-line" id="L574"><a class="line-number" href="#L574">574</a><code>    &quot;register_tenant_store&quot;,</code></div>
+<div class="code-line" id="L575"><a class="line-number" href="#L575">575</a><code>    &quot;resolve_tenant_secret&quot;,</code></div>
+<div class="code-line" id="L576"><a class="line-number" href="#L576">576</a><code>    &quot;tenant_for_session&quot;,</code></div>
+<div class="code-line" id="L577"><a class="line-number" href="#L577">577</a><code>    &quot;tenants_dir&quot;,</code></div>
+<div class="code-line" id="L578"><a class="line-number" href="#L578">578</a><code>    &quot;unregister_session_tenant&quot;,</code></div>
+<div class="code-line" id="L579"><a class="line-number" href="#L579">579</a><code>    # 租户事件可见性唯一判据与派生点(两壳共用,2026-09-21)</code></div>
+<div class="code-line" id="L580"><a class="line-number" href="#L580">580</a><code>    &quot;event_tenant_of&quot;,</code></div>
+<div class="code-line" id="L581"><a class="line-number" href="#L581">581</a><code>    &quot;event_tenant_allowed&quot;,</code></div>
+<div class="code-line" id="L582"><a class="line-number" href="#L582">582</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

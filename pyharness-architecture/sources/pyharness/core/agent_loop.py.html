@@ -1,0 +1,511 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/agent_loop.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/agent_loop.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 511 行</span></nav><main class="wrap source-page"><h1>pyharness/core/agent_loop.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：70cd4a4903229426ce8d01dd0c11caa32ff89445<br>SHA-256（内容校验）：e03c57263e9f553d27a643867c33e0758382984677c9f6e2efab52f5fe0172f6</p><p><a href="../../../architecture-detailed.html?node=agent_loop">Agent Loop（模型与工具循环）</a> · <a href="../../../architecture-detailed.html?node=compaction">Context Compaction（上下文任务段压缩）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 18 个类、函数与方法</summary><ul><li><a href="#L76">MaxTurnsExceeded（类） · L76–L80</a></li><li><a href="#L91">RunContext（类） · L91–L107</a></li><li><a href="#L110">RunResult（类） · L110–L119</a></li><li><a href="#L123">AgentLoop（类） · L123–L505</a><ul><li><a href="#L133">AgentLoop.__init__（方法） · L133–L153</a></li><li><a href="#L156">AgentLoop.run（异步方法） · L156–L200</a></li><li><a href="#L203">AgentLoop._run_engine（异步方法） · L203–L248</a></li><li><a href="#L251">AgentLoop.run_turn（异步方法） · L251–L320</a></li><li><a href="#L323">AgentLoop.run_step（异步方法） · L323–L342</a></li><li><a href="#L345">AgentLoop._reset_turn_failures（方法） · L345–L355</a></li><li><a href="#L357">AgentLoop._turn_failure_capped（方法） · L357–L371</a></li><li><a href="#L374">AgentLoop._must_stop（方法） · L374–L386</a></li><li><a href="#L389">AgentLoop._outcome_fingerprint（方法） · L389–L400</a></li><li><a href="#L403">AgentLoop._finish（异步方法） · L403–L419</a></li><li><a href="#L422">AgentLoop.cancel（异步方法） · L422–L444</a></li><li><a href="#L447">AgentLoop.wake（异步方法） · L447–L486</a></li><li><a href="#L488">AgentLoop._pop_pending（方法） · L488–L490</a></li><li><a href="#L493">AgentLoop.state_snapshot（方法） · L493–L505</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/agent_loop.py — Agent 主循环三态机驱动器(specs/agent_loop.py.md 契约;阶段 1 核心)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>F007 主循环:消费 user.message(已由外壳强同步落盘)→ 每轮从会话日志现派生上下文</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>(INV-01)→ llm.chat → 纯文本即终态 / tool_calls 逐工具步执行后进入下一轮。轮数</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>/收敛/取消/预算四类终态闸在此强制;本模块是全框架唯一允许调 ``llm.chat`` 的入口</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>(INV-02)——LLM 经注入的 ctx.llm 调用,绝不 import 真实 API;工具执行一律经注入的</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>ctx.tools.execute(校验/guard/审批/Provider 全在工具层内聚),本模块不 import 外围</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>能力(INV-08 单向:agent_loop → {agent, llm, session, scope})。</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>三态机:顶层三态 idle / running / terminated(PRD F007);paused / stopping 为</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>running 的受控子态(本阶段以字段位表达:state 字面量 + asyncio.Lock 双保险,同会话</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>同时仅一个 running)。终态收尾分工(DIS §0.2.6):session.finished 只由 agent.close</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>写(EVT-104);本模块 _finish 只返回 RunResult(reason),不写 finished。</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>轮口径(DIS §0.2):run = 外壳一次 submit 触发的整段运行(本实现含队内排水,见</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>run() 偏离说明);轮 = run 内一次 LLM 调用及其全部工具;RunContext.turn 计已完成的</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>工具轮(与 DIS/伪码 run.turn += 1 语义一致,文本轮天然终态不占轮数)。</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>偏离说明(相对 specs/agent_loop.py.md 伪码):</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>1. run() = 排水监督器:伪码 run() 主体(while True + 三闸 + 异常分级)落在私有</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>   _run_engine(ctx, run) 中(单输入引擎);公开 run(ctx) 在 state 恒为 running 的</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>   前提下逐件消费 pending(状态表 running→running&quot;取下一 pending,新 RunContext&quot;)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   并返回最后一件的 RunResult。理由:伪码 run 返回即回 idle,与自身状态表及</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   wake()&quot;当前 run 结束后自动取下一件&quot;的 FIFO 口径矛盾;无排水层则并发 submit</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   会乱序插队。排水在 run.cancelled/budget 终态时停止(用户/资源边界,剩余队内</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>   输入保留不静默丢,待下次 wake 按 FIFO 继续消费)。</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>2. BudgetExhausted / MaxTurnsExceeded 为循环控制信号异常,spec 未给归属模块</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   (scope/llm 未实现),本模块本地定义;scope.py 落地后按 INV-08(agent_loop →</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   scope 允许)改为 from pyharness.core.scope import ...。BudgetExhausted 单类</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   收敛已落地(见类定义处注释,P2 修复);catch 仅为防御:主终止路径是 _must_stop</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>   三闸声明式判定。</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>3. ctx 绑定:loop 与会话 1:1(一会话一 agent,ctx.loop),ctx 一经 run(ctx)/wake</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   (env, ctx) 绑定即终身有效(cancel()/队列满留痕等无参路径经 self._ctx 引用);</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>   伪码 cancel(reason) 体内引用 ctx 却无参即因此成立。wake(env, ctx=None) 比伪码</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   wake(env) 多一个可选 ctx:伪码 idle 分支&quot;create_task(run)&quot;同样没有 ctx 来源,</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>   该参数供外壳/测试在 loop 尚未绑定 ctx 时显式注入(已绑定时可省略)。</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>4. 事件 payload 字段以 EVENT-SCHEMA 模型为准(伪码已过时):system.error 载荷用</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   {code, hint, ctx}(模型无 message 键,extra=forbid);system.cancelled 载荷用</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>   {what, reason}(模型必填 what,伪码的 run_id 键会 EVT-100 拒写);hint 文本取自</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>   PyHError.to_model_message()(errors.py 无 to_llm_text 旧名)。</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>5. BUSY 为命名状态字面量(ERR.md §2.11,未注册码),直接构造 PyHError(&quot;BUSY&quot;)——</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>   raise_code 会对未登记码改写为 CYC-999,语义不符。</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>6. 指纹采用&quot;本轮新增 tool.result 事件序列&quot;,经 session.events_after(工具步前</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>   日志水位)派生——无第二份状态(INV-01);连续空指纹轮(全工具失败)计为同指纹,</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>   空转防烧钱语义一致。</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>import asyncio</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>import logging</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>import uuid</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>from collections import deque</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>from dataclasses import dataclass</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>from typing import Any, Deque, Literal, Optional</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>from pyharness.config import load_settings</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>from pyharness.events import Envelope</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>log = logging.getLogger(&quot;pyharness.agent_loop&quot;)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code># 顶层状态(2026-09-14 S1-02 按 ADR-014 收敛):v1.0 只声明**可达**状态集。</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code># 原声明含 paused/stopping/terminated(DIS §1.4),但全文无任何赋值点——是死态,</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code># 且衍生出死分支:wake() 的 &quot;stopping&quot;/&quot;terminated&quot; 拒入、_must_stop 闸3 的</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code># &quot;paused&quot; 判据、agent.close 对 &quot;paused&quot; 的判断。依赖它们的代码已一并删除。</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code># 运行时暂停/恢复(paused + resume())推迟至 v1.1 Runtime Recovery(ADR-014),</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code># 届时按新 ADR 重新引入状态与转移,不得复用本次删除的形态。</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>LoopState = Literal[&quot;idle&quot;, &quot;running&quot;]</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code># RunResult.reason 终态枚举(与 close 枚举对齐,DIS §1.2)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>_REASONS = (&quot;complete&quot;, &quot;max_turns&quot;, &quot;budget&quot;, &quot;cancelled&quot;, &quot;stall&quot;,</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            &quot;timeout&quot;, &quot;error&quot;, &quot;close&quot;)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code># ------------------------------------------------------------ 循环信号异常</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>class MaxTurnsExceeded(Exception):</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    &quot;&quot;&quot;轮数闸信号:防御性捕获 → 终态 reason=max_turns(主路径走 _must_stop 闸1)。</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code></code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    正常情况下本模块不会抛出(轮数由闸前置判定);llm/工具层防绕行兜底用。</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code># BudgetExhausted 单类收敛(P2 修复):与 scope 同型,从 scope 反向 import——此前</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code># scope.py 与 agent_loop 各定义一份且互不引用,scope.check_budget() 抛的类本循环</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code># except 接不住,预算终态会被误判成 CYC-999(当前被 _must_stop 闸顺序遮蔽,潜伏)。</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code># 本模块不再本地定义,统一引用 scope 的循环信号类。</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>from pyharness.core.scope import BudgetExhausted  # noqa: E402,F401</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code># ------------------------------------------------------------ 关键数据结构</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>@dataclass</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>class RunContext:</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    &quot;&quot;&quot;单 run 运行态(伪码字段级;input_seq = 触发本 run 的 user.message seq)。</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    last_fp 为实现字段(DIS 伪码 prev/last 双槽的等价:收敛比较只需&quot;与上一轮</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    是否相同&quot;),可弃重建,不构成第二份消息状态。</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    run_id: str</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    input_seq: int</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    turn: int = 0                     # 已完成工具轮数(文本轮天然终态,不计数)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    error_code: Optional[str] = None</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    error_diagnostics: Optional[dict] = None</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    reason: Optional[str] = None      # 终态原因(_finish 写入)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    stall_streak: int = 0             # 连续同指纹轮数(收敛闸)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    cancelled: bool = False           # 取消置位(声明式;闸2 下一轮触发)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    last_fp: Optional[tuple] = None   # 上一轮收敛指纹(实现字段)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>@dataclass</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>class RunResult:</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    &quot;&quot;&quot;run 结果汇总(_finish 产出;不写 session.finished)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    run_id: str</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    reason: str</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    turns: int</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    last_seq: int                     # 收尾时日志当前最大 seq(派生事实)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    error_code: Optional[str] = None</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    error_diagnostics: Optional[dict] = None</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code># ------------------------------------------------------------ 主循环类</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>class AgentLoop:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    &quot;&quot;&quot;Agent 主循环三态机驱动器(F007;阶段 1 最核心模块)。</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code></code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    构造:cfg = Settings(读 loop.max_turns / loop.convergence_rounds /</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    loop.input_queue_max);显式 kwargs 优先于 cfg 优先于 L1 默认</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    (max_turns=30 / stall_limit=3 / queue_limit=10,权威默认见</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    PARAMETER-ANCHOR 与 specs/agent_loop.py.md F007:默认 30,非 10)。</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    headless = 外壳注入:run 结束后自动关会话(由 agent 层 close,本模块不写)。</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code></code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>    def __init__(self, cfg: Any = None, *,</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                 max_turns: Optional[int] = None,</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                 stall_limit: Optional[int] = None,</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                 queue_limit: Optional[int] = None,</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                 headless: bool = False) -&gt; None:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        if cfg is None:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            cfg = load_settings()          # L1 默认加载(键缺省必可加载)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        self.max_turns: int = max_turns if max_turns is not None \</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            else int(cfg.loop.max_turns)               # 轮数上限(默认 30)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        self.stall_limit: int = stall_limit if stall_limit is not None \</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            else int(cfg.loop.convergence_rounds)      # 收敛阈值(默认 3)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        self.queue_limit: int = queue_limit if queue_limit is not None \</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            else int(cfg.loop.input_queue_max)         # 队深上限(默认 10)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        self.headless: bool = headless</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        self.state: LoopState = &quot;idle&quot;</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        self.pending: Deque[Envelope] = deque()        # running 期输入队列(FIFO)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        self.current: Optional[RunContext] = None      # 执行中 run;idle 为 None</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        self.lock = asyncio.Lock()                     # 单 running 双保险之一</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        self._child_tasks: set[asyncio.Task] = set()   # run 派生工具子任务登记</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        self._ctx: Any = None                          # run 期 ctx 绑定(cancel/wake)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        self._last_reason: Optional[str] = None        # 最近一次终态原因(审计查询)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code></code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    # ======================================================== 主循环入口</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    async def run(self, ctx: Any) -&gt; Optional[RunResult]:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        &quot;&quot;&quot;F007 主循环入口:wake 拉起;断言 idle + 拿锁防重入;队内排水监督器。</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code></code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        每件 pending 输入 = 独立 RunContext(轮数/取消按单输入计),逐件交</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        _run_engine 驱动;输入终态后按 FIFO 取下一件(状态表 running→running),</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        直至队空或遇 cancelled/budget 边界终态;返回最后一件的 RunResult。</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        异常分级收尾在 _run_engine;本层 finally 无条件回 idle、清 current/ctx</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        (协作式取消路径的 CancelledError 不在此吞,沿任务传播由外层 close 收尾)。</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        async with self.lock:</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>            if self.state != &quot;idle&quot;:                  # 锁前置:非 idle 拒入</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>                raise PyHError(&quot;BUSY&quot;, ctx={&quot;advice&quot;: &quot;loop 忙,输入已入队或被拒&quot;})</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>            self._ctx = ctx                           # 1:1 绑定:本 run 期间 cancel</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            self.state = &quot;running&quot;                    #    /队列满留痕有 ctx 可依</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        try:</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>            last: Optional[RunResult] = None</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            while True:</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>                env = self._pop_pending()             # None → 队空</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                if env is None:</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                    return last                       # 无输入可处理(空排水)</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                run = RunContext(run_id=uuid.uuid4().hex, input_seq=env.seq)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                self.current = run</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                # One input is one task budget, while the session ledger is</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                # cumulative. A child arrives with its own preallocated account.</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                from pyharness.core.llm import UsageCounters</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                previous = getattr(ctx, &#x27;counters&#x27;, None)</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                account = previous</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                if isinstance(previous, UsageCounters):</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                    if previous._parent is None:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                        account = previous.new_task(ctx.scope.limits)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                    ctx.counters = account</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                    ctx.scope.bind_task_usage(account)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                try:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                    last = await self._run_engine(ctx, run)   # 伪码 run() 主体</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                finally:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                    if isinstance(previous, UsageCounters):</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                        ctx.counters = previous</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                    self.current = None               # 单输入收尾(与伪码逐件一致)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                # 边界终态(取消/预算)后不再自动取队内下一件:用户/资源边界,</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                # 剩余输入保留在队(不静默丢),下次 wake 按 FIFO 继续消费。</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                if last is not None and last.reason in (&quot;cancelled&quot;, &quot;budget&quot;, &quot;error&quot;, &quot;max_turns&quot;, &quot;stall&quot;):</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>                    return last</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        finally:</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            self.current = None</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            self.state = &quot;idle&quot;                       # 回 idle 等下一输入/队内下一件</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>            # 注:_ctx 不清零——loop 与会话 1:1,绑定终身有效(偏离说明 3)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code></code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    async def _run_engine(self, ctx: Any, run: RunContext) -&gt; RunResult:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        &quot;&quot;&quot;单输入 run 引擎 = specs/agent_loop.py.md run() 伪码主体。</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code></code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        逐轮三闸前置判定 → scope.check_budget(F032)→ run_turn(单轮);轮内异常</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        分级收尾:BudgetExhausted → budget、MaxTurnsExceeded → max_turns、</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        PyHError(LLM-310 等)→ system.error 留痕 → error、未预期 → CYC-999 →</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        error;CancelledError 不吞(置 cancelled 后 re-raise,外层收尾)。</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        try:</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>            while True:                               # 轮 = 一次 LLM 调用及其全部工具</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>                if (r := self._must_stop(ctx, run)) is not None:   # 三闸前置</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>                    return await self._finish(ctx, run, r)</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>                ctx.scope.check_budget()              # F032:超限抛 BudgetExhausted</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                outcome = await self.run_turn(ctx, run)             # 单轮(含工具步)</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>                if outcome is not None:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>                    return await self._finish(ctx, run, outcome)</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        except asyncio.CancelledError:                # F025:不吞;外层(close/cancel)收尾</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>            run.cancelled = True</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>            raise</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        except BudgetExhausted as exc:                # 预算硬闸:无&quot;再给一次机会&quot;</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            run.error_code=&#x27;LLM-305&#x27;</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            run.error_diagnostics=exc.diagnostics</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>            await ctx.session.append(&#x27;system.error&#x27;,dict(code=&#x27;LLM-305&#x27;,hint=&#x27;预算不足；本次模型请求尚未发送&#x27;,</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                ctx=dict(role=&#x27;main_agent&#x27;,fatal=True,diagnostics=exc.diagnostics)),actor=&#x27;system&#x27;,task_id=getattr(ctx,&#x27;task_id&#x27;,None),sync=True)</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>            return await self._finish(ctx, run, &quot;budget&quot;)</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        except MaxTurnsExceeded:                      # 轮数闸(防御路径)</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>            return await self._finish(ctx, run, &quot;max_turns&quot;)</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        except PyHError as e:                         # LLM-310 等结构化错误</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>            from pyharness.core.llm_diagnostics import public_diagnostics</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            run.error_code = e.code</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            run.error_diagnostics = public_diagnostics(e.ctx.get(&quot;diagnostics&quot;), code=e.code, role=&quot;main_agent&quot;)</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            await ctx.session.append(</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                &quot;system.error&quot;,</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>                {&quot;code&quot;: e.code, &quot;hint&quot;: e.code + &quot;: &quot; + run.error_diagnostics[&quot;summary&quot;],</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>                 &quot;ctx&quot;: {&quot;role&quot;: &quot;main_agent&quot;, &quot;fatal&quot;: True, &quot;diagnostics&quot;: run.error_diagnostics}},</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>                actor=&quot;system&quot;, task_id=getattr(ctx, &quot;task_id&quot;, None), sync=True)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>            return await self._finish(ctx, run, &quot;error&quot;)</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        except Exception as e:                        # 未预期兜底:CYC-999,堆栈仅本地</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>            run.error_code = &quot;CYC-999&quot;</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>            log.error(&quot;loop fatal run_id=%s type=%s&quot;, run.run_id, type(e).__name__)</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            await ctx.session.append(</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>                &quot;system.error&quot;,</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>                {&quot;code&quot;: &quot;CYC-999&quot;, &quot;hint&quot;: &quot;Main execution failed&quot;,</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                 &quot;ctx&quot;: {&quot;role&quot;: &quot;main_agent&quot;, &quot;fatal&quot;: True}},</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                actor=&quot;system&quot;, task_id=getattr(ctx, &quot;task_id&quot;, None), sync=True)</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>            return await self._finish(ctx, run, &quot;error&quot;)</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code></code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>    # ======================================================== 单轮驱动器</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>    async def run_turn(self, ctx: Any, run: RunContext) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        &quot;&quot;&quot;单轮:派生历史 → llm.chat → 纯文本直接终态 / tool_calls 逐工具步执行</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        → 轮计数 +1 → 收敛指纹判定。返回 None = 继续下一轮;终态原因串即收尾。</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code></code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        LLM 经注入 ctx.llm.chat 调用(INV-02 唯一合法入口);三档超时/退避/降级</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        由 llm 内部消化;llm.request/usage 事件由 llm 层落日志,本函数不越权。</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        context_runtime=getattr(ctx,&#x27;platform_runtime&#x27;,None)</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        prepare_context=getattr(context_runtime,&#x27;before_round_context&#x27;,None)</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        if callable(prepare_context):await prepare_context(ctx)</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        from pyharness.core.context_observation import observes_context</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        from pyharness.core.context_derivation import derive_observed_messages,assemble_observed,request_context_scope</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        observing=observes_context(ctx);history_window=system_window=None</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        if observing:hist,history_window=derive_observed_messages(ctx.session,ctx.scope.window_tokens)</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        else:hist=ctx.session.derive_messages(ctx.scope.window_tokens)  # 原日志现派生</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        # F010:装配器在岗(engine 注入 ctx.sysprompt)则先装配——system 段恒首、</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        # 护栏段恒末、超窗头部截断(装配器内部,见 system_prompt.py);缺位 = 裸历史</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        sysprompt = getattr(ctx, &quot;sysprompt&quot;, None)</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        if sysprompt is not None:</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>            if observing:hist,system_window=assemble_observed(sysprompt,hist,ctx)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            else:hist=sysprompt.assemble(hist,ctx=ctx)</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        from pyharness.core.message_materializer import MessageMaterializer</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        runtime: Optional[MessageMaterializer] = getattr(ctx, &#x27;platform_runtime&#x27;, None)</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        if runtime is not None:</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>            hist = await runtime.materialize_messages(hist, ctx)</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        vision_input = any(isinstance(m.get(&#x27;content&#x27;), list) and any(</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>            part.get(&#x27;type&#x27;) == &#x27;image_url&#x27; for part in m[&#x27;content&#x27;] if isinstance(part, dict)) for m in hist)</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        # F027:ctx.streaming(桌面 SSE)走 chat_stream——chunk 仅上总线不入日志,</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        # 聚合后与 chat 同型返回(append-only 不变式不受影响);CLI/单测默认非流式</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        chat_fn = (&quot;chat_stream&quot; if getattr(ctx, &quot;streaming&quot;, False) else &quot;chat&quot;)</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        from pyharness.core.llm_diagnostics import model_call</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        with model_call(&quot;main_agent&quot;),request_context_scope(ctx,hist,history_window,system_window,enabled=observing):</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>            resp = await getattr(ctx.llm, chat_fn)(</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>                hist, tools=[] if vision_input else ctx.tools.schemas_for(ctx.scope), ctx=ctx)</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        if vision_input and resp.tool_calls:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>            from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>            raise PyHError(&#x27;vision_tools_not_allowed&#x27;)</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        # llm 层落 request/usage 事件;chat_fn 选择不改变事件路径</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        if not resp.tool_calls:                       # 纯文本 → 自然终态</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>            content = resp.content or &quot;&quot;</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>            quality=None</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>            if runtime is not None:</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>                review=getattr(runtime,&#x27;review_answer&#x27;,None)</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                if callable(review):content,quality=review(content,ctx,resp)</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>                else:content = runtime.validate_answer(content, ctx)</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>            if not content:                           # llm 双空响应:模型域未预期</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>                raise_code(&quot;LLM-399&quot;, hint=&quot;llm.chat 返回空 content 且无 tool_calls&quot;)</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>            await ctx.session.append(</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                &quot;agent.message&quot;, {&quot;content&quot;: content, **({&#x27;quality&#x27;:quality} if quality is not None else {})}, actor=&quot;agent&quot;,</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                trace={&quot;parent_seq&quot;: resp.seq} if getattr(resp, &quot;seq&quot;, None) else None)</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>            if quality is not None and (quality.get(&#x27;output_completeness&#x27;)==&#x27;incomplete&#x27; or</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                    quality.get(&#x27;calculation&#x27;,{}).get(&#x27;status&#x27;)==&#x27;failed&#x27;):</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>                run.error_code=&#x27;LLM-304&#x27;</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>                return &#x27;error&#x27;</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>            return &quot;complete&quot;                         # finished 由外壳 close(reason) 落</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>        # 工具轮:校验/guard/审批/Provider 全在 tools.execute 内;单步失败→事件化</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        # 回喂(tool.error/guard.rejected),不中断本轮(见 run_step)</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        start_seq = ctx.session.stats()[&quot;seq&quot;]        # 工具步前日志水位(指纹基)</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>        self._reset_turn_failures(ctx)                # F026 轮内连败计数起点</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        for call in resp.tool_calls:</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>            res = await self.run_step(ctx, run, call)  # 逐工具步执行(顺序,阶段1)</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>            if self._turn_failure_capped(ctx, call, res):</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>                break                                 # F026:同工具连败≥2 → 终止本轮</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>        run.turn += 1</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        fp = self._outcome_fingerprint(ctx, start_seq)  # 指纹=(name,summary,ok)序列</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        run.stall_streak = run.stall_streak + 1 if fp == run.last_fp else 0</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        run.last_fp = fp</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        if run.stall_streak &gt;= self.stall_limit:</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>            return &quot;stall&quot;                            # 连续 N 轮无新信息 → 空转封顶</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        return None                                   # 下一轮</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code></code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>    # ======================================================== 单工具步</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>    async def run_step(self, ctx: Any, run: RunContext, call: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        &quot;&quot;&quot;单工具步:登记子任务执行 ctx.tools.execute(call, ctx),返回 ExecResult。</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code></code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        call = llm 响应解析出的 ToolCall(name/raw_args/call_id);TLB-802/803/805</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        等失败已由 tools.execute 捕获写 tool.error 回喂 LLM,不向主循环抛——本轮</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        继续。协作式取消:子任务被 cancel() 取消时置 run.cancelled 并 re-raise,</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>        已开始工具如实留 partial(副作用不假装回滚)。</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code></code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>        返回值:ExecResult(ok/summary)供 run_turn 做 F026 轮内连败判定(S1-03);</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>        取消路径不返回(await 抛 CancelledError 后 re-raise)。</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        t = asyncio.create_task(ctx.tools.execute(call, ctx))</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>        self._child_tasks.add(t)                      # 登记:取消可传播(F025)</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>        try:</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>            return await t                            # 60s 工具超时在 tools 内部(F017)</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>        except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>            run.cancelled = True                      # 协作式取消:不吞,继续传播</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>            raise</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>        finally:</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>            self._child_tasks.discard(t)</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code></code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>    # ================================================ F026 轮内连败计数(S1-03)</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>    def _reset_turn_failures(ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>        &quot;&quot;&quot;轮内连败计数清零(每轮起点;tools 层能力,未装配则跳过)。</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code></code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>        与 tools_executor.execute_tool_calls 的 reset 同源。单步路径</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>        (run_step → execute)此前完全不参与计数与终止,致 F026 在**实际主循环</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>        路径**失效(仅批量入口生效)——本函数与 _turn_failure_capped 即修复。</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        fn = getattr(ctx.tools, &quot;reset_turn_failures&quot;, None)</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        if callable(fn):</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>            fn()</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code></code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>    def _turn_failure_capped(ctx: Any, call: Any, res: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>        &quot;&quot;&quot;单步失败是否触发轮内连败封顶(同工具累计 ≥2)→ True = 终止本轮。</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code></code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>        计入口径与 execute_tool_calls **逐条一致**(F026 spec 连败锚):仅</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>        &quot;参数校验失败&quot;与&quot;guard 拒绝&quot;两类计入;超时/Provider 异常/审批 denied</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        不计。tools 层未提供 API(替身/旧装配)→ 恒 False,退化为修复前行为。</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>        mark = getattr(ctx.tools, &quot;mark_turn_failure&quot;, None)</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>        if not callable(mark) or res is None or getattr(res, &quot;ok&quot;, True):</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>            return False</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>        summary = str(getattr(res, &quot;summary&quot;, &quot;&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>        if not summary.startswith((&quot;参数校验&quot;, &quot;guard&quot;)):</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>            return False</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>        return int(mark(str(getattr(call, &quot;name&quot;, &quot;&quot;) or &quot;&quot;))) &gt;= 2</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code></code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>    # ======================================================== 三闸只读判定</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>    def _must_stop(self, ctx: Any, run: RunContext) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>        &quot;&quot;&quot;每轮起点三闸(轮数/取消/预算)只读判定;不写事件、不收尾——判定与执行</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>        分离保证终态无旁路(预算事件在 scope 内落)。</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        if run.turn &gt;= self.max_turns:                # 闸1 轮数(默认 30)</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>            return &quot;max_turns&quot;</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>        if run.cancelled:                             # 闸2 取消(声明式置位,F025)</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>            return &quot;cancelled&quot;</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        # 闸3 预算(F032):scope.budget_state 只产 ok/warn/exhausted(S1-02 删除</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>        # 原 &quot;paused&quot; 死判据——该值不在 scope 返回面,永不成立)。</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>        if ctx.scope.budget_state() == &quot;exhausted&quot;:</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>            return &quot;budget&quot;</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>        return None</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code></code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>    # ======================================================== 收敛指纹</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>    def _outcome_fingerprint(ctx: Any, start_seq: int) -&gt; tuple:</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>        &quot;&quot;&quot;本轮工具结果指纹 = (name, summary, ok) 元组序列(seq 序,派生事实)。</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code></code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>        只取本轮新增日志(events_after(start_seq) 排他下界)中的 tool.result;</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>        连续轮指纹相同 → 收敛闸计数。空指纹(整轮工具全败)与上轮空指纹相等,</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>        空转同样被封顶——防烧钱语义一致(偏离说明 6)。</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>        return tuple(</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>            (e.payload[&quot;name&quot;], e.payload[&quot;summary&quot;], e.payload[&quot;ok&quot;])</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>            for e in ctx.session.events_after(start_seq)</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>            if e.type == &quot;tool.result&quot;)</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code></code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>    # ======================================================== 收尾(不写 finished)</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>    async def _finish(self, ctx: Any, run: RunContext, reason: str) -&gt; RunResult:</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>        &quot;&quot;&quot;汇总 RunResult(run_id/reason/turns/last_seq);不写 session.finished</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>        ——finished 唯一归属 agent.close(EVT-104);headless 由外壳在 run 返回后</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>        close(reason)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>        run.reason = reason</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>        if reason==&#x27;budget&#x27; and run.error_code is None:</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>            from pyharness.core.budget_diagnostics import exhausted_detail</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>            run.error_code=&#x27;LLM-305&#x27;;run.error_diagnostics=exhausted_detail(ctx.scope)</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>            await ctx.session.append(&#x27;system.error&#x27;,dict(code=&#x27;LLM-305&#x27;,hint=&#x27;预算不足；本次模型请求尚未发送&#x27;,</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>                ctx=dict(role=&#x27;main_agent&#x27;,fatal=True,diagnostics=run.error_diagnostics)),actor=&#x27;system&#x27;,task_id=getattr(ctx,&#x27;task_id&#x27;,None),sync=True)</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>        self._last_reason = reason</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>        last_seq = ctx.session.stats()[&quot;seq&quot;]         # 日志当前最大 seq(派生事实)</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>        log.info(&quot;run finished run_id=%s reason=%s turns=%d last_seq=%s&quot;,</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>                 run.run_id, reason, run.turn, last_seq)</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>        return RunResult(run_id=run.run_id, reason=reason,</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>                         turns=run.turn, last_seq=last_seq, error_code=run.error_code,</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>                         error_diagnostics=run.error_diagnostics)</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code></code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>    # ======================================================== 取消传播(F025)</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>    async def cancel(self, reason: str = &quot;cancelled&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>        &quot;&quot;&quot;声明式取消:置位 → 强同步留痕(system.cancelled)→ 取消子任务 →</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>        gather 等待收尾 → 清登记。不吞 CancelledError;append 失败不被日志故障</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>        阻塞(记日志继续)。reason ∈ {cancelled, timeout, close}。</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>        run = self.current</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>        if run is None:                               # 无在途 run:无事可取消</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>            return</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>        ctx = self._ctx</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>        run.cancelled = True                          # 置位:闸2 下一轮即触发</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>        if ctx is not None:</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>            try:</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>                await ctx.session.append(</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>                    &quot;system.cancelled&quot;,</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>                    {&quot;what&quot;: f&quot;run:{run.run_id}&quot;, &quot;reason&quot;: reason},</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>                    actor=&quot;system&quot;, sync=True)        # 强同步:取消审计可重建</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>            except PyHError as e:                     # 强同步失败:PERS-202 等</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>                log.error(&quot;cancel log failed code=%s&quot;, e.code)  # 取消不被日志故障阻塞</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>        for t in self._child_tasks:                   # 传播:取消派生子任务</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>            if not t.done():</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>                t.cancel()</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>        await asyncio.gather(*self._child_tasks, return_exceptions=True)</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>        self._child_tasks.clear()                     # 已开始工具如实留 partial</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code></code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>    # ======================================================== 输入唤醒/入队</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>    async def wake(self, env: Envelope, ctx: Any = None) -&gt; Optional[RunResult]:</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>        &quot;&quot;&quot;外壳(agent.submit)在 user.message 强同步落盘后调用。</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code></code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>        idle → 入队并拉起排水 run(await 至队空/边界终态,返回 RunResult);</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code>        running → 入队(FIFO),返回 None,当前 run 结束后自动取下一件;</code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>        队满(&gt;queue_limit)→ system.error[BUSY] 强同步 + 拒新(BUSY)。</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>        ctx:本 loop 尚未经 run() 绑定时显式注入(1:1 绑定后可不传,偏离说明 3)。</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>        会话关闭态拒入归 agent.submit(agent.state ∈ stopping/closed 时 BUSY),</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>        本函数不再判 loop 自身的 stopping/terminated(S1-02 删除该死态分支)。</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>        if ctx is None:</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>            ctx = self._ctx                           # 已绑定(1:1)则复用</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>        if self.state == &quot;running&quot; and len(self.pending) &gt;= self.queue_limit:</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>            # 队满:显式拒新,不静默丢(先事件留痕再抛)</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>            if ctx is not None:</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>                try:</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>                    await ctx.session.append(</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>                        &quot;system.error&quot;,</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>                        {&quot;code&quot;: &quot;BUSY&quot;,</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>                         &quot;hint&quot;: f&quot;输入队列已满(&gt;{self.queue_limit}),请稍后重试&quot;},</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>                        actor=&quot;system&quot;, sync=True)</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code>                except PyHError as e:                 # 留痕失败不阻断拒新</code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code>                    log.error(&quot;busy log failed code=%s&quot;, e.code)</code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={&quot;advice&quot;: f&quot;队列已满(&gt;{self.queue_limit})&quot;})</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>        self.pending.append(env)                      # 空闲或 running:统一入队保 FIFO</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>        if self.state == &quot;idle&quot;:                      # 空闲:拉起排水 run</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>            if ctx is None:</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>                raise PyHError(&quot;CYC-999&quot;,</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code>                               ctx={&quot;hint&quot;: &quot;wake 拉起 run 前 loop 未绑定 ctx&quot;</code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>                                            &quot;(请先经 run(ctx) 或 wake(env, ctx))&quot;})</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>            # F058 压缩在请求边界执行(loop idle;compactor 内部再判双条件/忙态):</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code>            # 折叠旧段为摘要 → context.compacted 强同步声明 → 本轮 derive 即压缩视图</code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code>            comp = getattr(ctx, &quot;compactor&quot;, None)</code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code>            if comp is not None and callable(getattr(comp, &quot;run_if_needed&quot;, None)):</code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>                try:</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>                    await comp.run_if_needed(ctx)</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>                except PyHError as e:                 # 压缩失败不阻断对话(截窗兜底)</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>                    log.warning(&quot;pre-run compaction skipped code=%s&quot;, e.code)</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code>            return await self.run(ctx)</code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>        return None                                   # running:当前 run 结束自动取下一件</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code></code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code>    def _pop_pending(self) -&gt; Optional[Envelope]:</code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>        &quot;&quot;&quot;取队首输入(FIFO);队空返回 None。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>        return self.pending.popleft() if self.pending else None</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code></code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code>    # ======================================================== 只读状态查询</code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code>    def state_snapshot(self) -&gt; dict:</code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code>        &quot;&quot;&quot;外壳/审计只读句柄;禁止由此路径修改状态。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code>        return {</code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code>            &quot;state&quot;: self.state,</code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code>            &quot;current_run_id&quot;: self.current.run_id if self.current else None,</code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code>            &quot;turn&quot;: self.current.turn if self.current else 0,</code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code>            &quot;queue_len&quot;: len(self.pending),</code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>            &quot;pending_inputs&quot;: [</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code>                {&quot;seq&quot;: env.seq,</code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code>                 &quot;content&quot;: (env.payload or {}).get(&quot;content&quot;, &quot;&quot;)}</code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>                for env in self.pending],</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>            &quot;last_reason&quot;: self._last_reason,</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code>        }</code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code></code></div>
+<div class="code-line" id="L507"><a class="line-number" href="#L507">507</a><code></code></div>
+<div class="code-line" id="L508"><a class="line-number" href="#L508">508</a><code>__all__ = [</code></div>
+<div class="code-line" id="L509"><a class="line-number" href="#L509">509</a><code>    &quot;AgentLoop&quot;, &quot;RunContext&quot;, &quot;RunResult&quot;,</code></div>
+<div class="code-line" id="L510"><a class="line-number" href="#L510">510</a><code>    &quot;BudgetExhausted&quot;, &quot;MaxTurnsExceeded&quot;,</code></div>
+<div class="code-line" id="L511"><a class="line-number" href="#L511">511</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

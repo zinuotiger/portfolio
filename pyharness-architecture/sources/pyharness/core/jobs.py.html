@@ -1,0 +1,575 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/jobs.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/jobs.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 575 行</span></nav><main class="wrap source-page"><h1>pyharness/core/jobs.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：7ec9b5288463420fb42f41dde578420e66a1f893<br>SHA-256（内容校验）：950b4bd398687a6dd275fb589f223ac6cd4c37c519f6518d81bf36d1f6e2cd06</p><p><a href="../../../architecture-detailed.html?node=jobs">Background Jobs（后台任务与属主控制）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 25 个类、函数与方法</summary><ul><li><a href="#L99">_now_iso（函数） · L99–L102</a></li><li><a href="#L106">Job（类） · L106–L141</a><ul><li><a href="#L138">Job.terminal（方法） · L138–L141</a></li></ul></li><li><a href="#L144">JobStatus（类） · L144–L155</a></li><li><a href="#L159">JobManager（类） · L159–L569</a><ul><li><a href="#L173">JobManager.__init__（方法） · L173–L185</a></li><li><a href="#L188">JobManager.recover（异步方法） · L188–L224</a></li><li><a href="#L227">JobManager._active_count（方法） · L227–L229</a></li><li><a href="#L231">JobManager._get（方法） · L231–L238</a></li><li><a href="#L240">JobManager._authorize（方法） · L240–L250</a></li><li><a href="#L252">JobManager._session_closed（方法） · L252–L263</a></li><li><a href="#L265">JobManager._job_slice（方法） · L265–L274</a></li><li><a href="#L276">JobManager._job_events_after（方法） · L276–L278</a></li><li><a href="#L280">JobManager._segment_todos（异步方法） · L280–L290</a></li><li><a href="#L292">JobManager._log_tail（异步方法） · L292–L296</a></li><li><a href="#L299">JobManager.start（异步方法） · L299–L345</a></li><li><a href="#L348">JobManager._run（异步方法） · L348–L404</a></li><li><a href="#L406">JobManager._run_runner（异步方法） · L406–L424</a></li><li><a href="#L427">JobManager.status（异步方法） · L427–L446</a></li><li><a href="#L448">JobManager.logs（异步方法） · L448–L457</a></li><li><a href="#L460">JobManager.cancel（异步方法） · L460–L489</a></li><li><a href="#L492">JobManager.list_owned（方法） · L492–L498</a></li><li><a href="#L500">JobManager.reap_expired（异步方法） · L500–L513</a></li><li><a href="#L516">JobManager._on_session_closing（异步方法） · L516–L543</a></li><li><a href="#L546">JobManager._notify（异步方法） · L546–L569</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/jobs.py — 后台 job 管理器 (specs/jobs.py.md 契约;阶段 4 F051)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F051(后台 jobs 核心)· 联动 F007(agent-loop 驱动 job)/F011(共享会话日志)/</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>F025(取消归一 failed(cancelled))/F032(超预算直接 kill)/F040(todo 进度源)/F044(段锚,</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>事件带 task_id=job:&lt;id&gt; 自成日志段)。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>一句话:脱离前台会话运行的后台 job——start/status/cancel/logs 四入口;长任务不占对话</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>(发出后可继续聊/关会话稍后查);job 与前台**共享同一会话 JSONL**,事件带</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>task_id=&quot;job:&lt;id&gt;&quot; 使 job 自成日志段(F044)可切片回放/审计/预算;并发 ≤4(JOB-001)、</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>**超预算自动失败并告警**(崩溃遗留的处置见下)、结果 7 天清理;job 不可交互;owner 授权</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>模型:job_id 不是机密——查询/取消只认提交方 owner 身份(by),不知道 id ≠ 有权,知道</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>id ≠ 有权。</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>**崩溃遗留(2026-09-21 R14-12 如实标注)**:原 docstring 声称&quot;崩溃…自动失败并告警&quot;,</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>但**事件级无写入者**(全库仅本模块 `_run` 的 finally 与 `cancel` 写 `job.failed`;进程</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>被杀即无终态)⇒ 实测崩溃遗留的 job 恒显示 `running`。现由**读侧**如实补正:job 跑在</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>持有会话锁的宿主进程里 ⇒ 锁已释放而仍无终态 = 不可能在跑 ⇒ `job list/show` 判为</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>`failed(reason=宿主进程已不在(崩溃遗留))`(见 `cli._cmd_job`)。**事件级**恢复写入</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>(重启补 `job.failed` + 关悬空段)登记为 **L-26 待决**(须先定&quot;由谁在何时补写&quot;,</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>避免造出第二个事件写者)。</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>偏离说明(契约=specs/jobs.py.md;以下为与规格伪码冲突处的取舍,均列理由,与</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>task_queue.py/schedule.py 同款先例,已入模块 docstring 供审查):</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>1. 执行器 seam:伪码直调 agent_loop.run(ctx, intent=…, task_id=…, budget=…) 是</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   阶段 4 agent_loop 的未来接口(当前 agent_loop.py 仅 run(ctx)/wake 旧面,见</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   task_queue.py 偏离 1)→ 执行器经构造注入(鸭子类型,INV-08 不 import 外围):</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>   runner 须提供 async run(ctx, *, intent, task_id, budget=None);未注入 runner 时</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>   job 按 CYC-999 快速失败(防 S-1&quot;伪造已执行&quot;,task_queue 同款纪律)。另:真实</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   agent_loop.run 失败不 raise 而返回带 reason 的 RunResult(budget/max_turns/error/</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   stall…)→ _run 在 runner 返回带 reason 的对象时按 reason 归一:complete/None →</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   completed,其余 → job.failed(reason)。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>2. 并发口径:伪码 if len(self._running) &gt;= limit 会把&quot;已终态未超期&quot;的 7 天句柄也计</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>   入并发 → 4 个 job 先后完成后(句柄未摘)第 5 个仍被 JOB-001 拒,与&quot;发出后可继续</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   聊、陆续提交多个后台任务&quot;及&quot;并发&quot;本义矛盾 → 并发只数在途(queued/running/</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>   suspended);_running 注册表保留终态句柄(7 天内可查)但不占并发额度。</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>3. JOB-001 为 ERR §2.11 功能特性码,errors.register_default_codes 未收录;raise_code</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>   会把未登记码改写为 CYC-999(语义不符)→ 按伪码原样直接构造 PyHError(&quot;JOB-001&quot;)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>   (code 字段保持字面量 JOB-001,供测试按 .code 断言;QUE-001/BUSY 同款先例);</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   EVT-100/EVT-101/EVT-104/GRD-401/CYC-999 等已登记码全走 raise_code。</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>4. job.* 事件载荷以 EVENT-SCHEMA §3.5.3 payload 模型为准(extra=forbid):job.started</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>   载荷仅 {job_id}、job.completed 载荷仅 {job_id, elapsed_ms}(模型无 reason 字段)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>   → 伪码把 task_id 塞 job.started 载荷、completed 事件带 reason 都会 EVT-100 拒写:</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>   task_id 一律改走信封 task_id= 参数,job.completed 事件不落 reason。</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>5. logs/_log_tail 切片口径:伪码只按信封 e.task_id == job:&lt;id&gt; 过滤,但</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>   task_queue.open_segment/close_segment 落盘的 segment.start/end(EVT §3.5.1:</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>   task_id 在 payload)与 todo.updated(F040:task_id 在 payload)只带载荷级 task_id →</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>   取并集(信封 task_id 或 payload.task_id 命中 job task_id 即入切片),否则段锚/</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>   进度源事件会被 logs 切片漏掉,与&quot;段闭区间切片回放/审计&quot;验收冲突。</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>6. 终态写盘防扰:job 终态事件 append / segment.end 落在 finally(取消/兜底路径共用);</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>   若会话恰已 finished(EVT-104,钩子序竞态兜底)或落盘失败(PERS-202)→ 记日志跳过</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>   不抛——否则会顶替 CancelledError/原异常;终态仍可经共享 JSONL 尾部审计。</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>7. 段锚配对容错:取消若落在段未开出的窗口(正在 await open_segment)→ started_seq</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>   未置位,finally 跳过 close_segment(伪码无条件 close 会撞 EVT-100&quot;段未打开&quot;)。</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>8. 取消原因区分:伪码 _run 的 CancelledError 分支一律 reason=cancelled,而&quot;会话关闭</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>   落 failed(reason=session-closed)&quot;(职责 7)需区分来源 → cancel API 取消走</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>   cancelled;_on_session_closing 取消前先给 job 打 _cancel_reason=&quot;session-closed&quot;</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>   旗标,_run 取消分支按旗标落 reason。</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>9. _notify 总线广播用事件类型名 job.completed/job.failed(伪码 emit(j.state) 的</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>   &quot;completed&quot;/&quot;failed&quot; 未注册事件,总线 EVT-102 拒发);通知注入 agent.message 用</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>   actor=system(伪码漏 actor;框架侧代发的完成摘要,非 agent-loop 产物)。</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>10. 段内进度:伪码 status 无 todo 分支引用未定义的 done/len → 缺省 done=0、&quot;0/0 项&quot;、</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    progress=None(与伪码一致);&quot;无 todo 按已完成 llm 轮数/事件数估算&quot;无分母定义</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    不引入拍脑袋系数(数据表权威:progress 从段内 todo 派生,None=未知)。</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>11. start 校验提交方身份:ctx.owner 缺失/为空 → EVT-100 拒(owner 必须由通道上下文</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    打,非 LLM 自报);owner 缺失会造出无人可查的孤儿 job(system 之外无授权主体)。</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>12. 段内事件写口经注入 session:runner 假件/未来 agent_loop 在同一 SessionLog 上以</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    task_id=job:&lt;id&gt; 追加执行期事件(与 task_queue 测试替身同款纪律);本模块只认</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    session.append 面,不越权管 runner 内部事件。</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>import asyncio</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>import inspect</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>import itertools</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>import logging</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>import time</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>from pyharness.core.task_queue import TaskQueue</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code></code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>log = logging.getLogger(&quot;pyharness.jobs&quot;)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code># ------------------------------------------------------------------ 常量(F051)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code># 并发上限 / 结果保留期:PRD F051 + CFG 固定约束(PARAMETER-ANCHOR 锁死;装配方</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code># 可经构造参数覆盖,默认值与锁死值一致,本模块不读 config 防硬耦合)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>DEFAULT_JOB_LIMIT = 4             # 并发 ≤4(满 → JOB-001 拒新)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>DEFAULT_RETENTION_DAYS = 7        # 结果 7 天清理(reap_expired 摘句柄)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>MAX_INTENT_CHARS = 64 * 1024      # intent 上限(超长 → EVT-100)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>_TERMINAL_STATES = (&quot;completed&quot;, &quot;failed&quot;, &quot;cancelled&quot;)   # 终态集(reap/幂等判定)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>_ACTIVE_STATES = (&quot;queued&quot;, &quot;running&quot;, &quot;suspended&quot;)       # 在途集(占并发额度)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code># 成功归一 reason(runner 返回 RunResult 形态时的白名单;其余 reason 一律 failed)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>_OK_REASONS = (None, &quot;&quot;, &quot;ok&quot;, &quot;complete&quot;)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>def _now_iso() -&gt; str:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    &quot;&quot;&quot;Job.started_ts 打点:UTC ISO8601(仅展示字段,信封 ts 仍由框架统一打)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    return datetime.now(timezone.utc).isoformat(</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        timespec=&quot;milliseconds&quot;).replace(&quot;+00:00&quot;, &quot;Z&quot;)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code># ---------------------------------------------------------------- 数据结构</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>@dataclass</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>class Job:</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    &quot;&quot;&quot;后台 job 句柄(spec 数据结构表字段级)。</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    id = j-N 单调(顺序可猜、**非机密**——授权只认 owner);owner = 提交方身份</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    (会话绑定用户 id,如 cli:alice/acp:&lt;client&gt;/web:&lt;session&gt;,由通道上下文打);</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    task_id 恒 &quot;job:&quot;+id(段与事件归属锚);seq 锚可弃重建(created_seq=job.started</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    事件 seq、started_seq=segment.start seq、finished_seq=终态事件 seq,INV-01:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    事件是唯一真源,句柄字段只是日志位置的镜像);expires_at = 终态 + 7 天,</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    超期仅摘句柄、事件永留 JSONL。</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code></code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    id: str</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    owner: str</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    intent: str</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    state: str = &quot;queued&quot;                      # queued/running/suspended/failed/completed/cancelled</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    task_id: str = &quot;&quot;                          # &quot;job:&quot;+id(段与事件归属)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    created_seq: int = 0                       # job.started 事件 seq</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    started_seq: int = 0                       # segment.start 事件 seq(段锚)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    finished_seq: int = 0                      # 终态事件 seq</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    started_ts: Optional[str] = None           # 启动打点(展示)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    elapsed_ms: Optional[int] = None           # 执行耗时(终态后置位)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    reason: Optional[str] = None               # failed 原因:码/budget/cancelled/session-closed</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    progress: Optional[float] = None           # 0..1(段内 todo 派生;查询时镜像)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    notify_to: Optional[str] = None            # 完成通知目标会话/通道</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    expires_at: Optional[float] = None         # 终态时间 + retention(7 天)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    # ---- 运行期附加(init=False,不进构造签名)----</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>    task: Optional[asyncio.Task] = field(default=None, init=False, repr=False)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    _cancel_reason: Optional[str] = field(default=None, init=False, repr=False)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    _cancel_pending: bool = field(default=False, init=False, repr=False)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    _begun: bool = field(default=False, init=False, repr=False)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    @property</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    def terminal(self) -&gt; bool:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        &quot;&quot;&quot;终态判定(幂等/清理共用):completed/failed/cancelled。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        return self.state in _TERMINAL_STATES</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code></code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code></code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>@dataclass</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>class JobStatus:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    &quot;&quot;&quot;job 状态快照(status 返回,纯读):state + 派生进度 + 最近日志尾。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code></code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    job_id: str</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    state: str</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    owner: str</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    progress: Optional[float] = None           # 0..1;段内无 todo → None</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    todo_summary: str = &quot;&quot;                     # &quot;N/M 项&quot;(M=0 → &quot;0/0 项&quot;)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    elapsed_ms: Optional[int] = None</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    log_tail: list = field(default_factory=list)   # 最近 ≤10 条事件摘要(list[dict])</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    error: Optional[str] = None                # failed 原因(码/cancelled/budget/…)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code></code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code></code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code># ---------------------------------------------------------------- JobManager</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>class JobManager:</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>    &quot;&quot;&quot;后台 job 管理器(F051):start/status/cancel/logs 四入口 + owner 授权 + 清理。</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code></code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    构造注入(INV-08):session = SessionLog(共享会话日志,唯一事件写口);</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    task_queue = TaskQueue(段锚服务 open_segment/close_segment;None → 内部自建,</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    与前台队列共享会话但段 id 命名空间不冲突:job:&lt;id&gt; vs t-N);</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    runner = 执行器 seam(未来 agent_loop 的 intent 面;None → job 快速 CYC-999);</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    bus = EventBus(完成通知广播,可选);limit/retention_days 默认取锁死常量。</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code></code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    授权模型:status/cancel/logs 先 _get(不存在 → EVT-101)再 _authorize(非 owner</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    且非 system → GRD-401,scope-hidden 不泄漏);list_owned 只列 by 名下纯读。</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    job_id 顺序可猜、非机密:猜中 id 不给任何读取权。</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code></code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    def __init__(self, session: Any, task_queue: Optional[TaskQueue] = None, *,</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                 runner: Any = None, bus: Any = None,</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                 limit: int = DEFAULT_JOB_LIMIT,</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                 retention_days: int = DEFAULT_RETENTION_DAYS) -&gt; None:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        self._session = session</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        self._tq = task_queue if task_queue is not None else TaskQueue(</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>            session=session)                   # 内部自建:仅用其段锚面(不 submit)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        self._runner = runner                  # 执行器 seam(未来 agent_loop)</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        self._bus = bus                        # 完成通知总线(可选)</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        self._limit: int = int(limit)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        self._retention_days: int = int(retention_days)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        self._running: dict[str, Job] = {}     # id → Job(在途 + 7 天内终态句柄)</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        self._ids = itertools.count(1)         # j-N 单调源(顺序可猜,非机密)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code></code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    # ============================================================ 崩溃恢复</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>    async def recover(self) -&gt; int:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        &quot;&quot;&quot;崩溃遗留 job 的**事件级**恢复(R24;此前只有读侧如实显示、日志里无终态)。</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code></code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        进程被杀 ⇒ ``_run`` 的 ``finally`` 未执行 ⇒ 日志里只有 ``job.started`` 没有</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        终态事件。本方法重放本会话事件,对&quot;有 started 无终态&quot;的 job **补写</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        ``job.failed(reason=&quot;crash&quot;)``**,使审计/派生视图与读侧判定一致</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        (``cli._cmd_job`` 已在&quot;无宿主持锁&quot;时报 failed)。</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code></code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        - **幂等**:补写后再重放不会重复(已见终态即跳过);</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        - **不新增事件写者**:仍走本类 ``self._session.append``(与 ``_run``/``cancel`` 同源);</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        - **失败不阻断**:事件词表/终态(EVT-104)等异常只记日志(恢复是收尾,不是主链)。</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        返回补写的条数。</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        started: set = set()</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        done: set = set()</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        for ev in self._session.events_after(0):</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>            t = getattr(ev, &quot;type&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            p = getattr(ev, &quot;payload&quot;, None) or {}</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>            jid = str(p.get(&quot;job_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>            if not jid:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                continue</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            if t == &quot;job.started&quot;:</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                started.add(jid)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>            elif t in (&quot;job.completed&quot;, &quot;job.failed&quot;):</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                done.add(jid)</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        orphan = sorted(started - done)</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        for jid in orphan:</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            try:</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                await self._session.append(</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>                    &quot;job.failed&quot;, {&quot;job_id&quot;: jid, &quot;reason&quot;: &quot;crash&quot;},</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>                    actor=&quot;system&quot;, task_id=f&quot;job:{jid}&quot;, sync=True)</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>            except PyHError as e:                 # EVT-104 终态会话等:记日志不阻断</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>                log.warning(&quot;崩溃 job 补写终态失败 code=%s job=%s&quot;, e.code, jid)</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>                continue</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        if orphan:</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            log.warning(&quot;崩溃遗留 job 已补写终态(reason=crash):%s&quot;, orphan)</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        return len(orphan)</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code></code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    # ============================================================ 内部辅助</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>    def _active_count(self) -&gt; int:</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        &quot;&quot;&quot;在途 job 数(并发口径 = queued/running/suspended,见偏离 2)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        return sum(1 for j in self._running.values() if j.state in _ACTIVE_STATES)</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code></code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    def _get(self, job_id: str) -&gt; Job:</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        &quot;&quot;&quot;注册表取句柄;不存在/已超期清理 → EVT-101(事件仍可经日志按 task_id 查)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        j = self._running.get(job_id)</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        if j is None:</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>            raise_code(&quot;EVT-101&quot;, job_id=job_id,</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>                       hint=&quot;job 不存在或已超期清理:核对 job_id;&quot;</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>                            &quot;job 事件仍可经共享 JSONL 按 task_id 查询&quot;)</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        return j</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code></code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>    def _authorize(j: Job, by: str) -&gt; None:</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        &quot;&quot;&quot;owner 授权闸:by == owner 或 system 放行;否则 GRD-401(scope-hidden)。</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code></code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        job_id 不是机密——知道 id ≠ 有权;错误只给最小现场,不泄漏 intent/owner。</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        if by == j.owner or by == &quot;system&quot;:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>            return</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        raise_code(&quot;GRD-401&quot;, job_id=j.id,</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                   advice=&quot;job_id 非机密:查询/取消只认提交方 owner 身份(by),&quot;</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>                          &quot;请用提交方会话查询/取消&quot;)</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code></code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    def _session_closed(self) -&gt; bool:</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        &quot;&quot;&quot;目标会话是否已终态(通知注入前置;SessionLog 以 finished/close_marker 判定)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        is_closed = getattr(self._session, &quot;is_closed&quot;, None)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        if callable(is_closed):</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            try:</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>                return bool(is_closed())</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            except Exception:  # noqa: BLE001 防御:第三方对象钩子异常按未关闭处理</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>                pass</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        try:</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>            return bool(self._session.stats().get(&quot;closed&quot;))</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        except Exception:  # noqa: BLE001</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            return False</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code></code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>    def _job_slice(self, j: Job) -&gt; list:</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        &quot;&quot;&quot;job 日志切片:共享 JSONL 中归属该 job 的事件(seq 升序)。</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code></code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        口径 = 信封 task_id 或 payload.task_id 命中 j.task_id 的并集(偏离 5):</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        本模块事件/未来 agent_loop 事件带信封 task_id;segment.start/end 与</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        todo.updated 按 EVENT-SCHEMA 只带 payload.task_id——两者都是 job 段事实。</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        tid = j.task_id</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        return [e for e in self._session.events_after(0)</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>                if e.task_id == tid or (e.payload or {}).get(&quot;task_id&quot;) == tid]</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code></code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>    def _job_events_after(self, j: Job, after_seq: int) -&gt; list:</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        &quot;&quot;&quot;job 切片增量读(seq &gt; after_seq,升序;logs 增量拉取用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        return [e for e in self._job_slice(j) if e.seq &gt; after_seq]</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code></code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>    async def _segment_todos(self, j: Job) -&gt; list:</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        &quot;&quot;&quot;段内 todo 最新清单:取该 job 段内最后一条 todo.updated 的 todos(F040)。</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code></code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        进度从日志派生(INV-01),不维护第二份状态;无 todo → 空清单(进度未知)。</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        todos: list = []</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        for e in self._session.events_after(0):</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>            if e.type == &quot;todo.updated&quot; \</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>                    and (e.payload or {}).get(&quot;task_id&quot;) == j.task_id:</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                todos = e.payload.get(&quot;todos&quot;) or []</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        return todos</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code></code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>    async def _log_tail(self, j: Job, n: int = 10) -&gt; list:</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>        &quot;&quot;&quot;最近 ≤n 条事件摘要(事件摘要 = seq/ts/type/actor/任务归属/载荷)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>        return [{&quot;seq&quot;: e.seq, &quot;ts&quot;: e.ts, &quot;type&quot;: e.type, &quot;actor&quot;: e.actor,</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>                 &quot;task_id&quot;: e.task_id, &quot;payload&quot;: e.payload}</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>                for e in self._job_slice(j)[-n:]]</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code></code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>    # ============================================================ 提交(F051)</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>    async def start(self, intent: str, ctx: Any, *,</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                    meta: Optional[dict] = None) -&gt; str:</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>        &quot;&quot;&quot;提交后台 job(伪码验收直译):校验 → 登记 → 落 job.started → 起协程。</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code></code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        并发 &lt;4(满 → JOB-001 拒新,等终态/取消后再试);intent 空/超长 → EVT-100;</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>        父会话 closed/finished → job.started 落盘被 EVT-104 拒(事件失败 = 没启动,</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>        回滚登记)。owner/owner_channel 取自 ctx(通道上下文注入,见偏离 11)。</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>        返回 job_id(j-N,顺序可猜非机密);父会话 running 态不受影响,可继续对话。</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        if not intent or not intent.strip():      # 空意图拒提交(白名单前置)</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;空 job 意图,start 拒绝&quot;)</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        if len(intent) &gt; MAX_INTENT_CHARS:        # 超长拒提交</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>            raise_code(&quot;EVT-100&quot;, hint=f&quot;job 意图超长(&gt;{MAX_INTENT_CHARS} 字符)&quot;)</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        owner = getattr(ctx, &quot;owner&quot;, None)</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        if not owner or not str(owner).strip():   # 身份缺失 → 孤儿 job(偏离 11)</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;ctx.owner 缺失:提交方身份必须由通道上下文&quot;</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>                       &quot;注入(cli:alice/acp:&lt;client&gt;/web:&lt;session&gt;),非 LLM 自报&quot;)</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        if self._active_count() &gt;= self._limit:   # 并发 ≤4:满拒(偏离 2/3)</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>            raise PyHError(&quot;JOB-001&quot;, ctx={</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>                &quot;running&quot;: self._active_count(), &quot;limit&quot;: self._limit,</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>                &quot;advice&quot;: &quot;先等若干 job 终态或取消后再提交&quot;})</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        n = next(self._ids)</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>        j = Job(id=f&quot;j-{n}&quot;, owner=owner, intent=intent, state=&quot;queued&quot;,</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>                task_id=f&quot;job:j-{n}&quot;)</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        j.notify_to = (meta or {}).get(&quot;notify_to&quot;) \</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>            if isinstance(meta, dict) else None</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        if not j.notify_to:</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>            j.notify_to = getattr(ctx, &quot;owner_channel&quot;, None)</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        self._running[j.id] = j                   # 先登记(事件失败可回滚)</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        try:</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>            env = await self._session.append(     # task_id 走信封(偏离 4)</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>                &quot;job.started&quot;, {&quot;job_id&quot;: j.id}, actor=&quot;system&quot;, task_id=j.task_id)</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>        except PyHError:</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>            self._running.pop(j.id, None)         # 事件没落成 = 没启动</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>            raise</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        j.created_seq = env.seq</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>        j.started_ts = _now_iso()</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>        j.state = &quot;running&quot;                       # 落盘成功 → 转 running</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>        # 协程并发(原则 5):不占父会话 running 态,父可继续对话</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>        j.task = asyncio.create_task(self._run(j, ctx))</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>        # 取消竞态:task.cancel() 落在任务尚未开始执行前会使协程体永不运行,</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>        # finally 的终态事件全丢(注册表永挂 running 占并发)→ 统一以</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>        # _cancel_pending 旗标表达取消,_run 入口自查转 CancelledError(finally</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        # 仍落终态);任务已开始(_begun)则由 cancel 直接 task.cancel() 传播。</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>        log.info(&quot;job started id=%s owner=%s intent_len=%d&quot;,</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>                 j.id, j.owner, len(intent))</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>        return j.id</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code></code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>    # ============================================================ 执行体</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>    async def _run(self, j: Job, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>        &quot;&quot;&quot;job 执行体(段围栏 + 终态归一):开段 → 跑 runner → 各终态分支落事件。</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code></code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>        成功 → job.completed;PyHError(含预算/LLM-310)→ job.failed(reason=码);</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>        CancelledError → job.failed(reason=cancelled|session-closed)(F025,re-raise</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        不吞);未预期 → job.failed(CYC-999)兜底;任何异常不得逃逸出 finally 之外</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        (终态事件 append/关段失败仅记日志,见偏离 6/7)。终态事件恒先于</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>        session.finished(钩子序 child-first,同 subagent 纪律)。</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        j._begun = True                           # 执行起点标记(cancel 分发判定)</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>        t0 = time.monotonic()</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>        reason = &quot;ok&quot;</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>        try:</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>            if j._cancel_pending:                 # 早到取消(任务创建前):自查转取消</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>                j._cancel_pending = False</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>                raise asyncio.CancelledError()    # finally 仍会落 failed(cancelled)</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>            # F044 段锚:先落盘再执行,崩溃后段不悬空(task_queue 强同步开段)</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>            j.started_seq = await self._tq.open_segment(j.task_id)</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>            result = await self._run_runner(j, ctx)</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>            rr = getattr(result, &quot;reason&quot;, None)</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>            if rr in _OK_REASONS:                 # 成功(含 runner 无 reason 返回)</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>                j.state, reason = &quot;completed&quot;, &quot;ok&quot;</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>            else:                                 # RunResult 式非成功(reason 归一)</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>                j.state, reason = &quot;failed&quot;, rr    # budget/max_turns/error/stall/…</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>        except PyHError as e:                     # 结构化失败(含预算/LLM-310)</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>            j.state, reason = &quot;failed&quot;, e.code</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>        except asyncio.CancelledError:            # F025 取消:不吞,re-raise</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>            j.state = &quot;failed&quot;</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>            reason = j._cancel_reason or &quot;cancelled&quot;   # session-closed vs user-cancel</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>            raise</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        except Exception:                         # 兜底:CYC-999,堆栈仅本地</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>            log.exception(&quot;job crashed id=%s&quot;, j.id)</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>            j.state, reason = &quot;failed&quot;, &quot;CYC-999&quot;</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>        finally:</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>            # 终态记账:耗时 + 7 天过期锚 + 终态事件 + 关段(顺序不可换)</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>            j.elapsed_ms = int((time.monotonic() - t0) * 1000)</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>            j.expires_at = time.time() + self._retention_days * 86400</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>            if j.state != &quot;completed&quot;:</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>                j.reason = reason                 # completed 无原因字段(偏离 4)</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>            ev = &quot;job.completed&quot; if j.state == &quot;completed&quot; else &quot;job.failed&quot;</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>            try:</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>                payload: dict = {&quot;job_id&quot;: j.id, &quot;elapsed_ms&quot;: j.elapsed_ms}</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>                if ev == &quot;job.failed&quot;:</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>                    payload[&quot;reason&quot;] = reason    # job.failed 载荷模型含 reason</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>                env = await self._session.append(ev, payload, actor=&quot;system&quot;,</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>                                                 task_id=j.task_id)</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>                j.finished_seq = env.seq</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>            except PyHError as e:                 # EVT-104/PERS-202:终态仅记日志</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>                log.error(&quot;job terminal append failed code=%s job=%s&quot;,</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>                          e.code, j.id)</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>            if j.started_seq:                     # 段已开出才配对关闭(偏离 7)</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>                try:</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>                    await self._tq.close_segment(j.task_id, j.started_seq)</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>                except PyHError as e:</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>                    log.error(&quot;job close segment failed code=%s job=%s&quot;,</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>                              e.code, j.id)</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>            await self._notify(j)                 # 完成通知(终态后广播/注入)</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code></code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>    async def _run_runner(self, j: Job, ctx: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>        &quot;&quot;&quot;执行器调用(注入 seam,见偏离 1):runner.run(ctx, intent=…, task_id=…)。</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code></code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>        未装配 runner → CYC-999 快速失败(防伪造已执行);同步/异步返回兼容。</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>        runner = self._runner</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>        if runner is None:</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>            raise_code(&quot;CYC-999&quot;, job_id=j.id,</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>                       hint=&quot;JobManager 未装配执行器(runner):job 拒绝执行,&quot;</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>                            &quot;防伪造已执行(task_queue 同款纪律)&quot;)</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>        fn = getattr(runner, &quot;run&quot;, runner)</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>        if not callable(fn):</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>            raise_code(&quot;CYC-999&quot;, job_id=j.id,</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>                       hint=f&quot;执行器不可调用: {type(runner).__name__}&quot;)</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>        budget = getattr(ctx, &quot;budget&quot;, None)</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>        res = fn(ctx, intent=j.intent, task_id=j.task_id, budget=budget)</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>        if inspect.isawaitable(res):</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>            return await res</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>        return res</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code></code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>    # ============================================================ 状态查询</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>    async def status(self, job_id: str, *, by: str) -&gt; JobStatus:</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>        &quot;&quot;&quot;状态/进度查询(owner 授权):state + 派生进度 + 最近日志尾。</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code></code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>        进度从段内 todo.updated 清单推导(done/总数);无 todo → None、0/0 项;</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>        job 不存在 → EVT-101;by 非 owner 且非 system → GRD-401(知道 id ≠ 有权)。</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>        j = self._get(job_id)</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>        self._authorize(j, by)</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>        todos = await self._segment_todos(j)</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>        done, progress = 0, None</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>        if todos:                                 # 进度 = 完成项占比(F040 派生)</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>            done = sum(1 for t in todos if t.get(&quot;done&quot;))</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>            progress = round(done / len(todos), 3)</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>        j.progress = progress                     # 查询结果镜像(非权威,INV-01)</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>        tail = await self._log_tail(j, n=10)</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>        return JobStatus(job_id=j.id, state=j.state, owner=j.owner,</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>                         progress=progress,</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>                         todo_summary=f&quot;{done}/{len(todos)} 项&quot;,</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>                         elapsed_ms=j.elapsed_ms, log_tail=tail,</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>                         error=j.reason)</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code></code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>    async def logs(self, job_id: str, *, after_seq: int = 0,</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>                   by: str) -&gt; list:</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>        &quot;&quot;&quot;最近日志(owner 授权):共享会话 JSONL 按 job task_id 切片(seq 升序)。</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code></code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>        after_seq = 增量起点(排他下界);越权 GRD-401 / 不存在 EVT-101 同 status;</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>        只读投影,绝不写日志。</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>        j = self._get(job_id)</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>        self._authorize(j, by)</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>        return self._job_events_after(j, after_seq)</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code></code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>    # ============================================================ 取消(F025)</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>    async def cancel(self, job_id: str, *, by: str) -&gt; bool:</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>        &quot;&quot;&quot;取消后台 job(owner 授权):传播 CancelledError → 归一 job.failed。</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code></code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>        在途 → 先落 system.cancelled 审计再取消任务(沿 await 链传播,F025);</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>        已终态 → 幂等 False;不存在 → EVT-101;job_id 猜中不可取消他人 job</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>        (GRD-401)。任务创建前到达的取消以 _cancel_pending 旗标补投(防竞态丢取消)。</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>        j = self._get(job_id)</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code>        self._authorize(j, by)</code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code>        if j.terminal:</code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>            return False                          # 终态幂等(防重放)</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>        j._cancel_pending = True                  # 早到取消统一旗标(入口自查兜底)</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>        if j.task is not None and not j.task.done() and j._begun:</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>            j.task.cancel()                       # 任务已开始执行 → 沿 await 链传播</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>        primary = None</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code>        try:</code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>            await self._session.append(&#x27;system.cancelled&#x27;,</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>                {&#x27;what&#x27;: j.task_id, &#x27;reason&#x27;:&#x27;user-cancel&#x27;}, actor=&#x27;system&#x27;, task_id=j.task_id)</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code>        except BaseException as exc:</code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code>            primary = exc</code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code>        try:</code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>            if j.task is not None:</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>                results = await asyncio.shield(asyncio.gather(j.task, return_exceptions=True))</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>                for error in results:</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>                    if isinstance(error, BaseException) and not isinstance(error, asyncio.CancelledError): raise error</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code>        except BaseException as exc:</code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>            if primary is None: raise</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code>            primary.add_note(f&#x27;job cleanup failed: {type(exc).__name__}&#x27;)</code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code>        if primary is not None: raise primary</code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>        return True</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code></code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code>    # ============================================================ 列表/清理</code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code>    def list_owned(self, by: str) -&gt; list:</code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code>        &quot;&quot;&quot;我的 job 列表(owner 授权):by 名下全部在册 job_id(含终态 7 天内)。</code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code></code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code>        by=system 列全部;纯读不抛。</code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code>        return [jid for jid, j in self._running.items()</code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code>                if j.owner == by or by == &quot;system&quot;]</code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code></code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>    async def reap_expired(self) -&gt; int:</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code>        &quot;&quot;&quot;结果 7 天清理:摘除全部终态超期句柄(事件永留 JSONL,审计/重放不受影响)。</code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code></code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>        由管理器定时器/会话空闲期调用;纯内存清理,返回清理数。</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code>        now = time.time()</code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code>        reaped: list[str] = []</code></div>
+<div class="code-line" id="L507"><a class="line-number" href="#L507">507</a><code>        for jid, j in list(self._running.items()):</code></div>
+<div class="code-line" id="L508"><a class="line-number" href="#L508">508</a><code>            if j.terminal and j.expires_at is not None and j.expires_at &lt; now:</code></div>
+<div class="code-line" id="L509"><a class="line-number" href="#L509">509</a><code>                reaped.append(jid)</code></div>
+<div class="code-line" id="L510"><a class="line-number" href="#L510">510</a><code>                self._running.pop(jid, None)      # 只摘句柄,不删日志</code></div>
+<div class="code-line" id="L511"><a class="line-number" href="#L511">511</a><code>        if reaped:</code></div>
+<div class="code-line" id="L512"><a class="line-number" href="#L512">512</a><code>            log.info(&quot;reaped expired job handles=%s&quot;, reaped)</code></div>
+<div class="code-line" id="L513"><a class="line-number" href="#L513">513</a><code>        return len(reaped)</code></div>
+<div class="code-line" id="L514"><a class="line-number" href="#L514">514</a><code></code></div>
+<div class="code-line" id="L515"><a class="line-number" href="#L515">515</a><code>    # ============================================================ 会话关闭钩子</code></div>
+<div class="code-line" id="L516"><a class="line-number" href="#L516">516</a><code>    async def _on_session_closing(self, type_: Any, payload: Any) -&gt; None:</code></div>
+<div class="code-line" id="L517"><a class="line-number" href="#L517">517</a><code>        &quot;&quot;&quot;child-first 清理钩子(agent.close 在 append session.finished **前**回调)。</code></div>
+<div class="code-line" id="L518"><a class="line-number" href="#L518">518</a><code></code></div>
+<div class="code-line" id="L519"><a class="line-number" href="#L519">519</a><code>        取消全部在途 job → await 各自落 failed 终态(先落终态再 finished,否则</code></div>
+<div class="code-line" id="L520"><a class="line-number" href="#L520">520</a><code>        finished 后回写撞 EVT-104);取消原因落 session-closed(偏离 8)。</code></div>
+<div class="code-line" id="L521"><a class="line-number" href="#L521">521</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L522"><a class="line-number" href="#L522">522</a><code>        live = [j for j in self._running.values() if j.state in _ACTIVE_STATES]</code></div>
+<div class="code-line" id="L523"><a class="line-number" href="#L523">523</a><code>        if not live:</code></div>
+<div class="code-line" id="L524"><a class="line-number" href="#L524">524</a><code>            return</code></div>
+<div class="code-line" id="L525"><a class="line-number" href="#L525">525</a><code>        errors = []</code></div>
+<div class="code-line" id="L526"><a class="line-number" href="#L526">526</a><code>        for j in live:</code></div>
+<div class="code-line" id="L527"><a class="line-number" href="#L527">527</a><code>            j._cancel_reason = &quot;session-closed&quot;</code></div>
+<div class="code-line" id="L528"><a class="line-number" href="#L528">528</a><code>            j._cancel_pending = True</code></div>
+<div class="code-line" id="L529"><a class="line-number" href="#L529">529</a><code>            if j.task is not None and not j.task.done() and j._begun:</code></div>
+<div class="code-line" id="L530"><a class="line-number" href="#L530">530</a><code>                j.task.cancel()</code></div>
+<div class="code-line" id="L531"><a class="line-number" href="#L531">531</a><code>        for j in live:</code></div>
+<div class="code-line" id="L532"><a class="line-number" href="#L532">532</a><code>            try:</code></div>
+<div class="code-line" id="L533"><a class="line-number" href="#L533">533</a><code>                await self._session.append(&quot;system.cancelled&quot;,</code></div>
+<div class="code-line" id="L534"><a class="line-number" href="#L534">534</a><code>                    {&quot;what&quot;: j.task_id, &quot;reason&quot;: &quot;session-closed&quot;},</code></div>
+<div class="code-line" id="L535"><a class="line-number" href="#L535">535</a><code>                    actor=&quot;system&quot;, task_id=j.task_id)</code></div>
+<div class="code-line" id="L536"><a class="line-number" href="#L536">536</a><code>            except BaseException as exc:</code></div>
+<div class="code-line" id="L537"><a class="line-number" href="#L537">537</a><code>                errors.append(exc)</code></div>
+<div class="code-line" id="L538"><a class="line-number" href="#L538">538</a><code>        tasks = [j.task for j in live if j.task is not None]</code></div>
+<div class="code-line" id="L539"><a class="line-number" href="#L539">539</a><code>        if tasks:</code></div>
+<div class="code-line" id="L540"><a class="line-number" href="#L540">540</a><code>            results = await asyncio.gather(*tasks, return_exceptions=True)</code></div>
+<div class="code-line" id="L541"><a class="line-number" href="#L541">541</a><code>            errors.extend(e for e in results if isinstance(e, BaseException)</code></div>
+<div class="code-line" id="L542"><a class="line-number" href="#L542">542</a><code>                          and not isinstance(e, asyncio.CancelledError))</code></div>
+<div class="code-line" id="L543"><a class="line-number" href="#L543">543</a><code>        if errors: raise BaseExceptionGroup(&#x27;job shutdown failed&#x27;, errors)</code></div>
+<div class="code-line" id="L544"><a class="line-number" href="#L544">544</a><code></code></div>
+<div class="code-line" id="L545"><a class="line-number" href="#L545">545</a><code>    # ============================================================ 完成通知</code></div>
+<div class="code-line" id="L546"><a class="line-number" href="#L546">546</a><code>    async def _notify(self, j: Job) -&gt; None:</code></div>
+<div class="code-line" id="L547"><a class="line-number" href="#L547">547</a><code>        &quot;&quot;&quot;完成通知:总线广播终态 + (completed 且 notify_to)注入可见摘要。</code></div>
+<div class="code-line" id="L548"><a class="line-number" href="#L548">548</a><code></code></div>
+<div class="code-line" id="L549"><a class="line-number" href="#L549">549</a><code>        目标会话已 finished → 跳过补写仅记日志(通知非强同步事实,EVT-104 兜底)。</code></div>
+<div class="code-line" id="L550"><a class="line-number" href="#L550">550</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L551"><a class="line-number" href="#L551">551</a><code>        if self._bus is not None:</code></div>
+<div class="code-line" id="L552"><a class="line-number" href="#L552">552</a><code>            ev = &quot;job.completed&quot; if j.state == &quot;completed&quot; else &quot;job.failed&quot;</code></div>
+<div class="code-line" id="L553"><a class="line-number" href="#L553">553</a><code>            try:</code></div>
+<div class="code-line" id="L554"><a class="line-number" href="#L554">554</a><code>                await self._bus.emit(ev, {&quot;job_id&quot;: j.id,</code></div>
+<div class="code-line" id="L555"><a class="line-number" href="#L555">555</a><code>                                          &quot;elapsed_ms&quot;: j.elapsed_ms,</code></div>
+<div class="code-line" id="L556"><a class="line-number" href="#L556">556</a><code>                                          &quot;reason&quot;: j.reason})</code></div>
+<div class="code-line" id="L557"><a class="line-number" href="#L557">557</a><code>            except PyHError as e:                 # 广播失败不影响终态事实</code></div>
+<div class="code-line" id="L558"><a class="line-number" href="#L558">558</a><code>                log.error(&quot;job notify bus failed code=%s job=%s&quot;, e.code, j.id)</code></div>
+<div class="code-line" id="L559"><a class="line-number" href="#L559">559</a><code>        if not (j.notify_to and j.state == &quot;completed&quot;):</code></div>
+<div class="code-line" id="L560"><a class="line-number" href="#L560">560</a><code>            return</code></div>
+<div class="code-line" id="L561"><a class="line-number" href="#L561">561</a><code>        if self._session_closed():</code></div>
+<div class="code-line" id="L562"><a class="line-number" href="#L562">562</a><code>            return                                # 目标已终态:不补写(仅日志)</code></div>
+<div class="code-line" id="L563"><a class="line-number" href="#L563">563</a><code>        try:</code></div>
+<div class="code-line" id="L564"><a class="line-number" href="#L564">564</a><code>            await self._session.append(</code></div>
+<div class="code-line" id="L565"><a class="line-number" href="#L565">565</a><code>                &quot;agent.message&quot;,</code></div>
+<div class="code-line" id="L566"><a class="line-number" href="#L566">566</a><code>                {&quot;content&quot;: f&quot;[后台任务 {j.id} 完成] {j.intent[:120]}&quot;},</code></div>
+<div class="code-line" id="L567"><a class="line-number" href="#L567">567</a><code>                actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L568"><a class="line-number" href="#L568">568</a><code>        except PyHError as e:                     # EVT-104 竞态:跳过</code></div>
+<div class="code-line" id="L569"><a class="line-number" href="#L569">569</a><code>            log.error(&quot;job notify append failed code=%s job=%s&quot;, e.code, j.id)</code></div>
+<div class="code-line" id="L570"><a class="line-number" href="#L570">570</a><code></code></div>
+<div class="code-line" id="L571"><a class="line-number" href="#L571">571</a><code></code></div>
+<div class="code-line" id="L572"><a class="line-number" href="#L572">572</a><code>__all__ = [</code></div>
+<div class="code-line" id="L573"><a class="line-number" href="#L573">573</a><code>    &quot;JobManager&quot;, &quot;Job&quot;, &quot;JobStatus&quot;,</code></div>
+<div class="code-line" id="L574"><a class="line-number" href="#L574">574</a><code>    &quot;DEFAULT_JOB_LIMIT&quot;, &quot;DEFAULT_RETENTION_DAYS&quot;, &quot;MAX_INTENT_CHARS&quot;,</code></div>
+<div class="code-line" id="L575"><a class="line-number" href="#L575">575</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

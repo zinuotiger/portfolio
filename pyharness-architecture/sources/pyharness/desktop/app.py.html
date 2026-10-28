@@ -1,0 +1,414 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/desktop/app.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/desktop/app.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 414 行</span></nav><main class="wrap source-page"><h1>pyharness/desktop/app.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：e1230cc3e2b186948ce89501cf838ece27e3c0a8<br>SHA-256（内容校验）：dcc53eb07a7e2dfc1479f4183bce011407c1cd0ac2447e9171247711335cea51</p><p><a href="../../../architecture-detailed.html?node=web_host">Desktop Application Host（桌面应用宿主）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 34 个类、函数与方法</summary><ul><li><a href="#L67">DesktopApp（类） · L67–L390</a><ul><li><a href="#L75">DesktopApp.__init__（方法） · L75–L103</a></li><li><a href="#L105">DesktopApp._create_service_registry（方法） · L105–L107</a></li><li><a href="#L110">DesktopApp.service（方法） · L110–L112</a></li><li><a href="#L114">DesktopApp.service（方法） · L114–L117</a></li><li><a href="#L119">DesktopApp.current_tenant（方法） · L119–L120</a></li><li><a href="#L122">DesktopApp._sse_heartbeat_seconds（方法） · L122–L124</a></li><li><a href="#L131">DesktopApp._logs（方法） · L131–L133</a></li><li><a href="#L135">DesktopApp._logs（方法） · L135–L137</a></li><li><a href="#L139">DesktopApp._session_locks（方法） · L139–L141</a></li><li><a href="#L143">DesktopApp._session_locks（方法） · L143–L145</a></li><li><a href="#L147">DesktopApp._queue_locks（方法） · L147–L149</a></li><li><a href="#L151">DesktopApp._queue_locks（方法） · L151–L153</a></li><li><a href="#L155">DesktopApp._queues（方法） · L155–L157</a></li><li><a href="#L159">DesktopApp._queues（方法） · L159–L161</a></li><li><a href="#L163">DesktopApp._approvals（方法） · L163–L165</a></li><li><a href="#L167">DesktopApp._approvals（方法） · L167–L169</a></li><li><a href="#L171">DesktopApp._engines（方法） · L171–L173</a></li><li><a href="#L175">DesktopApp._engines（方法） · L175–L177</a></li><li><a href="#L179">DesktopApp._surface（方法） · L179–L181</a></li><li><a href="#L183">DesktopApp._surface（方法） · L183–L185</a></li><li><a href="#L191">DesktopApp._subscribe_all（方法） · L191–L197</a></li><li><a href="#L199">DesktopApp._surface_mgr（方法） · L199–L200</a></li><li><a href="#L212">DesktopApp._queue_for（异步方法） · L212–L226</a></li><li><a href="#L228">DesktopApp._engine_runner_for（异步方法） · L228–L264</a></li><li><a href="#L266">DesktopApp._runner_seam（方法） · L266–L272</a></li><li><a href="#L274">DesktopApp._owner_for（方法） · L274–L277</a></li><li><a href="#L279">DesktopApp._public_spine_for（异步方法） · L279–L297</a></li><li><a href="#L299">DesktopApp._approval_for（方法） · L299–L320</a></li><li><a href="#L322">DesktopApp._all_approval_providers（方法） · L322–L330</a></li><li><a href="#L332">DesktopApp.request_shutdown（方法） · L332–L334</a></li><li><a href="#L336">DesktopApp.publish_operator_token（方法） · L336–L373</a></li><li><a href="#L375">DesktopApp.governance_audit（异步方法） · L375–L386</a></li><li><a href="#L388">DesktopApp.governance_evidence（异步方法） · L388–L390</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Desktop FastAPI application and API handlers.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code></code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import asyncio</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import contextvars</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import logging</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import re</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>import secrets</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import stat</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import threading</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from typing import TYPE_CHECKING, Any, Optional</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from fastapi import Body, Depends, FastAPI, Header, Request</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from starlette.responses import PlainTextResponse</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from pyharness.application import ApplicationService, ApplicationServiceRegistry</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from pyharness.core.approval import ApprovalProvider</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>from pyharness.core.tenant_settings import (TenantSettingsStore,</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>                                            normalize_tenant_id,</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>                                            session_tenants,</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>                                            tenant_of_log,</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>                                            tenants_dir)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>from pyharness.core.task_queue import TaskQueue, queue_kwargs_of</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>from pyharness.events import EVENT_TYPES</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>from .auth_cookies import cookie_name, read_cookie</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code># 路径中的会话 id(供租户服务端派生:以会话注册租户为准,不信客户端自报头)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code># 字符集必须与 SessionLog 的 sid 合法面一致(sessions.validate_session_id =</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code># `s-[A-Za-z0-9._-]{6,64}`)。**原为 `[0-9a-zA-Z]+`,不含 `-`/`.`** ⇒ fork 会话</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code># (`s-fork-&lt;hex&gt;`,cli.py 生成)只匹配到 `s-fork` 前缀 → 查不到租户 → 静默回落</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code># 客户端头。故此处放宽为 `[0-9A-Za-z._-]+`(`-` 置末为字面量)。</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>from .constants import (</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    SSE_HEARTBEAT_S,</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    _STATUS_FOR_CODE,</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>from .projection import (</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    EventStreamHub,</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    StreamClient,</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    redact,</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>from .sessions import (</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    DesktopSessionManager,</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    _SID_RE,</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    _await,</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    _cfg_of,</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    _resolve_secret_value,</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    _sessions_dir_of,</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    validate_session_id,</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>from pyharness.desktop.host_policy import (_SESSION_ID_IN_PATH, log, LoopbackHostMiddleware)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>if TYPE_CHECKING:  # 仅注解引用(app↔bridge 环形依赖,运行时不需要)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    from .bridge import DesktopBridge</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code></code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>from pyharness.desktop.authority import DesktopAuthority</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>from pyharness.desktop.routes import DesktopRoutes</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>from pyharness.desktop.pages import DesktopPages</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>from pyharness.desktop.handlers import DesktopHandlers</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>from pyharness.desktop.lifecycle import DesktopLifecycle</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>class DesktopApp(DesktopAuthority, DesktopRoutes, DesktopPages, DesktopHandlers, DesktopLifecycle):</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    &quot;&quot;&quot;桌面程序总装(F065 内核入口):FastAPI 装配 + 总线 → SSE fan-out + 会话面。</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    字段(spec 数据结构表):api / url / bridge / hub / ctx / stopping / server / loop;</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    实现附加:_surface(会话解析面)/ _logs(会话同柄缓存)/ _queues(per-session TaskQueue)/</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    _approvals(per-session ApprovalProvider)/ _sub(总线订阅登记)。</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    def __init__(self, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        self.ctx = ctx</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        self.hub = EventStreamHub()</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        self.bridge: Optional[DesktopBridge] = None</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        self.server: Any = None</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        self.loop: Optional[asyncio.AbstractEventLoop] = None</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        self.stopping = threading.Event()</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        self.url: str = &quot;&quot;</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        self._sub: Any = None</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        self._graceful_done: bool = False        # 优雅停服幂等标记(双击关闭只走一次)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        self._tenant_var: contextvars.ContextVar[str] = contextvars.ContextVar(</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            &quot;pyharness_desktop_tenant&quot;, default=&quot;default&quot;)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        self._service_registry = self._create_service_registry(ctx)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        self.service = self._service_registry.get(&quot;default&quot;)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        self.api = FastAPI(title=&quot;PyHarness Desktop&quot;, docs_url=None, redoc_url=None)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        self._api_token = self._resolve_api_token()</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        self._tstore: Optional[TenantSettingsStore] = None   # 租户令牌库(惰性)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        self.api.middleware(&quot;http&quot;)(self._tenant_middleware)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        # Starlette&#x27;s last-added middleware is outermost: reject malformed</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        # Host before account/cookie code constructs a URL (also under ASGI).</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        self.api.add_middleware(LoopbackHostMiddleware)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        self.mount_api()</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        from .platform_api import mount_platform</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        mount_platform(self)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        from .accounts_api import mount_accounts</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        mount_accounts(self)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        bus = getattr(ctx, &quot;bus&quot;, None)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        if bus is not None:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            self._sub = self._subscribe_all(bus)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    def _create_service_registry(self, ctx: Any) -&gt; ApplicationServiceRegistry:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        &quot;&quot;&quot;Default owned registry; embedded native details may borrow its owner.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        return ApplicationServiceRegistry(ctx, channel=&quot;desktop&quot;)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    # ------------------------------------------------ tenant/service registry</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    @property</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    def service(self) -&gt; ApplicationService:</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        return self._service_registry.get(self._tenant_var.get())</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    @service.setter</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    def service(self, value: ApplicationService) -&gt; None:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        tenant = normalize_tenant_id(getattr(value, &quot;tenant_id&quot;, &quot;default&quot;))</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        self._service_registry._services[tenant] = value</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code></code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    def current_tenant(self) -&gt; str:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        return self._tenant_var.get()</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    def _sse_heartbeat_seconds(self) -&gt; float:</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        &quot;&quot;&quot;Keep the public app configuration seam at the composition boundary.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        return SSE_HEARTBEAT_S</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code></code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    # ------------------------------------------------ 租户鉴权(R31-2)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code></code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code></code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    # ------------------------------------------------ service compatibility</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    @property</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    def _logs(self) -&gt; dict[str, Any]:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        return self.service._logs</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code></code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    @_logs.setter</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    def _logs(self, value: dict[str, Any]) -&gt; None:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        self.service._logs = value</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code></code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    @property</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    def _session_locks(self) -&gt; dict[str, asyncio.Lock]:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        return self.service._session_locks</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code></code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    @_session_locks.setter</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>    def _session_locks(self, value: dict[str, asyncio.Lock]) -&gt; None:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        self.service._session_locks = value</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code></code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    @property</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    def _queue_locks(self) -&gt; dict[str, asyncio.Lock]:</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        return self.service._queue_locks</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code></code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    @_queue_locks.setter</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    def _queue_locks(self, value: dict[str, asyncio.Lock]) -&gt; None:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        self.service._queue_locks = value</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code></code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    @property</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    def _queues(self) -&gt; dict[str, TaskQueue]:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        return self.service._queues</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code></code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    @_queues.setter</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>    def _queues(self, value: dict[str, TaskQueue]) -&gt; None:</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        self.service._queues = value</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code></code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    @property</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    def _approvals(self) -&gt; dict[str, ApprovalProvider]:</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        return self.service._approvals</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code></code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    @_approvals.setter</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    def _approvals(self, value: dict[str, ApprovalProvider]) -&gt; None:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        self.service._approvals = value</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code></code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    @property</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    def _engines(self) -&gt; dict[str, Any]:</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        return self.service._engines</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code></code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    @_engines.setter</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>    def _engines(self, value: dict[str, Any]) -&gt; None:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        self.service._engines = value</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code></code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    @property</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    def _surface(self) -&gt; Any:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        return self.service._surface</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code></code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>    @_surface.setter</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>    def _surface(self, value: Any) -&gt; None:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        self.service._surface = value</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code></code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    # ------------------------------------------------ API 鉴权</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code></code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code></code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    # ------------------------------------------------ 总线订阅(偏离 4)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    def _subscribe_all(self, bus: Any) -&gt; list:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        &quot;&quot;&quot;全事件 fan-out:词表 70 精确类型 + plugin.* 段通配(owner=desktop)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        subs = []</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        for t in EVENT_TYPES:</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            subs.append(bus.subscribe(t, self.hub.forward, owner=&quot;desktop&quot;))</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        subs.append(bus.subscribe(&quot;plugin.*&quot;, self.hub.forward, owner=&quot;desktop&quot;))</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        return subs</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code></code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    def _surface_mgr(self) -&gt; Any:</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        return self.service.surface_mgr()</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code></code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>    # ------------------------------------------------ API 装配</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code></code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>    # ------------------------------------------------ 统一错误体</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code></code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code></code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    # ------------------------------------------------ 页面(前端入口)</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code></code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>    # ------------------------------------------------ 会话解析(端点共用)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code></code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>    async def _queue_for(self, sid: str, log_: Any) -&gt; TaskQueue:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        &quot;&quot;&quot;per-session TaskQueue(runner = per-session 真实引擎;真 LLM 已注册)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        lock = self._queue_locks.setdefault(sid, asyncio.Lock())</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        async with lock:</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>            q = self._queues.get(sid)</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            if q is None:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>                runner = await self._engine_runner_for(sid, log_)</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>                q = TaskQueue(session=log_, runner=runner,</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>                              **queue_kwargs_of(getattr(self.ctx, &quot;settings&quot;, None)))</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>                self._queues[sid] = q</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>                spine = self._engines.get(sid)</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>                if spine is not None:</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>                    from pyharness import engine as _eng</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>                    await _eng.activate_orchestration(spine, task_queue=q)</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>            return q</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code></code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>    async def _engine_runner_for(self, sid: str, log_: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        &quot;&quot;&quot;per-session 引擎 runner(懒装配):复用 manager 已 open 的 log_/bus,</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        补 loop/scope/llm/空工具表 + 总线落盘订阅 → engine.make_runner。</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code></code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        无可用 LLM 凭据时在落 user.message 前失败,避免留下“有消息无任务”的半提交。</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        spine = self._engines.get(sid)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        from pyharness import engine as _eng</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        from pyharness.engine import make_runner as _eng_make_runner</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        cfg = self.ctx.settings</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        _eng.register_default_llm(cfg)              # 幂等;无 key → CRED-701</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        if spine is None:</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>            store = getattr(self._surface_mgr(), &quot;_stores&quot;, {}).get(sid)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>            spine = _eng.build_runner_components(</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>                cfg, log_=log_, bus=getattr(self.ctx, &quot;bus&quot;, None),</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>                sessions_dir=_sessions_dir_of(self.ctx), store=store,</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>                attach_persistence=False,   # manager 已订阅落盘;重复订=双写卡死</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>                # GAP-11:Web 桌面壳 = human 通道 &quot;desktop&quot;(框架侧声明,不信任</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                # 前端自报);不下沉到 spine 则该会话每次工具授权 APR-503。</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                channel=&quot;desktop&quot;)</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>            self._engines[sid] = spine</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        if not getattr(spine, &quot;_plugins_ready&quot;, False):</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>            await _eng._preload_plugins(spine)   # 示例插件预载(util.now 会话可用)</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>            spine._plugins_ready = True</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        # 审批接线:engine ApprovalProvider → ctx.approval(桌面裁决端点</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        # _provider_owning 经 ctx.approval 兜底定位;否则弹窗 A/B 打来 APR-503)</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        if getattr(self.ctx, &quot;approval&quot;, None) is None:</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>            self.ctx.approval = spine.approval</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            self.ctx._approval_owner_sid = sid   # 归属记账:_approval_for 据此判能否复用</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        if getattr(self.ctx, &quot;guard&quot;, None) is None:</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            self.ctx.guard = spine.guard</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>            self.ctx._guard_owner_sid = sid</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        # 预算门面:按会话记账归属;/api/budget/{sid} 主路径读本会话 spine.budget,</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        # ctx.budget 仅作 fallback 且需 owner==sid(防多会话共享 ctx 串场)</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        self.ctx.budget = spine.budget</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        self.ctx._budget_owner_sid = sid</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        return _eng_make_runner(spine)</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code></code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>    def _runner_seam(self) -&gt; Any:</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        &quot;&quot;&quot;执行器注入点(引擎装配层):ctx.make_runner()/ctx.task_runner 优先,None 缺省。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        ctx = self.ctx</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        make = getattr(ctx, &quot;make_runner&quot;, None)</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        if callable(make):</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            return make()</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        return getattr(ctx, &quot;task_runner&quot;, None)</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code></code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>    def _owner_for(sid: str) -&gt; str:</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        &quot;&quot;&quot;桌面会话的编排 owner(channel 级身份,不信任前端自报)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        return f&quot;desktop:{sid}&quot;</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code></code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>    async def _public_spine_for(self, sid: str) -&gt; tuple[Any, Any]:</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        &quot;&quot;&quot;Build/return a session spine without requiring an LLM credential.</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code></code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        Management read/pause/remove actions should remain available even if the</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        provider key is absent; start/spawn paths call ``_queue_for`` first, which</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        performs the credential/LLM registration gate.</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        log_ = await self._require_session(sid)</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        spine = self._engines.get(sid)</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        if spine is None:</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>            from pyharness import engine as _eng</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>            store = getattr(self._surface_mgr(), &quot;_stores&quot;, {}).get(sid)</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>            spine = _eng.build_runner_components(</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>                _cfg_of(self.ctx), log_=log_, bus=getattr(self.ctx, &quot;bus&quot;, None),</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>                sessions_dir=_sessions_dir_of(self.ctx), store=store,</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                attach_persistence=False, channel=&quot;desktop&quot;)   # GAP-11</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>            self._engines[sid] = spine</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>            await _eng.activate_orchestration(spine)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        return log_, spine</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code></code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>    def _approval_for(self, sid: str, log_: Any) -&gt; ApprovalProvider:</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        &quot;&quot;&quot;per-session ApprovalProvider;ctx.approval(装配注入,单会话形态)优先。</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code></code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        多会话各 provider 以 bus=None 构造(偏离 1 注):裁决结果事件仍由 sess.append</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        经会话总线分发到 hub(SSE 可见),provider 侧按 approval.py 偏离 3 直接消费</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>        on_verdict——避免共享总线把 A 会话裁决扇到 B provider 触发跨会话 APR-503</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>        system.error 噪音(approval.on_verdict 未知 id 兜底路径)。</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        provider = self._approvals.get(sid)</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        if provider is None:</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            ctx_approval = getattr(self.ctx, &quot;approval&quot;, None)</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>            owner = getattr(self.ctx, &quot;_approval_owner_sid&quot;, None)</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>            # 仅当共享 ctx.approval 确属本会话(owner==sid)或未记归属才复用;否则</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>            # 按本会话 log_ 建 per-session provider——防第二会话拿到第一会话的审批通道。</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>            if ctx_approval is not None and owner in (None, sid):</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>                return ctx_approval          # 装配注入的全会话 provider(单会话形态)</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>            provider = ApprovalProvider(</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>                session=log_, bus=None, config=_cfg_of(self.ctx),</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>                # R12-3:队列联动(惰性取值 ⇒ 与构造序无关)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>                queue_getter=lambda: self._queues.get(sid))</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>            self._approvals[sid] = provider</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        return provider</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code></code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>    def _all_approval_providers(self) -&gt; list:</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        &quot;&quot;&quot;pending 聚合:per-session providers + ctx.approval(去重)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        seen, out = set(), []</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        ctx_approval = getattr(self.ctx, &quot;approval&quot;, None)</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        for p in list(self._approvals.values()) + ([ctx_approval] if ctx_approval else []):</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>            if p is not None and id(p) not in seen:</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>                seen.add(id(p))</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>                out.append(p)</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        return out</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code></code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>    def request_shutdown(self) -&gt; None:</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        &quot;&quot;&quot;关窗事件入口:置 stopping 旗标(幂等);真正停服在 webview.start() 返回后。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        self.stopping.set()</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code></code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>    def publish_operator_token(self) -&gt; Optional[Path]:</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>        &quot;&quot;&quot;把**本进程生成**的操作者令牌落盘,供浏览器/外部客户端取用。</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code></code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>        ``R31-2`` 的配套。引导页按 ADR-023 不再向无凭证调用方发放令牌,而</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>        ``shell.web.token`` 未配置时令牌是**进程随机**且从不打印 ⇒ 浏览器用户无从</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>        取得,该入口等于关闭(实测:改动后浏览器访问 401 且无处可查)。故生成态令牌</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        落盘到 ``&lt;storage.root&gt;/web.token``(与租户令牌 ``tenants/&lt;t&gt;/token`` 同口径)。</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>        **不写日志、不进 API 响应**;调用方只应记录**路径**。</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code></code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>        **权限(2026-09-21 UI 验收实测更正)**:代码调用 ``chmod(0o600)``,但</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code></code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>        - **POSIX**:生效,文件为 ``0600``。</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>        - **Windows**:``chmod`` **不生效** —— 实测 ``stat.S_IMODE`` 仍为 ``0o666``</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>          (NTFS 不存 POSIX 权限位)。实际可读面由**父目录 ACL 继承**决定:</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>          ``%USERPROFILE%`` 下的 ``.pyharness`` 默认只含当前用户 + SYSTEM +</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>          Administrators(等效&quot;仅属主&quot;);若该目录被外部工具**额外授权**给别的组(本机实测存在</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>          一条 ``CodexSandboxUsers:(OI)(CI)(RX)``),本文件会**继承**该授权。</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>          故 Windows 上**不得**声称&quot;0600&quot;;要收紧须显式改 ACL(未做,见 ADR-023</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>          的已知边界)。</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code></code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        配置了 ``shell.web.token`` 时**不落盘** —— 用户已知该值,没必要多一份副本。</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        返回落盘路径;非生成态 / 取不到 ``storage.root`` ⇒ ``None``。</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>        if not (self._api_token and self._api_token_generated):</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>            return None</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>        root = self._storage_root()</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>        if root is None:</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>            return None</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        p = root / &quot;web.token&quot;</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>        try:</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>            root.mkdir(parents=True, exist_ok=True)</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>            tmp = p.with_name(p.name + &quot;.tmp&quot;)</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>            tmp.write_text(self._api_token, encoding=&quot;utf-8&quot;)</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>            tmp.replace(p)                                # pathlib 原子替换</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>            p.chmod(stat.S_IRUSR | stat.S_IWUSR)          # POSIX 0600;Windows 无效(见 docstring)</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>        except OSError:</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>            return None</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>        return p</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code></code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>    async def governance_audit(self, sid: str, decision_id: str = &quot;&quot;,</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>                               since_seq: int = 0,</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>                               reconcile: bool = False) -&gt; dict:</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        &quot;&quot;&quot;治理审计面(GAP-7):决策因果还原 / 被拒清单 / 一致性对账。</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code></code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>        与 ``/telemetry``(旧遥测:事件类型计数)**语义不同**:本端点回答&quot;这条</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>        决策为什么发生、经过了什么、拦了没有真执行&quot;,数据来源是 append-only</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        事件日志的重放(可复现),不是计数聚合。</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>        return await self.service.governance_audit(</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>            sid, decision_id=decision_id, since_seq=since_seq,</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>            reconcile=bool(reconcile))</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code></code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>    async def governance_evidence(self, sid: str, task_id: str = &quot;&quot;) -&gt; dict:</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>        &quot;&quot;&quot;证据归档面(GAP-8):按任务段聚合的治理证据工件(由日志重建)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>        return await self.service.governance_evidence(sid, task_id=task_id)</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code></code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code></code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code></code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code></code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>    # ============================================================ 端点实现</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code></code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>    # ------------------------------------------------ jobs / schedule / subagent</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code></code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code></code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>    # -------------------------------------------------- 插件管理(#50/#51)</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code></code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code></code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>    # ---------------------------------------------- 权限档位(#39 动态切换)</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code></code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code></code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>    # ---------------------------------------------- 技能管理(F073 桌面面)</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code></code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code></code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>    # ------------------------------------------------ 编辑/重发/反馈/Webhook</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code></code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code></code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>    # ============================================================ 优雅停服</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code></code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

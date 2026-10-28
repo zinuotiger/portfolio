@@ -1,0 +1,425 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/schedule.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/schedule.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 425 行</span></nav><main class="wrap source-page"><h1>pyharness/core/schedule.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：9d7d168f437b50e8ab15a2a569648d6446c8f0af<br>SHA-256（内容校验）：88e1a11f514c3d6bd827525047d498dd355128afcbe9cd65f17dd2e6f1e2ca11</p><p><a href="../../../architecture-detailed.html?node=schedule">Scheduler（定时任务调度）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 21 个类、函数与方法</summary><ul><li><a href="#L88">Scheduler（类） · L88–L417</a><ul><li><a href="#L99">Scheduler.__init__（方法） · L99–L121</a></li><li><a href="#L124">Scheduler._session_ctx（方法） · L124–L133</a></li><li><a href="#L135">Scheduler._queue_ctx（方法） · L135–L143</a></li><li><a href="#L145">Scheduler._iter_session_events（方法） · L145–L147</a></li><li><a href="#L149">Scheduler._danger_level（方法） · L149–L157</a></li><li><a href="#L159">Scheduler._now（方法） · L159–L160</a></li><li><a href="#L172">Scheduler._derive_risky（方法） · L172–L190</a></li><li><a href="#L192">Scheduler.register（异步方法） · L192–L223</a></li><li><a href="#L226">Scheduler._count_from_events（方法） · L226–L241</a></li><li><a href="#L243">Scheduler.list_jobs（异步方法） · L243–L253</a></li><li><a href="#L256">Scheduler._require（方法） · L256–L262</a></li><li><a href="#L264">Scheduler.remove（异步方法） · L264–L272</a></li><li><a href="#L274">Scheduler.edit（异步方法） · L274–L292</a></li><li><a href="#L294">Scheduler.run_now（异步方法） · L294–L297</a></li><li><a href="#L299">Scheduler.pause（异步方法） · L299–L307</a></li><li><a href="#L309">Scheduler.resume（异步方法） · L309–L324</a></li><li><a href="#L327">Scheduler._fire（异步方法） · L327–L352</a></li><li><a href="#L354">Scheduler._tick（异步方法） · L354–L397</a></li><li><a href="#L405">Scheduler.stop（方法） · L405–L410</a></li><li><a href="#L412">Scheduler.aclose（异步方法） · L412–L417</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/schedule.py — 进程内持久化定时器 (specs/schedule.py.md 契约;F048)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F048(定时任务)· F043(到点入队)· F011(持久化联动)· F014/F015(危险模板深夜</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>禁触发)。一句话:cron 表达式(及固定间隔 interval/绝对时间 at 两种扩展)注册任务模板,</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>到点把模板作为新任务入队(F043,复用 guard/预算/日志纪律);list/remove/pause/resume</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>全事件化;job 定义与状态随会话持久化(事件溯源),崩溃恢复后**继续未来触发**,宕机期</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>错过的触发**只记 missed 不补跑**(PRD F048 边界);默认禁深夜(23:00-7:00)触发危险类</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>模板;最小粒度 1 分钟,单进程协程(INV-07)。事件 schedule.registered/updated/removed/</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>blocked/missed 为词表外新增(trigger 已收编 EVENT-SCHEMA §3.5.3),已按 §7 规则登记</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>(payload 模型 + vocab,llm.retry 同款先例);文档字段表同步留给文档管线。</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>偏离说明(契约=specs/schedule.py.md;以下为与规格伪码冲突处的取舍,均列理由,与</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>goal.py/task_queue.py 同款先例,已入模块 docstring 供审查):</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>1. 事件先落、内存后对齐(goal.py 偏离 2 同款,INV-01 更严):伪码&quot;先入内存后落事件&quot;,</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>   若 append 校验拒写(终态/载荷非法)会留下&quot;内存有、日志无&quot;的脏态;本实现所有写</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>   路径先 await session.append 成功,再把内存字段对齐到事件载荷,拒绝时零副作用。</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>   created_seq = schedule.registered 事件 env.seq(与 ctx.session.next_seq() 同值,</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>   且与 goal.created 同构,回放重建口径一致)。</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>2. _rebuild_from 在 spec 三类事件(registered/updated/removed)回放之外,补扫</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>   schedule.trigger 事件重建 last_fired_at 并据其前推 next_fire_at:仅按注册快照重建</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>   时,已触发过多次的 interval/cron job 会拿&quot;注册时刻的首窗快照&quot;当下一窗,恢复时把</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>   宕机前已正常触发的窗口重复记 missed(如每 10min 的 job 触发两轮后宕机 → 误报</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   missed=2)。以最后一次 trigger.fired_at 为锚,missed 只计真正落在宕机窗内的机会,</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   与 PRD&quot;宕机期错过的触发机会只记 missed&quot;及 GWT-F048-12&quot;重启后 list 与崩溃前一致&quot;</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   对齐(无 trigger 事件的 job 行为与伪码完全一致)。</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>3. recover 的&quot;重臂&quot;分两档:窗口未到(next_fire_at 仍未来)→ 保持快照(崩溃前状态</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>   原样续跑,list_jobs 与崩溃前一致);窗口已过(宕机错过)→ 记 missed 后显式从 now</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   重臂(interval:now+间隔;cron:now 之后下一匹配;at:fire_at 或 None),last_fired_at</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   保留供列表展示(最近触发仍是崩溃前那轮)。伪码对 interval 无条件按 now 重臂会把</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   未错过的首窗推后一个周期;若不清 last_fired 又 arm 到过去 → 恢复后立刻补触发</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>   一次,与&quot;错过不补跑&quot;矛盾(PRD 边界权威)。</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>4. resume 以 last_fired=None 的探针重臂(interval = now+间隔):暂停期窗口不补跑、</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   恢复即未来触发;last_fired_at 字段不改动(展示仍为真实最近触发)。伪码未用探针,</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>   若以 stale last_fired 为基会 arm 到过去 → resume 后立刻补触发 pause 期窗口,</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   与暂停语义相悖。</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>5. BUSY 为 ERR §2.4 功能特性码,errors.register_default_codes 未收录;raise_code 会把</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>   未登记码改写为 CYC-999 → 按 task_queue 偏离 5/goal 同款先例直接构造</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   PyHError(&quot;BUSY&quot;)(.code 字面量 BUSY,供测试/调用方断言);CFG-601/EVT-100/CYC-999</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>   为已登记码,全走 raise_code(任务要求&quot;错误全走 raise_code&quot;的边界说明)。</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>6. 深夜窗取构造参数 night_window=(23,7) 默认 23:00≤h 或 h&lt;7:00(spec 常量可配</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>   schedule.night_window;装配方把配置值传入即可,本模块不直接读 config 防硬耦合)。</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>7. cron 扫描上限按伪码 1440 分钟(一天内必命中的日级表达式;周/月跨度表达式属 F048</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>   分钟对齐语义之外,需跨天匹配的周期用 interval/at 表达——伪码同样受此上限)。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>8. 周日映射按数据表&quot;周 0-6,0=周日&quot;实现(cron 域标准);伪码直用 dt.weekday()</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>   (Monday=0)与字段表矛盾,取字段表权威:cron_wday = (dt.weekday()+1) % 7。</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>9. next_fire/trigger 事件时间一律本地时区朴素 datetime(spec:时间一律本地时区;</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>   payload fired_at 正则只校 ISO 前缀),与信封 ts(UTC Z)分离。</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>依赖方向(INV-08):本模块 → errors / events(vocab 登记事件类型经 session.append 写入)、</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>task_queue(经构造注入,不 import 实现)、tools_registry.NAME_RE(工具同名规)、</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>config.baseline_danger(F023 危险分级默认表);不 import agent_loop/llm/plan。</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>import asyncio</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>import logging</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>import re</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>from dataclasses import dataclass</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>from datetime import datetime, timedelta</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>from typing import Any, Callable, Literal, Optional, Union</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>from pyharness.config import baseline_danger</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>from pyharness.core.tools_registry import NAME_RE</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code></code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code># ---------------------------------------------------------------- 常量(F048)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>&quot;&quot;&quot;三种触发方式:cron(5 字段,核心)/ interval(固定间隔秒)/ at(绝对时间,一次性)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code># cron 下次触发扫描上限(**按日推进**,非逐分钟)。取一个完整格里高利周期</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code># (400 年)加一天:凡在 400 年内至少能匹配一次的表达式,其真实未来触发点必</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code># 落在界内;界内无匹配 ⇒ 该表达式**永远不存在**触发点(如 2/30)→ 显式失败。</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code># 上限的代价只在不可能表达式上付(常见表达式首日即命中,循环立即返回)。</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code># ---------------------------------------------------------------- 内部 spec</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code></code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code># ---------------------------------------------------------------- 数据结构</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code># ------------------------------------------------------------------ Scheduler</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>from pyharness.core.schedule_models import (log, JobKind, MIN_INTERVAL_SECONDS, CRON_MAX_SCAN_DAYS, DEFAULT_NIGHT_WINDOW, _CRON_BOUNDS, _ISO_RE, _SEG_RE, now, iso, parse_iso, CronSpec, IntervalSpec, AtSpec, ScheduleJob, JobInfo)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>from pyharness.core.schedule_calendar import ScheduleCalendar</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>from pyharness.core.schedule_recovery import ScheduleRecovery</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>class Scheduler(ScheduleCalendar, ScheduleRecovery):</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    &quot;&quot;&quot;会话级进程内定时器(F048):注册表 + 分钟对齐 ticker,全事件化。</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    消费 session.append/replay(schedule.* 事件与恢复回放)、task_queue.submit</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    (F043 到点入队,经构造注入)、危险分级(F023,is_risky 推导);被命令层</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    (register/list/remove/pause/resume 命令)与会话启动装配(recover)消费。</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    私有字段: _jobs(name → ScheduleJob,事件重建,INV-01)/ _stopped(ticker 停闸)/</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    _ticker_task(分钟泵单例句柄,INV-07 单协程)/ _sleep(泵睡眠注入,测试用)。</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    def __init__(self, session: Any = None, task_queue: Any = None, *,</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                 night_window: tuple[int, int] = DEFAULT_NIGHT_WINDOW,</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                 danger: Optional[Union[dict, Callable[[str], str]]] = None,</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                 auto_ticker: bool = True) -&gt; None:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        &quot;&quot;&quot;构造调度器。</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        session = SessionLog 事件源(append 唯一写口;None 时须经 ctx 提供);</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        task_queue = TaskQueue 或同型 async submit(intent, *, meta) 协议对象</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        (F043 到点入队;None 时触发即 CYC-999 事件化,不静默);</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        night_window = 深夜禁触窗 (start_hour, end_hour) 默认 (23, 7);</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        danger = 工具 → 危险级解析(F023):dict 或 callable,None = config.baseline_danger;</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        auto_ticker = recover 是否自动启动分钟泵(单测注入时钟时可关)。</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        self.session = session</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        self.task_queue = task_queue</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        self._night_start, self._night_end = night_window</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        self._danger: Union[dict, Callable[[str], str]] = (</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            danger if danger is not None else baseline_danger)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        self._auto_ticker = bool(auto_ticker)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        self._jobs: dict[str, ScheduleJob] = {}</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        self._stopped = False</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        self._ticker_task: Optional[asyncio.Task] = None</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        self._sleep: Callable[..., Any] = asyncio.sleep   # 泵睡眠(测试注入)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code></code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    # ========================================================== 注入解析</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    def _session_ctx(self, ctx: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        &quot;&quot;&quot;事件源解析:构造注入优先,ctx.session 兜底(命令层装配便利)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        if self.session is not None:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>            return self.session</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        if ctx is not None:</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            s = getattr(ctx, &quot;session&quot;, None) or getattr(ctx, &quot;_session&quot;, None)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            if s is not None:</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                return s</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        raise_code(&quot;EVT-100&quot;, hint=&quot;Scheduler 未注入 session,无法写 schedule.* 事件&quot;,</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                   advice=&quot;构造时注入 SessionLog 或同型 append 协议对象&quot;)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code></code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    def _queue_ctx(self, ctx: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        &quot;&quot;&quot;入队目标解析:构造注入优先,ctx.task_queue 兜底。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        if self.task_queue is not None:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            return self.task_queue</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        if ctx is not None:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            q = getattr(ctx, &quot;task_queue&quot;, None)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            if q is not None:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                return q</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        return None</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    def _iter_session_events(self):</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        from pyharness.core.event_reader import session_events</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        return session_events(self.session)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code></code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    def _danger_level(self, tool: str) -&gt; str:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        &quot;&quot;&quot;单工具危险级解析(F023;未知工具视同 none,显式 override 由调用方把关)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        if isinstance(self._danger, dict):</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            return str(self._danger.get(tool, &quot;none&quot;))</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        try:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>            return str(self._danger(tool))</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        except Exception:                     # noqa: BLE001 分级表异常不炸注册</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            log.exception(&quot;danger lookup failed tool=%s&quot;, tool)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>            return &quot;none&quot;</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code></code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    def _now(self):</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        return now()</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code></code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    # ========================================================== 表达式解析</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code></code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    # 别名(与 spec 函数清单同名,供命令层/测试直接调用)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    _validate_spec = ScheduleCalendar._parse_spec</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code></code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code></code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    # ========================================================== 窗口推进</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code></code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code></code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    # ========================================================== 注册(F048)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    def _derive_risky(self, template: dict) -&gt; bool:</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        &quot;&quot;&quot;is_risky 推导(F023):模板 meta.tools 声明任一工具为 high/critical → 危险。</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code></code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        模板未声明工具 → False(无从分级,安全由显式 is_risky 覆盖兜底)。</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        if not isinstance(template, dict):</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            return False</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        meta = template.get(&quot;meta&quot;)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        if not isinstance(meta, dict):</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>            return False</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        tools = meta.get(&quot;tools&quot;)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        if isinstance(tools, str):</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>            tools = [tools]</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        if not isinstance(tools, list):</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>            return False</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        for tool in tools:</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            if self._danger_level(str(tool)) in (&quot;high&quot;, &quot;critical&quot;):</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                return True</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        return False</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code></code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    async def register(self, name: str, kind: str, expr: str, template: dict, *,</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                       is_risky: Optional[bool] = None, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        &quot;&quot;&quot;注册/更新调度 job(F048)。</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code></code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        非法表达式(CFG-601)/重名(BUSY)/模板缺 intent(EVT-100)/名字非法(CFG-601)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        一律拒;合法则写 schedule.registered 持久化定义(事件=唯一真源 INV-01)。</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        if not isinstance(name, str) or not NAME_RE.fullmatch(name):</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            raise_code(&quot;CFG-601&quot;, hint=f&quot;job 名非法: {name}&quot;,</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                       advice=&quot;小写字母开头,字母/数字/下划线/点,总长 2~64&quot;)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        if name in self._jobs:                # 重名:显式拒,不隐式覆盖</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                &quot;hint&quot;: f&quot;job {name} 已存在&quot;,</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                &quot;advice&quot;: &quot;先 remove 再注册(防隐式覆盖)&quot;})</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        spec = self._validate_spec(kind, expr)          # 非法 → CFG-601(EVT-100)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        if not isinstance(template, dict) or not isinstance(</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                template.get(&quot;intent&quot;), str) or not template[&quot;intent&quot;].strip():</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;template 缺 intent 字段&quot;,</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                       advice=&quot;任务模板必须含非空意图文本&quot;)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        risky = self._derive_risky(template) if is_risky is None else bool(is_risky)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        sess = self._session_ctx(ctx)</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        first = self._first_fire(kind, expr, now())</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        # 事件先落,内存后对齐(偏离 1:append 拒写时零副作用,INV-01 更严)</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        env = await sess.append(&quot;schedule.registered&quot;, {</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>            &quot;name&quot;: name, &quot;kind&quot;: kind, &quot;expr&quot;: expr,</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            &quot;template&quot;: {&quot;intent&quot;: template[&quot;intent&quot;]},   # meta 不入事件(INV-09)</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>            &quot;is_risky&quot;: risky, &quot;paused&quot;: False,</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>            &quot;next_fire_at&quot;: iso(first)}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        job = ScheduleJob(name=name, kind=kind, expr=expr,</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>                          template=dict(template), is_risky=risky, paused=False,</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>                          next_fire_at=first, created_seq=env.seq, spec=spec)</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        self._jobs[name] = job                # 事件落定 → 注册表对齐</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code></code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>    # ========================================================== 查询</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    def _count_from_events(self) -&gt; dict[str, dict[str, int]]:</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        &quot;&quot;&quot;triggered/missed 计数聚合(schedule.trigger 计数;missed 事件 payload</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        missed 累计)——内存不存第二份(INV-01),list_jobs 每次回放聚合。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        counts: dict[str, dict[str, int]] = {}</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        for e in self._iter_session_events():</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>            t = getattr(e, &quot;type&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            p = getattr(e, &quot;payload&quot;, {}) or {}</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            if t == &quot;schedule.trigger&quot;:</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>                c = counts.setdefault(p.get(&quot;job&quot;, &quot;&quot;),</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                                      {&quot;triggered&quot;: 0, &quot;missed&quot;: 0})</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>                c[&quot;triggered&quot;] += 1</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>            elif t == &quot;schedule.missed&quot;:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>                c = counts.setdefault(p.get(&quot;job&quot;, &quot;&quot;),</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                                      {&quot;triggered&quot;: 0, &quot;missed&quot;: 0})</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                c[&quot;missed&quot;] += int(p.get(&quot;missed&quot;, 0))</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        return counts</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code></code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>    async def list_jobs(self, ctx: Any = None) -&gt; list[JobInfo]:</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        &quot;&quot;&quot;列出全部 job 快照(F048 list;计数由事件回放聚合)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        counts = self._count_from_events()</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        out: list[JobInfo] = []</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        for j in self._jobs.values():</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>            c = counts.get(j.name, {&quot;triggered&quot;: 0, &quot;missed&quot;: 0})</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>            out.append(JobInfo(name=j.name, kind=j.kind, expr=j.expr,</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>                               paused=j.paused, next_fire_at=j.next_fire_at,</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>                               last_fired_at=j.last_fired_at,</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>                               triggered=c[&quot;triggered&quot;], missed=c[&quot;missed&quot;]))</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        return out</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code></code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>    # ========================================================== 管理命令</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>    def _require(self, name: str) -&gt; ScheduleJob:</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        &quot;&quot;&quot;定位 job;不存在 → BUSY 显式拒(幂等不静默)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        j = self._jobs.get(name)</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        if j is None:</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={&quot;hint&quot;: f&quot;job {name} 不存在&quot;,</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>                                        &quot;advice&quot;: &quot;用 list_jobs 查现有 job&quot;})</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        return j</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code></code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>    async def remove(self, name: str, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        &quot;&quot;&quot;移除 job(F048):写 schedule.removed;不存在 → BUSY。</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code></code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        tick 快照遍历中移除安全(遍历在 list 快照上);at 一次性任务触发后自动走此。</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        self._require(name)                   # 不存在 → BUSY</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        sess = self._session_ctx(ctx)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        await sess.append(&quot;schedule.removed&quot;, {&quot;name&quot;: name}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        self._jobs.pop(name, None)            # 事件落定 → 内存摘除(INV-01)</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code></code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>    async def edit(self, name: str, kind: str, expr: str, intent: str, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>        &quot;&quot;&quot;Replace a definition atomically via one existing registration fact.</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code></code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        Already submitted executions retain their original intent. No remove /</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        re-register window can lose the schedule when persistence fails.</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        old=self._require(name)</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        spec=self._validate_spec(kind,expr)</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        if not isinstance(intent,str) or not intent.strip():</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>            raise_code(&#x27;EVT-100&#x27;,field=&#x27;intent&#x27;)</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        template={&#x27;intent&#x27;:intent.strip()}</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        first=self._first_fire(kind,expr,now())</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        risky=old.is_risky or self._derive_risky(template)</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        sess=self._session_ctx(ctx)</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        event=await sess.append(&#x27;schedule.registered&#x27;,{&#x27;name&#x27;:name,&#x27;kind&#x27;:kind,&#x27;expr&#x27;:expr,</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>            &#x27;template&#x27;:template,&#x27;is_risky&#x27;:risky,&#x27;paused&#x27;:old.paused,&#x27;next_fire_at&#x27;:iso(first)},actor=&#x27;system&#x27;,sync=True)</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        self._jobs[name]=ScheduleJob(name=name,kind=kind,expr=expr,template=template,</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>            is_risky=risky,paused=old.paused,next_fire_at=first,last_fired_at=old.last_fired_at,</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>            created_seq=event.seq,spec=spec)</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code></code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>    async def run_now(self, name: str, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        &quot;&quot;&quot;Explicit immediate execution through the same Schedule → TaskQueue path.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        job=self._require(name)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        await self._fire(ctx,job,now())</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code></code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>    async def pause(self, name: str, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        &quot;&quot;&quot;暂停:到点不触发但保留定义与窗口;重复暂停幂等(无事件)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>        j = self._require(name)               # 不存在 → BUSY</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        if j.paused:</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>            return                            # 幂等(重复暂停无事件)</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>        sess = self._session_ctx(ctx)</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>        await sess.append(&quot;schedule.updated&quot;,</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                          {&quot;name&quot;: name, &quot;paused&quot;: True}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        j.paused = True                       # 事件落定 → 内存对齐</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code></code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>    async def resume(self, name: str, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        &quot;&quot;&quot;恢复:继续按重臂后的 next_fire_at 触发;重复恢复幂等。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        j = self._require(name)</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        if not j.paused:</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>            return                            # 幂等(重复恢复无事件)</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>        sess = self._session_ctx(ctx)</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        # interval 恢复 = 从恢复时刻起算新周期(暂停期窗口不补跑,偏离 4):</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        # 以 last_fired=None 的探针计算,避免 append 前改动内存字段(事件先落纪律)</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        probe = ScheduleJob(name=j.name, kind=j.kind, expr=j.expr,</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>                            template=j.template, spec=j.spec)</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        nxt = self.next_fire(probe, now())</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        await sess.append(&quot;schedule.updated&quot;, {</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>            &quot;name&quot;: name, &quot;paused&quot;: False, &quot;next_fire_at&quot;: iso(nxt)},</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>            actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        j.paused = False                      # 事件落定 → 内存对齐</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        j.next_fire_at = nxt</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code></code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>    # ========================================================== 触发(F048)</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>    async def _fire(self, ctx: Any, job: ScheduleJob, fired_at: datetime) -&gt; None:</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        &quot;&quot;&quot;触发执行(F048 I/O):先写 schedule.trigger 留痕再 submit 任务模板(F043)。</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code></code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        模板意图经队列执行,复用 guard/预算/日志纪律;入队失败(如 QUE-001)不静默,</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>        写 system.error 显式事件化,下一触发窗重试。</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        sess = self._session_ctx(ctx)</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        await sess.append(&quot;schedule.trigger&quot;, {</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>            &quot;job&quot;: job.name, &quot;cron&quot;: job.expr,</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>            &quot;fired_at&quot;: fired_at.isoformat()}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>        q = self._queue_ctx(ctx)</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>        if q is None:                         # 未装配队列:宁失败不假装入队</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>            raise_code(&quot;CYC-999&quot;, hint=f&quot;schedule:{job.name} 未注入 task_queue,&quot;</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>                       &quot;到点任务无法入队&quot;)</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>        intent = job.template[&quot;intent&quot;]</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        await sess.append(&quot;user.message&quot;, {&quot;content&quot;: intent}, actor=&quot;user&quot;,</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>                           origin=f&quot;schedule:{job.name}&quot;, sync=True)</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>        try:</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>            await q.submit(intent, meta={&quot;source&quot;: f&quot;schedule:{job.name}&quot;})</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>        except PyHError as e:                 # QUE-001 队满等:显式事件化不吞</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>            try:</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>                await sess.append(&quot;system.error&quot;, {</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>                    &quot;code&quot;: e.code, &quot;hint&quot;: f&quot;schedule:{job.name} 入队失败&quot;},</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>                    actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>            except Exception:                 # noqa: BLE001 留痕失败只记日志</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>                log.exception(&quot;schedule error event failed job=%s&quot;, job.name)</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code></code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>    async def _tick(self, ctx: Any = None, *, now_dt: Optional[datetime] = None</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>                    ) -&gt; list[str]:</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        &quot;&quot;&quot;每分钟检查(F048 核心):暂停跳过 → 未到期跳过 → 深夜+危险 blocked 留痕</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        → at 一次性触发后移除 → cron/interval 触发并推进窗口;返回触发名单。</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code></code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>        单 job 异常隔离:任一 job 失败记 system.error 不中断其余(tick 快照遍历)。</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>        now_dt = now_dt or now()</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>        sess = self._session_ctx(ctx)</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        fired: list[str] = []</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        for job in list(self._jobs.values()):     # 快照遍历(tick 中可 remove/注册)</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>            if job.paused:</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>                continue</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>            if not self._due(job, now_dt):</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>                continue</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>            try:</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>                if self._is_night(now_dt) and job.is_risky:</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>                    # 深夜禁触危险类模板:blocked 留痕 + 顺延下次,零入队(GWT-06)</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>                    await sess.append(&quot;schedule.blocked&quot;, {</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>                        &quot;job&quot;: job.name, &quot;reason&quot;: &quot;night-window&quot;}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>                    job.next_fire_at = self.next_fire(job, now_dt)</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>                    continue</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>                if job.kind == &quot;at&quot;:              # 一次性:触发后移除(不重复)</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>                    await self._fire(ctx, job, now_dt)</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>                    fired.append(job.name)</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>                    await self.remove(job.name, ctx)</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>                    continue</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>                # 周期型:先 fire 成功再推进窗口(P2:此前内存窗口先推、事件后落,</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>                # _fire 失败时崩溃恢复按事件重推 → 重复/错位触发)</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>                await self._fire(ctx, job, now_dt)</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>                job.last_fired_at = now_dt</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>                job.next_fire_at = self.next_fire(job, now_dt)</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>                fired.append(job.name)</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>            except PyHError as e:                 # 单 job 异常隔离(原码事件化)</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>                log.error(&quot;schedule tick job=%s code=%s&quot;, job.name, e.code)</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>                try:</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>                    await sess.append(&quot;system.error&quot;, {</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>                        &quot;code&quot;: e.code, &quot;hint&quot;: f&quot;schedule:{job.name} tick 失败&quot;},</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>                        actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>                except Exception:                 # noqa: BLE001</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>                    log.exception(&quot;schedule error event failed job=%s&quot;, job.name)</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>            except Exception:                     # 未预期:记日志,不中断其余 job</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>                log.exception(&quot;schedule tick unexpected job=%s&quot;, job.name)</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>        return fired</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code></code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>    # ========================================================== 崩溃恢复</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code></code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code></code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>    # ========================================================== 分钟泵</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code></code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code></code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>    def stop(self) -&gt; None:</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>        &quot;&quot;&quot;停止泵(会话关闭/装配拆卸用):置停闸并取消 ticker 任务。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>        self._stopped = True</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>        t = self._ticker_task</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>        if t is not None and not t.done():</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>            t.cancel()</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code></code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>    async def aclose(self):</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>        task = self._ticker_task</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>        self.stop()</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>        if task is not None:</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>            await asyncio.gather(task, return_exceptions=True)</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>        self._ticker_task = None</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code></code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code></code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>__all__ = [</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>    &quot;Scheduler&quot;, &quot;ScheduleJob&quot;, &quot;JobInfo&quot;,</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>    &quot;CronSpec&quot;, &quot;IntervalSpec&quot;, &quot;AtSpec&quot;, &quot;JobKind&quot;,</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>    &quot;NAME_RE&quot;, &quot;now&quot;, &quot;iso&quot;, &quot;parse_iso&quot;,</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>    &quot;MIN_INTERVAL_SECONDS&quot;, &quot;CRON_MAX_SCAN_DAYS&quot;, &quot;DEFAULT_NIGHT_WINDOW&quot;,</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

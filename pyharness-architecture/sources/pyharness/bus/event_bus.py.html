@@ -1,0 +1,462 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/bus/event_bus.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/bus/event_bus.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 462 行</span></nav><main class="wrap source-page"><h1>pyharness/bus/event_bus.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：ce3aac4db2dfa9a01c45ccfe4ea60bc4fd9470b2<br>SHA-256（内容校验）：56009963c5cd4149aa3666e880d352a7003231218598dfe489dd2e3dec8e5ecf</p><p><a href="../../../architecture-detailed.html?node=event_bus">Event Bus（进程内事件分发总线）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 26 个类、函数与方法</summary><ul><li><a href="#L33">_Sentinel（类） · L33–L42</a><ul><li><a href="#L38">_Sentinel.__init__（方法） · L38–L39</a></li><li><a href="#L41">_Sentinel.__repr__（方法） · L41–L42</a></li></ul></li><li><a href="#L52">_wild_match（函数） · L52–L62</a></li><li><a href="#L65">_needs_two_args（函数） · L65–L78</a></li><li><a href="#L81">Subscription（类） · L81–L94</a></li><li><a href="#L97">EventBus（类） · L97–L397</a><ul><li><a href="#L110">EventBus.__init__（方法） · L110–L128</a></li><li><a href="#L130">EventBus._backpressure_limit（方法） · L130–L133</a></li><li><a href="#L136">EventBus.register_type（方法） · L136–L144</a></li><li><a href="#L146">EventBus._type_registered（方法） · L146–L152</a></li><li><a href="#L155">EventBus.subscribe（方法） · L155–L170</a></li><li><a href="#L172">EventBus.unsubscribe_all（方法） · L172–L189</a><ul><li><a href="#L176">EventBus.unsubscribe_all._drop（方法） · L176–L184</a></li></ul></li><li><a href="#L191">EventBus._match（方法） · L191–L197</a></li><li><a href="#L200">EventBus.emit（方法） · L200–L210</a></li><li><a href="#L212">EventBus._dispatch（异步方法） · L212–L255</a></li><li><a href="#L257">EventBus.emit_sync（方法） · L257–L295</a></li><li><a href="#L297">EventBus._consume_task（异步方法） · L297–L306</a></li><li><a href="#L308">EventBus._task_error（方法） · L308–L317</a></li><li><a href="#L320">EventBus.emit_ordered（异步方法） · L320–L364</a></li><li><a href="#L367">EventBus._safe_when（方法） · L367–L374</a></li><li><a href="#L376">EventBus._run（异步方法） · L376–L397</a></li></ul></li><li><a href="#L404">_await_dispatch（异步函数） · L404–L412</a></li><li><a href="#L415">schedule_emit（函数） · L415–L436</a></li><li><a href="#L439">bus_kwargs_of（函数） · L439–L458</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/bus/event_bus.py — 订阅模型 + 事件总线 (specs/bus.py.md)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>EventBus:单进程内唯一通信通道——精确/通配订阅(F002)、三模式分发</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>(sequential/waterfall/parallel)、per-sender FIFO 背压(emit_ordered,F005,</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>默认阈值 1000 在途,满=拒新不丢旧,dropped 计数可观测)、强同步事件恒</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>sequential、事件类型先注册才能 emit(EVT-102,与 pyharness.events.vocab</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>词表联动,见 _type_registered)。</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>边界(bus 与 events):总线只中转不落盘——payload 不做 pydantic 校验、不写</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>会话日志;落盘由日志订阅者(强同步订阅者)负责。错误全经 raise_code</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>(F019 唯一入口),禁裸 raise str;订阅者异常 EVT-103 单行结构化日志隔离,</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>不外抛、不中断其他订阅者;CancelledError 不吞,按 F025 取消协议上抛。</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>import asyncio</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>import inspect</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>import itertools</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>import logging</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>from collections import deque</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>from dataclasses import dataclass</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>from typing import TYPE_CHECKING, Any, Callable, Optional</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>from pyharness.errors import raise_code, struct_error</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>from pyharness.events.vocab import SYNC_TYPES, is_registered</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>if TYPE_CHECKING:  # 仅类型标注用(总线不实例化 schema,只做存在性判定)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    pass</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>log = logging.getLogger(&quot;pyharness.bus&quot;)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code></code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>class _Sentinel:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    &quot;&quot;&quot;模块级哨兵:repr 自解释,身份比较恒稳。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    __slots__ = (&quot;_name&quot;,)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    def __init__(self, name: str) -&gt; None:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        self._name = name</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    def __repr__(self) -&gt; str:</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        return f&quot;&lt;{self._name}&gt;&quot;</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code># 瀑布流短路哨兵:handler 返回 STOP → 其后订阅不再执行(spec emit waterfall)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>STOP = _Sentinel(&quot;STOP&quot;)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code># 私有失败哨兵:handler/谓词异常已被 EVT-103 隔离并返回此哨兵,供统计识别</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code># (区别于 void handler 正常返回的 None——两者都不得计为 errored/delivered 错位)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>_FAILED = _Sentinel(&quot;_FAILED&quot;)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code></code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>def _wild_match(pattern: str, type_: str) -&gt; bool:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    &quot;&quot;&quot;通配匹配辅助:段级 `前缀.*` 精确前缀命中,禁正则(确定性,F002)。</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    如 &quot;tool.*&quot; 命中 &quot;tool.call&quot; / &quot;tool.call.extra&quot;,不命中 &quot;toolbox.call&quot;。</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    if not pattern.endswith(&quot;.*&quot;):</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        return False</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    prefix = pattern[:-2]</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    if not prefix:</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        return False  # 裸 &quot;.*&quot; 非合法通配(事件名恒有点分段)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    return type_.startswith(prefix + &quot;.&quot;)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>def _needs_two_args(handler: Callable) -&gt; bool:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    &quot;&quot;&quot;handler 形如 (type_, payload) → True;仅 (payload) → False。</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    无法自省(内置/部分对象)时按单参处理,由调用方保证签名契约。</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    try:</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        sig = inspect.signature(handler)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    except (TypeError, ValueError):  # 内置函数等无签名</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        return False</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    n = 0</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    for p in sig.parameters.values():</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            n += 1</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    return n &gt;= 2</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>@dataclass</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>class Subscription:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    &quot;&quot;&quot;一条订阅记录:精确/通配统一入列,owner 供卸载按属主精确摘除(F004)。</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    when 谓词只读过滤(payload 谓词,禁止改写 payload);谓词抛异常 = 该订阅</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    跳过并记 EVT-103;seq = 注册序,同命中按序执行。</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    pattern: str            # &quot;user.message&quot; 或 &quot;tool.*&quot;</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    handler: Callable       # async/同步均可,签名 (type_, payload) 或 (payload)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    owner: str              # 插件/能力 id;unsubscribe_all 按此摘除</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    when: Optional[Callable] = None   # payload 谓词,只读(F002)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    wildcard: bool = False</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    seq: int = 0            # 注册序(总线内单调递增)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code></code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>class EventBus:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    &quot;&quot;&quot;事件总线(specs/bus.py.md EventBus 全量契约)。</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code></code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    构造不失败;backpressure_limit 默认 1000 在途(F005,与 PARAMETER-ANCHOR</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    锁定一致;可配上限通常来自 config plugins.backpressure_limit,由调用方</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    读取后传入)。</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    # 总线内部瞬时广播类型(仅内存、无 payload 模型——EVENT-SCHEMA §8.1</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    # 落盘矩阵:registry.updated 仅总线,不进 77 词表 EVENT_TYPES)。</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    # 预置入 _types 使 Registry 的 F003 留痕 emit 不被自身 EVT-102 闸拦截。</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    _INTERNAL_TYPES: tuple[str, ...] = (&quot;registry.updated&quot;,)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    def __init__(self, backpressure_limit: int = 1000,</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                 deadletter_samples: int = 0):</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        self._by_type: dict[str, list[Subscription]] = {}   # 精确索引</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        self._wild: list[Subscription] = []                 # 通配索引(tool.*)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        # 事件 schema 注册表(EVT-102 判定):register_type 写入 + 预置内部瞬时</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        # 广播;其余 77 词表类型经 events.vocab 联动放行(见 _type_registered)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        self._types: dict[str, Optional[type]] = {t: None for t in self._INTERNAL_TYPES}</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        self._queues: dict[str, deque] = {}                 # per-sender FIFO</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        self.dropped: dict[str, int] = {}                   # 背压丢弃计数(可观测)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        self._inflight: set[str] = set()                    # 投递中 owner(F004 busy 判定)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        self.backpressure_limit = backpressure_limit        # F005 阈值(public)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        # F005 **死信样本**(R24 接线 `plugins.deadletter_samples`):背压丢弃时</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        # 留最近 N 条**摘要**供诊断(0 = 不采样)。此前该键零读取者 —— 丢弃只有</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        # 计数与 `bus.backpressure` 事件,拿不到&quot;丢的是什么&quot;。</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        self.deadletter_samples = max(0, int(deadletter_samples or 0))</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        self.deadletters: deque = deque(maxlen=self.deadletter_samples or 0)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        self._sub_seq = itertools.count()                   # 订阅注册序发号器</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        self._draining: set[str] = set()                    # 正在排空队列的 sender</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        self._qlocks: dict[str, asyncio.Lock] = {}          # per-sender 队列锁</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code></code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    @property</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    def _backpressure_limit(self) -&gt; int:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        &quot;&quot;&quot;背压阈值读别名(INV 骨架按私有名断言;真源为 backpressure_limit)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        return self.backpressure_limit</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code></code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    # ------------------------------------------------------------ 类型注册</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    def register_type(self, type_: str, model: type) -&gt; None:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        &quot;&quot;&quot;预注册事件类型 schema;同类型二次注册 → EVT-102(只增不改 §3.8)。</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code></code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        model 供未来 payload 强校验引用;总线只做存在性判定、不实例化校验</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        (中转不落盘),故不强制 BaseModel 子类。</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        if type_ in self._types:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            raise_code(&quot;EVT-102&quot;, type_=type_, detail=&quot;类型重复注册,事件类型只增不改&quot;)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        self._types[type_] = model</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code></code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    def _type_registered(self, type_: str) -&gt; bool:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        &quot;&quot;&quot;类型已注册判定:总线本地 _types ∪ events.vocab 词表联动。</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code></code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        词表 74 类型(payload 模型随 events 包导入即注册)开箱即发;</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        插件/能力命名空间类型须先 register_type(或经 events.register_event_type)。</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        return type_ in self._types or is_registered(type_)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code></code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    # ------------------------------------------------------------ 订阅管理</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    def subscribe(self, pattern: str, handler: Callable, *,</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                  owner: str = &quot;anonymous&quot;, when: Optional[Callable] = None</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                  ) -&gt; Subscription:</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        &quot;&quot;&quot;注册订阅:精确名或 `*.` 通配(F002)。</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code></code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        精确类型未注册允许先订阅(emit 侧仍按 EVT-102 拒);语法校验失败在</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        调用侧自查(spec 异常表:handler 非 Callable 由调用方负责)。</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        sub = Subscription(pattern=pattern, handler=handler, owner=owner,</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                           when=when, wildcard=pattern.endswith(&quot;.*&quot;),</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                           seq=next(self._sub_seq))</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        if sub.wildcard:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            self._wild.append(sub)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        else:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            self._by_type.setdefault(pattern, []).append(sub)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        return sub</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code></code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    def unsubscribe_all(self, owner: str) -&gt; int:</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        &quot;&quot;&quot;按属主精确摘除全部订阅(精确+通配);返回实际摘除条数,幂等。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        removed = 0</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code></code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        def _drop(lst: list[Subscription]) -&gt; list[Subscription]:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>            nonlocal removed</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            keep: list[Subscription] = []</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>            for s in lst:</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                if s.owner == owner:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                    removed += 1</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                else:</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                    keep.append(s)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>            return keep</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code></code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        self._by_type = {t: _drop(ss) for t, ss in self._by_type.items()}</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        self._by_type = {t: ss for t, ss in self._by_type.items() if ss}</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        self._wild = _drop(self._wild)</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        return removed</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code></code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    def _match(self, type_: str) -&gt; list[Subscription]:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        &quot;&quot;&quot;匹配:精确先、通配后,各按注册序(spec emit 顺序契约)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        subs = list(self._by_type.get(type_, ()))</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        for w in self._wild:</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            if _wild_match(w.pattern, type_):</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                subs.append(w)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        return subs</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code></code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    # ------------------------------------------------------------ 分发入口</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    def emit(self, type_: str, payload: dict, mode: str = &quot;sequential&quot;):</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        &quot;&quot;&quot;总线入口:类型校验(EVT-102)→ 返回分发协程(await 后得统计 dict)。</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code></code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        偏离点(契约语义不变):类型先验在创建协程前同步完成——未注册类型</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        立即抛 EVT-102(fail-fast),避免&quot;调用了 emit 却不执行&quot;的隐性失败;</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        调用方 await 返回值即获得 spec 中 await emit(...) 的 dict 统计。</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        if not self._type_registered(type_):</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>            raise_code(&quot;EVT-102&quot;, type_=type_,</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                       hint=&quot;事件类型未注册:先 register_type,或确认类型已在 events 词表注册&quot;)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        return self._dispatch(type_, payload, mode)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code></code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>    async def _dispatch(self, type_: str, payload: dict,</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>                        mode: str = &quot;sequential&quot;) -&gt; dict:</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        &quot;&quot;&quot;三模式分发主体(注册序逐条/前值后入/只读投影 gather)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        if type_ in SYNC_TYPES:             # 强同步事件恒 sequential(§3.7)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>            mode = &quot;sequential&quot;</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        subs = self._match(type_)</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        stats: dict = {&quot;delivered&quot;: 0, &quot;errored&quot;: 0}</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        if mode == &quot;sequential&quot;:</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>            for s in subs:</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>                if s.when and not self._safe_when(s, payload):</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>                    continue</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>                r = await self._run(s, type_, payload)</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>                if r is _FAILED:</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>                    stats[&quot;errored&quot;] += 1</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                else:</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                    stats[&quot;delivered&quot;] += 1</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        elif mode == &quot;waterfall&quot;:           # 前返回值 = 后入参;STOP 短路</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>            acc = payload</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>            for s in subs:</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                if s.when and not self._safe_when(s, acc):</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                    continue</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                r = await self._run(s, type_, acc)</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>                if r is _FAILED:</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                    stats[&quot;errored&quot;] += 1</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>                    continue</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>                stats[&quot;delivered&quot;] += 1      # 成功执行即计(含 void/STOP 件)</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>                if r is STOP:</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                    break</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                if r is not None:</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                    acc = r</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>            return {&quot;result&quot;: acc, **stats}</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        else:                               # parallel:只读投影 gather</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            todo = [s for s in subs</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>                    if not (s.when and not self._safe_when(s, payload))]</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>            if todo:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                results = await asyncio.gather(</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>                    *(self._run(s, type_, payload) for s in todo),</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                    return_exceptions=True)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>                for r in results:</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>                    if r is _FAILED or isinstance(r, Exception):</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>                        stats[&quot;errored&quot;] += 1</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>                    else:</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                        stats[&quot;delivered&quot;] += 1</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        return stats</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code></code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>    def emit_sync(self, type_: str, payload: dict) -&gt; dict:</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        &quot;&quot;&quot;同步投递口:仅供总线内部瞬时事件(如 registry.updated)由同步调用方</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        (Registry.register/unregister 等)使用,保证 F003 留痕确定可见。</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code></code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        订阅者须为同步函数(registry.updated 仅内存,订阅者即同步刷新器);</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        异步订阅者:有事件循环时 create_task 调度,无循环时跳过并记日志。</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        订阅者异常一律 EVT-103 隔离,不外抛。</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        if not self._type_registered(type_):</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>            raise_code(&quot;EVT-102&quot;, type_=type_, hint=&quot;emit_sync 仅限已注册(含总线内部瞬时)类型&quot;)</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        stats: dict = {&quot;delivered&quot;: 0, &quot;errored&quot;: 0}</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        for s in self._match(type_):</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>            if s.when and not self._safe_when(s, payload):</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>                continue</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            self._inflight.add(s.owner)</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>            try:</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>                args: tuple = (type_, payload) if _needs_two_args(s.handler) else (payload,)</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>                fn = s.handler(*args)</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>                if inspect.isawaitable(fn):</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>                    try:</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>                        loop = asyncio.get_running_loop()</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>                    except RuntimeError:</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>                        log.warning(&quot;emit_sync 无事件循环,跳过异步订阅者 owner=%s pattern=%s&quot;,</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>                                    s.owner, s.pattern)</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                        continue</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>                    task = loop.create_task(self._consume_task(fn, s, type_))</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>                    # 默认参数快照循环变量 s/type_:lambda 闭包延迟绑定会共享循环</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>                    # 末值,多异步订阅者匹配时 EVT-103 会归属到错误订阅者(B023)。</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>                    task.add_done_callback(</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                        lambda t, s=s, type_=type_: self._task_error(t, s, type_))</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>                stats[&quot;delivered&quot;] += 1</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            except Exception as exc:        # 订阅者崩溃 → EVT-103 隔离</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                log.error(&quot;%s&quot;, struct_error(&quot;EVT-103&quot;, type_=type_, owner=s.owner,</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                                             pattern=s.pattern,</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                                             exc=f&quot;{type(exc).__name__}: {exc}&quot;))</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>                stats[&quot;errored&quot;] += 1</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            finally:</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                self._inflight.discard(s.owner)</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        return stats</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code></code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>    async def _consume_task(self, aw: Any, sub: Subscription, type_: str) -&gt; None:</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        &quot;&quot;&quot;异步订阅者协程体(await 结果,异常由 _task_error 统一收口)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>        try:</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>            await aw</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>        except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>            raise</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        except Exception as exc:</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>            log.error(&quot;%s&quot;, struct_error(&quot;EVT-103&quot;, type_=type_, owner=sub.owner,</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>                                         pattern=sub.pattern,</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                                         exc=f&quot;{type(exc).__name__}: {exc}&quot;))</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code></code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>    def _task_error(task: asyncio.Task, sub: Subscription, type_: str) -&gt; None:</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        &quot;&quot;&quot;create_task 回调:补记未 await 到的异常(取消不记)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        if task.cancelled():</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>            return</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        exc = task.exception()</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>        if exc is not None:</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>            log.error(&quot;%s&quot;, struct_error(&quot;EVT-103&quot;, type_=type_, owner=sub.owner,</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>                                         pattern=sub.pattern,</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>                                         exc=f&quot;{type(exc).__name__}: {exc}&quot;))</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code></code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>    # ------------------------------------------------------------ 背压通道</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>    async def emit_ordered(self, sender: str, type_: str, payload: dict) -&gt; dict:</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>        &quot;&quot;&quot;同 sender 事件严格 FIFO 串行(F005);队列满=拒新不丢旧。</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code></code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        在途 ≥ backpressure_limit → 丢弃计数 +1 并广播 bus.backpressure 瞬时</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        事件(可观测,禁静默),返回 {&quot;delivered&quot;:0,&quot;errored&quot;:0,&quot;dropped&quot;:True};</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        队内旧件按序投递完。首个入队者兼任 drainer 逐件顺序分发;其余调用</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        方入队即返回 {&quot;queued&quot;:True}(事件由 drainer 保证 FIFO 送达)。</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        if not self._type_registered(type_):    # 前置类型校验:拒投脏件,队列不动</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>            raise_code(&quot;EVT-102&quot;, type_=type_, hint=&quot;emit_ordered 前置类型校验:先 register_type&quot;)</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        lock = self._qlocks.setdefault(sender, asyncio.Lock())</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>        drop: Optional[int] = None</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>        drainer = False</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        async with lock:</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>            q = self._queues.setdefault(sender, deque())</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>            if len(q) &gt;= self.backpressure_limit:   # 满 = 拒新(不丢旧)</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>                self.dropped[sender] = self.dropped.get(sender, 0) + 1</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>                drop = self.dropped[sender]</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>                if self.deadletter_samples &gt; 0:        # F005 死信样本(有界)</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>                    self.deadletters.append({&quot;sender&quot;: sender, &quot;type&quot;: type_,</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>                                             &quot;dropped_n&quot;: drop})</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>            else:</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>                q.append((type_, payload))          # 入队 = 已承诺,绝不丢</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>                if sender not in self._draining:</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>                    self._draining.add(sender)</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>                    drainer = True</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>        if drop is not None:</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>            await self.emit(&quot;bus.backpressure&quot;,     # 背压瞬时事件(可观测)</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>                            {&quot;sender&quot;: sender, &quot;dropped&quot;: drop})</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>            return {&quot;delivered&quot;: 0, &quot;errored&quot;: 0, &quot;dropped&quot;: True}</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>        if not drainer:</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>            return {&quot;delivered&quot;: 0, &quot;errored&quot;: 0, &quot;queued&quot;: True}</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>        total: dict = {&quot;delivered&quot;: 0, &quot;errored&quot;: 0}</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        try:</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>            while True:</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>                async with lock:                    # 退出判定与清标记同锁原子</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>                    if not self._queues[sender]:</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>                        self._draining.discard(sender)</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>                        return total</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>                    t, p = self._queues[sender].popleft()</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>                st = await self.emit(t, p, mode=&quot;sequential&quot;)  # 未完成不取下一件</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>                total[&quot;delivered&quot;] += st[&quot;delivered&quot;]</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>                total[&quot;errored&quot;] += st[&quot;errored&quot;]</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        finally:                                    # 异常兜底:防队列悬挂</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>            self._draining.discard(sender)</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code></code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>    # ------------------------------------------------------------ 执行器</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>    def _safe_when(self, sub: Subscription, payload: dict) -&gt; bool:</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>        &quot;&quot;&quot;when 谓词安全求值:truthy 才投递;异常 → EVT-103 记日志并跳过(不扩散)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>        try:</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>            return bool(sub.when(payload))          # 谓词只读,禁止改写 payload</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>        except Exception as exc:</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>            log.error(&quot;%s&quot;, struct_error(&quot;EVT-103&quot;, owner=sub.owner, pattern=sub.pattern,</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>                                         exc=f&quot;{type(exc).__name__}: {exc}&quot;))</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>            return False</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code></code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>    async def _run(self, sub: Subscription, type_: str, payload: dict):</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>        &quot;&quot;&quot;单订阅执行器:async 直接 await;同步 handler 经 to_thread 执行</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        (防阻塞事件循环);异常 → EVT-103 单行结构化日志后返回 _FAILED;</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>        CancelledError 不吞,继续传播(F025)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>        self._inflight.add(sub.owner)               # F004:投递中不可 deactivate</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>        try:</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>            if asyncio.iscoroutinefunction(sub.handler):</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>                fn = (sub.handler(type_, payload) if _needs_two_args(sub.handler)</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>                      else sub.handler(payload))</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>                return await fn</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>            # 同步 handler:线程内调用,避免阻塞事件循环(spec to_thread)</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>            args: tuple = (type_, payload) if _needs_two_args(sub.handler) else (payload,)</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>            return await asyncio.to_thread(sub.handler, *args)</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>        except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>            raise</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>        except Exception as exc:                    # 吞错不扩散,errored 可观测</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>            log.error(&quot;%s&quot;, struct_error(&quot;EVT-103&quot;, type_=type_, owner=sub.owner,</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>                                         pattern=sub.pattern,</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>                                         exc=f&quot;{type(exc).__name__}: {exc}&quot;))</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>            return _FAILED</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>        finally:</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>            self._inflight.discard(sub.owner)</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code></code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code></code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>_PENDING_EMITS: set[asyncio.Task] = set()</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>&quot;&quot;&quot;已排程的 emit 协程引用:防 task 被 GC,回调自动摘除。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code></code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code></code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>async def _await_dispatch(coro: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>    &quot;&quot;&quot;排程协程消费:await 真正分发,异常兜底记录(不静默丢事件)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>    try:</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>        return await coro</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>    except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>        raise</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>    except Exception:                                # noqa: BLE001 分发兜底</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>        log.exception(&quot;scheduled event dispatch failed&quot;)</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>        return {&quot;delivered&quot;: 0, &quot;errored&quot;: 1}</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code></code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code></code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>def schedule_emit(bus: EventBus, type_: str, payload: dict, *,</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>                  mode: str = &quot;sequential&quot;) -&gt; Optional[asyncio.Task]:</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>    &quot;&quot;&quot;同步调用方安全调度 emit:类型校验同步抛 EVT-102,分发协程排入运行中循环。</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code></code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>    emit() 返回协程,裸调用会丢弃;本助手保留 task 引用并统一收口异常,供</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>    config/approval/scope/guard 等 fire-and-forget 出口使用。无运行中事件循环</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>    时关闭协程并记警告(事件不投递但不泄漏协程)。</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>    result = (bus.emit(type_, payload, mode=mode)</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>              if mode != &quot;sequential&quot; else bus.emit(type_, payload))</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>    if not asyncio.iscoroutine(result):</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>        return result</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>    try:</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>        loop = asyncio.get_running_loop()</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>    except RuntimeError:</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>        log.warning(&quot;schedule_emit: 无运行中事件循环,%s 未投递&quot;, type_)</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>        result.close()</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>        return None</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>    task = loop.create_task(_await_dispatch(result))</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>    _PENDING_EMITS.add(task)</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>    task.add_done_callback(_PENDING_EMITS.discard)</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>    return task</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code></code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code></code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>def bus_kwargs_of(cfg: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>    &quot;&quot;&quot;由 Settings **鸭子取值**解析总线标量(F005 背压阈值)。</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code></code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>    本模块**不 import** ``pyharness.config``(依赖方向纪律):只按属性读取。缺键 ⇒</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>    返回 ``{}``,``EventBus`` 回落模块常量 1000,行为与修复前一致。同</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>    ``persistence.flush_kwargs_of`` 先例。</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code></code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>    2026-09-21 修:``plugins.backpressure_limit`` 声明可调(CFG §3.7)且带范围校验,</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>    但三处装配点(engine / cli / 子会话)一律 ``EventBus()`` 取默认 ⇒ **死配置**</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>    (此前的文本级扫描被 ``EventBus.backpressure_limit`` 同名属性骗过,漏检)。</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>    plugins = getattr(cfg, &quot;plugins&quot;, None)</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code>    out: dict = {}</code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>    v = getattr(plugins, &quot;backpressure_limit&quot;, None)</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>    if v is not None:</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>        out[&quot;backpressure_limit&quot;] = v</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>    d = getattr(plugins, &quot;deadletter_samples&quot;, None)   # F005 死信样本(R24)</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>    if d is not None:</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>        out[&quot;deadletter_samples&quot;] = d</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>    return out</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code></code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code></code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>__all__ = [&quot;EventBus&quot;, &quot;Subscription&quot;, &quot;STOP&quot;, &quot;schedule_emit&quot;,</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>           &quot;bus_kwargs_of&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

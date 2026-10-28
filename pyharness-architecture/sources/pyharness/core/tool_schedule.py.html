@@ -1,0 +1,153 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/tool_schedule.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/tool_schedule.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 153 行</span></nav><main class="wrap source-page"><h1>pyharness/core/tool_schedule.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：78a9dd207d86ea7431056a66a2a7a53fb2802162<br>SHA-256（内容校验）：7d430dc51cbf89e5352e9430f313eeedf8438100af059e4d45e2a4a95806ff23</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 8 个类、函数与方法</summary><ul><li><a href="#L72">_iso（函数） · L72–L74</a></li><li><a href="#L77">_dump（函数） · L77–L79</a></li><li><a href="#L82">_require_name（函数） · L82–L88</a></li><li><a href="#L91">_ScheduleHandle（类） · L91–L144</a><ul><li><a href="#L94">_ScheduleHandle.handle（异步方法） · L94–L112</a></li><li><a href="#L114">_ScheduleHandle._create（异步方法） · L114–L136</a></li><li><a href="#L138">_ScheduleHandle._list（异步方法） · L138–L144</a></li></ul></li><li><a href="#L147">register（函数） · L147–L150</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/tool_schedule.py — schedule Agent Tool 登记(F048 Consumer 面)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Scheduler(事件化调度 / 分钟泵 / 崩溃恢复)已完整;本文件只做五要素登记 +</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>Provider 绑定(Definition/Provider 分离,executor 关3 契约)。Provider 经</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>``ctx.schedule`` 消费**现有 Scheduler**,不自行实现任何调度逻辑——表达式校验、</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>持久化、ticker、恢复一律由 Scheduler 唯一承担(唯一调度真源,INV-01)。</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>op 面:create / list / pause / resume / remove(与 Scheduler 公开面同源)。</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>判险:danger=&quot;low&quot;。该工具只在**会话内写一条 job 定义**,调用时**不执行**任何</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>外部动作;到点后的真实执行仍走 task_queue → AgentLoop → tools 四关管道(含</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>high/critical 工具自身的审批与 guard),故它不是绕过治理的延迟执行入口。</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>参数缺失纪律:**不猜**。create 缺 name/kind/expr/intent 一律 EVT-100 拒绝,并在</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>advice 指明缺失项与&quot;信息不足先用 user.ask 向用户确认&quot;——是否向用户提问由</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>AgentLoop 决定,本工具不直接调用 user.ask。</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>import json</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>from pyharness.core.tools_registry import ToolDefinition  # noqa: F401</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>TOOL_NAME = &quot;schedule&quot;</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>_OPS = (&quot;create&quot;, &quot;list&quot;, &quot;pause&quot;, &quot;resume&quot;, &quot;remove&quot;)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>_MISSING_ADVICE = &quot;补齐后重试;信息不足时先用 user.ask 向用户确认,不要猜测&quot;</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code></code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>_DEFINITION = ToolDefinition(</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    name=TOOL_NAME,</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    danger=&quot;low&quot;,</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    description=&quot;定时任务管理:create 建任务、list 查看、pause/resume 暂停恢复、&quot;</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                &quot;remove 删除。kind 三选一:cron(表达式如 0 8 * * * 即每天 08:00)、&quot;</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>                &quot;interval(纯秒数如 3600)、at(ISO 如 2026-09-20T08:00:00);&quot;</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                &quot;intent=到点要执行的内容&quot;,</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    schema={&quot;type&quot;: &quot;object&quot;,</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            &quot;properties&quot;: {</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                &quot;op&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;enum&quot;: list(_OPS),</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>                       &quot;description&quot;: &quot;create 建任务 / list 查看 / pause 暂停 / &quot;</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>                                      &quot;resume 恢复 / remove 删除&quot;},</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>                &quot;name&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;minLength&quot;: 2, &quot;maxLength&quot;: 64,</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>                         &quot;description&quot;: &quot;任务名(必填,仅 create 用):小写字母开头,&quot;</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>                                        &quot;只可含 a-z 0-9 下划线 点号,2-64 字符;&quot;</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                                        &quot;禁中文、禁大写、禁连字符&quot;},</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>                &quot;kind&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;enum&quot;: [&quot;cron&quot;, &quot;interval&quot;, &quot;at&quot;],</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>                         &quot;description&quot;: &quot;cron=按日历重复(每天/每周/每月);&quot;</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>                                        &quot;interval=固定间隔重复;at=只触发一次&quot;},</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>                &quot;expr&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;minLength&quot;: 1, &quot;maxLength&quot;: 128,</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                         &quot;description&quot;: &quot;cron→&#x27;分 时 日 月 周&#x27;五字段(如 &#x27;0 8 * * *&#x27; &quot;</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                                        &quot;每天 08:00;&#x27;0 8 * * 1-5&#x27; 工作日 08:00);&quot;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                                        &quot;interval→纯秒数(如 &#x27;3600&#x27;,最小 60);&quot;</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                                        &quot;at→ISO8601(如 &#x27;2026-09-20T08:00:00&#x27;,须为未来)&quot;},</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                &quot;intent&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;minLength&quot;: 1, &quot;maxLength&quot;: 2000,</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                           &quot;description&quot;: &quot;到点时要执行的内容(任务正文,可用中文),&quot;</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                                          &quot;如 &#x27;提醒我开始工作&#x27;。**必须取自用户的原话**;&quot;</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                                          &quot;用户若没说清要做什么(例如只说&#x27;设个提醒&#x27;),&quot;</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                                          &quot;绝不可自行编造内容,应先用 user.ask 问清楚再建&quot;},</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>                &quot;is_risky&quot;: {&quot;type&quot;: &quot;boolean&quot;,</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                             &quot;description&quot;: &quot;仅在需要把任务标记为危险时传 true;&quot;</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                                            &quot;不需要时省略该字段,不要传 false&quot;},</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            },</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            &quot;required&quot;: [&quot;op&quot;], &quot;additionalProperties&quot;: False},</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    timeout_s=10,</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    owner=&quot;builtin&quot;,</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    ctx_path=&quot;schedule&quot;,</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    version=&quot;1.0.0&quot;,</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>def _iso(dt: Optional[Any]) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    &quot;&quot;&quot;datetime → ISO8601(JSON 可序列化;None 透传)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    return dt.isoformat() if dt is not None else None</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>def _dump(obj: dict) -&gt; str:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    &quot;&quot;&quot;结构化返回(JSON 文本,供 AgentLoop 解析与转述)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    return json.dumps(obj, ensure_ascii=False)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>def _require_name(args: dict, op: str) -&gt; str:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    &quot;&quot;&quot;name 必填校验(不猜):缺失即 EVT-100。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    name = str(args.get(&quot;name&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    if not name:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        raise_code(&quot;EVT-100&quot;, field=&quot;name&quot;, hint=f&quot;{op} 缺必填参数:name&quot;,</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                   advice=_MISSING_ADVICE)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    return name</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>class _ScheduleHandle:</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    &quot;&quot;&quot;Provider handle:op 分派到 ctx.schedule(现有 Scheduler)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    async def handle(self, args: dict, ctx: Any) -&gt; str:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        sched = getattr(ctx, &quot;schedule&quot;, None)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        if sched is None:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            raise_code(&quot;CYC-999&quot;, module=&quot;tool_schedule&quot;,</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                       hint=&quot;ctx.schedule 未装配(引擎未挂 Scheduler),schedule 不可用&quot;)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        op = str(args.get(&quot;op&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        if op == &quot;create&quot;:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            return await self._create(sched, args, ctx)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        if op == &quot;list&quot;:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            return await self._list(sched, ctx)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        # 显式分派表(不用 getattr(op) —— 外部输入不得直接选方法,关 4/CND-04)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        fn = {&quot;pause&quot;: sched.pause, &quot;resume&quot;: sched.resume,</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>              &quot;remove&quot;: sched.remove}.get(op)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        if fn is None:</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;op&quot;,</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                       advice=f&quot;op ∈ {&#x27;/&#x27;.join(_OPS)}&quot;)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        name = _require_name(args, op)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        await fn(name, ctx=ctx)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        return _dump({&quot;ok&quot;: True, &quot;op&quot;: op, &quot;name&quot;: name})</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    async def _create(self, sched: Any, args: dict, ctx: Any) -&gt; str:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        &quot;&quot;&quot;建任务:参数完整性检查后交 Scheduler.register(校验/持久化归其所有)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        name = _require_name(args, &quot;create&quot;)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        missing = [f for f in (&quot;kind&quot;, &quot;expr&quot;, &quot;intent&quot;)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                   if not str(args.get(f) or &quot;&quot;).strip()]</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        if missing:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            raise_code(&quot;EVT-100&quot;, field=missing[0],</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                       hint=f&quot;create 缺必填参数:{&#x27;, &#x27;.join(missing)}&quot;,</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                       advice=_MISSING_ADVICE)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        kind = str(args[&quot;kind&quot;]).strip()</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        expr = str(args[&quot;expr&quot;]).strip()</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        intent = str(args[&quot;intent&quot;]).strip()</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        # is_risky **单调**:只能升级为危险,不能下调。本工具不传 meta(INV-09),</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        # 故非显式声明时 Scheduler 的推导恒为 False;若允许传 False,等于让调用方</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        # 单方面关掉&quot;深夜禁触危险模板&quot;这一安全默认 → 故 False/缺省一律交回推导。</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        override = True if args.get(&quot;is_risky&quot;) is True else None</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        await sched.register(name, kind, expr, {&quot;intent&quot;: intent},</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                             is_risky=override, ctx=ctx)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        info = next((j for j in await sched.list_jobs(ctx=ctx)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                     if j.name == name), None)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        return _dump({&quot;ok&quot;: True, &quot;op&quot;: &quot;create&quot;, &quot;name&quot;: name, &quot;kind&quot;: kind,</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                      &quot;expr&quot;: expr, &quot;paused&quot;: False,</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                      &quot;next_fire_at&quot;: _iso(info.next_fire_at) if info else None})</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    async def _list(self, sched: Any, ctx: Any) -&gt; str:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        rows = [{&quot;name&quot;: j.name, &quot;kind&quot;: j.kind, &quot;expr&quot;: j.expr,</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                 &quot;paused&quot;: j.paused, &quot;next_fire_at&quot;: _iso(j.next_fire_at),</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                 &quot;last_fired_at&quot;: _iso(j.last_fired_at),</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                 &quot;triggered&quot;: j.triggered, &quot;missed&quot;: j.missed}</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                for j in await sched.list_jobs(ctx=ctx)]</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        return _dump({&quot;ok&quot;: True, &quot;op&quot;: &quot;list&quot;, &quot;count&quot;: len(rows), &quot;jobs&quot;: rows})</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code></code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code></code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>def register(registry: Any) -&gt; list[str]:</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    &quot;&quot;&quot;五要素登记 + Provider 绑定(engine 装配面调用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    registry.register_tool(_DEFINITION, provider=_ScheduleHandle())</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    return [TOOL_NAME]</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code></code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code></code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>__all__ = [&quot;register&quot;, &quot;TOOL_NAME&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

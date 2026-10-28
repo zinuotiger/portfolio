@@ -1,0 +1,202 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/cli_history.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/cli_history.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 202 行</span></nav><main class="wrap source-page"><h1>pyharness/cli_history.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：ae272e3aedf0fe2005b9d0d0003cad2cd097eab3<br>SHA-256（内容校验）：d633656bffb9bc8aa0cedf96698971dc28734f528fbdaec9d46305b016abccb5</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 9 个类、函数与方法</summary><ul><li><a href="#L12">_sessions_dir_ctx（函数） · L12–L15</a></li><li><a href="#L17">_session_lines（类） · L17–L39</a><ul><li><a href="#L26">_session_lines.__init__（方法） · L26–L28</a></li><li><a href="#L30">_session_lines.__enter__（方法） · L30–L31</a></li><li><a href="#L33">_session_lines.__exit__（方法） · L33–L34</a></li><li><a href="#L36">_session_lines.__iter__（方法） · L36–L39</a></li></ul></li><li><a href="#L41">_cmd_search（异步函数） · L41–L91</a></li><li><a href="#L93">_cmd_session（异步函数） · L93–L149</a></li><li><a href="#L151">_cmd_fork（异步函数） · L151–L199</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Cli history: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import uuid</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from typing import Any</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.cli_output import ShellCtx, _json_line</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.cli_sessions import _sessions_path</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>def _sessions_dir_ctx(sh: ShellCtx) -&gt; Path:</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    cfg = sh.ctx.settings</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    return Path(getattr(getattr(sh.ctx, &quot;storage&quot;, None), &quot;sessions_dir&quot;,</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>                        _sessions_path(cfg))).expanduser()</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>class _session_lines:</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    &quot;&quot;&quot;会话**真源**(轮转段 + 主文件)合并为一个逐行文本流(R14-3)。</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    用法与 ``with open(p, encoding=&quot;utf-8&quot;) as fh:`` **同形**,便于既有读取循环直接</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    换用;语义按会话:①跨段完整(轮转后旧事件在段里,不读就丢)②段与主文件都归到</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    真实 sid(辅助档本身不是会话,见 ``persistence.session_log_paths``)。</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    逐段顺序开合,不并发持有句柄。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    def __init__(self, main: Path) -&gt; None:</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        from pyharness.persistence import session_data_paths</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        self._parts = session_data_paths(main)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    def __enter__(self) -&gt; &quot;_session_lines&quot;:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        return self</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    def __exit__(self, *_exc: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        return False</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    def __iter__(self):</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        for part in self._parts:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            with open(part, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>                yield from fh</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>async def _cmd_search(sh: ShellCtx, positional: list[str], flags: dict) -&gt; int:</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    &quot;&quot;&quot;search &lt;q&gt;:FTS 全文检索(派生索引只读,不触真源)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    from pyharness.core.session_query import SessionQueryIndex</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    from pyharness.persistence import SessionReader, session_log_paths</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    q = &quot; &quot;.join(positional).strip()</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    if not q:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        raise_code(&quot;EVT-100&quot;, advice=&quot;search 需要检索词&quot;,</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>                   hint=&quot;用法:pyharness search &lt;检索词&gt;&quot;)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    sessions_dir = _sessions_dir_ctx(sh)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    db = Path(str(sh.ctx.settings.storage.db_path)).expanduser()</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    sources: dict = {}</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    # 唯一枚举点(R14-3):**辅助档**(轮转段/修复备份/隔离档)不是独立会话 —— 此前</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    # 按 `stem.startswith(&quot;s-&quot;)` 判定会把它们当会话注册,而备份/段与主文件**同 seq**</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    # ⇒ rebuild 撞 fts_rows 主键冲突 ⇒ search 直接 PERS-202 崩(实测)。</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    #</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    # 回放源用 **SessionReader**(R14-5):``open_store`` 会取 INV-07 **写**锁并持有到</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    # 查询结束 ⇒ 一条只读命令把**所有**会话锁住,期间其他进程开会话撞 PERS-202</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    # (实测:并发 open 交替 OPEN_OK / BLOCKED)。只读命令不该持有写锁。</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    for f in session_log_paths(sessions_dir):</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        sources[f.stem] = SessionReader(f.stem, dir=sessions_dir)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    idx = SessionQueryIndex(db_path=db, sources=sources)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    try:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        await idx.enter(ctx=SimpleNamespace(config=sh.ctx.settings))</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        # 逐会话重建(R14-4):只动**本次确实读到源**的会话行。此前用全量</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        # ``rebuild()``(DELETE 整表再重插),而打不开的会话(如被活进程持锁 ⇒</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        # open_store 抛 PERS-202 ⇒ 上面 `continue` 未登记源)**索引行被一并抹掉且不再</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        # 重建** —— 实测:被锁会话的索引水位 2 → 0,静默不可搜。sources 为空时更是</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        # 直接清空整个索引。</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        # 残余(如实标注):日志被**手工**移除的会话,其陈旧索引行不再被顺带清除</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        # (正规删除走 ``delete_session`` 级联)。刻意不&quot;按目录反推清理&quot;——索引库是</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        # **全局**的而会话目录按租户分,反推会误删他租户的行。</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        for sid in sources:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            await idx.rebuild(session_id=sid)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        res = await idx.query(q)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        hits = [{&quot;session_id&quot;: h.session_id, &quot;seq&quot;: h.seq, &quot;type&quot;: h.type,</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                 &quot;ts&quot;: h.ts, &quot;snippet&quot;: h.snippet, &quot;rank&quot;: h.rank}</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                for h in res.hits]</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    finally:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        try:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            await idx.detach()</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        except Exception:                            # noqa: BLE001</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            pass</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    if flags.get(&quot;json&quot;):</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        _json_line({&quot;query&quot;: q, &quot;timed_out&quot;: res.timed_out, &quot;hits&quot;: hits})</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        return 0</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    if not hits:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        print(&quot;无结果&quot;)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        return 0</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    for h in hits:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        print(f&quot;[{h[&#x27;session_id&#x27;]}#{h[&#x27;seq&#x27;]} {h[&#x27;type&#x27;]}] {h[&#x27;snippet&#x27;]}&quot;)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    return 0</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>async def _cmd_session(sh: ShellCtx, positional: list[str], flags: dict) -&gt; int:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    &quot;&quot;&quot;session list / session show &lt;sid&gt;:只读会话清单与回放展示。</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code></code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    ``2026-09-21 R14-6``:``show`` 改用**只读回放源** ``SessionReader``(与 ``search`` 同款)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    —— 此前借 ``open_store`` 读,而它会取 INV-07 **写**锁 ⇒ **会话正被使用时**</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    ``session show`` 自身撞 PERS-202(实测:无锁 rc=0 / 有锁 rc≠0),即&quot;看不了正在跑的</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    会话&quot;。只读命令不该持写锁。</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    from pyharness.core.session import open_session</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    from pyharness.persistence import SessionReader</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    sessions_dir = _sessions_dir_ctx(sh)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    act = (positional or [&quot;list&quot;])[0]</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    if act == &quot;list&quot;:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        from pyharness.desktop.sessions import DesktopSessionManager</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        mgr = DesktopSessionManager(dir=sessions_dir, bus=sh.ctx.bus,</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                                    config=sh.ctx.settings)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        rows = mgr.list()</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        if flags.get(&quot;json&quot;):</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            _json_line({&quot;sessions&quot;: [dict(r) for r in rows]})</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>            return 0</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        if not rows:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            print(&quot;0 个会话&quot;)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>            return 0</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        for r in rows:</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            name = (r.get(&quot;title&quot;) or r.get(&quot;preview&quot;) or &quot;新会话&quot;)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            state = &quot;已终态&quot; if r.get(&quot;finished&quot;) else &quot;活跃&quot;</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            print(f&quot;{r[&#x27;sid&#x27;]}  {name}  {r.get(&#x27;lines&#x27;, 0)} 事件  {state}&quot;)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        return 0</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    if act == &quot;show&quot;:</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        sid = positional[1] if len(positional) &gt; 1 else flags.get(&quot;session&quot;)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        if not sid:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            raise_code(&quot;EVT-100&quot;, advice=&quot;session show 需要 sid&quot;,</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                       hint=&quot;用法:pyharness session show &lt;sid&gt;&quot;)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        from pyharness.desktop.sessions import validate_session_id</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        sid = validate_session_id(str(sid))</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        if not (sessions_dir / f&quot;{sid}.jsonl&quot;).exists():</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            raise_code(&quot;EVT-106&quot;, session_id=sid,</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                       hint=&quot;会话不存在(先 session list 确认 sid)&quot;)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        # 只读回放源(R14-6):不取会话写锁 ⇒ 会话正被他进程使用时也能查看</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        log_ = await open_session(sid, SessionReader(sid, dir=sessions_dir))</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        evs = list(log_.events_after(0))</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        msgs = log_.derive_messages()</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        if flags.get(&quot;json&quot;):</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            _json_line({&quot;sid&quot;: sid, &quot;messages&quot;: msgs,</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                        &quot;events&quot;: [e.model_dump(exclude_none=True)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                                   for e in evs]})</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            return 0</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        print(f&quot;会话 {sid} 事件 {len(evs)} 条:&quot;)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        for m in msgs:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            role = m.get(&quot;role&quot;, &quot;?&quot;)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            content = str(m.get(&quot;content&quot;) or &quot;&quot;).replace(&quot;\n&quot;, &quot; &quot;)[:200]</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            if not content and m.get(&quot;tool_calls&quot;):</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                content = &quot;工具调用&quot;</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            print(f&quot;  [{role}] {content}&quot;)</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        return 0</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    raise_code(&quot;EVT-100&quot;, advice=f&quot;未知 session 子命令:{act}&quot;,</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>               hint=&quot;可用:session list | session show &lt;sid&gt;&quot;)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code></code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>async def _cmd_fork(sh: ShellCtx, positional: list[str], flags: dict) -&gt; int:</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    &quot;&quot;&quot;fork &lt;sid&gt;:物理复制事件流到新会话 + 父会话落 fork.created 声明。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    from pyharness.core.session import open_session</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    from pyharness.persistence import flush_kwargs_of, open_store</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    sessions_dir = _sessions_dir_ctx(sh)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    if not positional:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        raise_code(&quot;EVT-100&quot;, advice=&quot;fork 需要源会话 sid&quot;,</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                   hint=&quot;用法:pyharness fork &lt;sid&gt;&quot;)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    from pyharness.desktop.sessions import validate_session_id</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>    sid = validate_session_id(str(positional[0]))</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    if not (sessions_dir / f&quot;{sid}.jsonl&quot;).exists():</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        raise_code(&quot;EVT-106&quot;, session_id=sid, hint=&quot;源会话不存在&quot;)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    src = open_store(sid, dir=sessions_dir,</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                     **flush_kwargs_of(sh.ctx.settings))</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    try:</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        events = list(src.replay())</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    finally:</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        src.close()</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    if not events:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        raise_code(&quot;EVT-106&quot;, session_id=sid, hint=&quot;源会话为空(缺 session.created)&quot;)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    new_sid = f&quot;s-fork-{uuid.uuid4().hex[:8]}&quot;</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    tgt = open_store(new_sid, dir=sessions_dir,</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>                     **flush_kwargs_of(sh.ctx.settings))</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>    try:</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        for e in events:</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            if e.type == &quot;session.finished&quot;:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                continue</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            await tgt.append(e.model_copy(update={&quot;session_id&quot;: new_sid}),</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                             sync=True)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        await tgt.flush()</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    finally:</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        tgt.close()</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>    store2 = open_store(sid, dir=sessions_dir,</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                        **flush_kwargs_of(sh.ctx.settings))</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    log_ = await open_session(sid, store2)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>    try:</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        base_seq = max((e.seq for e in events), default=0)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        await log_.append(&quot;fork.created&quot;,</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                          {&quot;new_session_id&quot;: new_sid, &quot;base_seq&quot;: base_seq,</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                           &quot;reason&quot;: &quot;cli fork&quot;},</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                          actor=&quot;system&quot;, sync=True)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    finally:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        store2.close()</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>    if flags.get(&quot;json&quot;):</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>        _json_line({&quot;source_sid&quot;: sid, &quot;new_session_id&quot;: new_sid,</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                    &quot;base_seq&quot;: base_seq, &quot;events&quot;: len(events)})</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    else:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        print(f&quot;已分叉 {sid} → {new_sid}({len(events)} 条事件,base_seq={base_seq})&quot;)</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    return 0</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code></code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>_session_lines.__module__ = &#x27;pyharness.cli&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

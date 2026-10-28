@@ -1,0 +1,467 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/service.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/service.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 467 行</span></nav><main class="wrap source-page"><h1>pyharness/application/service.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：7b4026a904e47bd8351c44a74733689491b39997<br>SHA-256（内容校验）：05b79da477803c85462337f13b681e599835986d9f2329762afa9a72b86148e7</p><p><a href="../../../architecture-detailed.html?node=application_service">ApplicationService（应用服务门面）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 25 个类、函数与方法</summary><ul><li><a href="#L51">ApplicationService（类） · L51–L447</a><ul><li><a href="#L54">ApplicationService.__init__（方法） · L54–L80</a></li><li><a href="#L83">ApplicationService.projects（方法） · L83–L89</a></li><li><a href="#L91">ApplicationService._surface_ctx（方法） · L91–L102</a></li><li><a href="#L104">ApplicationService.capabilities（方法） · L104–L112</a></li><li><a href="#L114">ApplicationService.surface_mgr（方法） · L114–L126</a></li><li><a href="#L128">ApplicationService.require_session（异步方法） · L128–L142</a></li><li><a href="#L144">ApplicationService.queue_for（异步方法） · L144–L148</a></li><li><a href="#L150">ApplicationService._queue_for_owned（异步方法） · L150–L166</a></li><li><a href="#L168">ApplicationService._engine_runner_for（异步方法） · L168–L211</a></li><li><a href="#L213">ApplicationService.runner_seam（方法） · L213–L218</a></li><li><a href="#L220">ApplicationService.owner_for（方法） · L220–L223</a></li><li><a href="#L225">ApplicationService.public_spine_for（异步方法） · L225–L235</a></li><li><a href="#L237">ApplicationService.approval_for（方法） · L237–L254</a></li><li><a href="#L256">ApplicationService.all_approval_providers（方法） · L256–L268</a></li><li><a href="#L270">ApplicationService.create_session（异步方法） · L270–L282</a></li><li><a href="#L284">ApplicationService.delete_session（异步方法） · L284–L325</a></li><li><a href="#L327">ApplicationService._attachment_limits（方法） · L327–L341</a></li><li><a href="#L343">ApplicationService._session_workspace（方法） · L343–L354</a></li><li><a href="#L356">ApplicationService.attachment_payloads（方法） · L356–L382</a></li><li><a href="#L384">ApplicationService.create_message（异步方法） · L384–L400</a></li><li><a href="#L403">ApplicationService._ensure_open（方法） · L403–L405</a></li><li><a href="#L407">ApplicationService.shutdown（异步方法） · L407–L412</a></li><li><a href="#L414">ApplicationService._shutdown_owned（异步方法） · L414–L447</a><ul><li><a href="#L419">ApplicationService._shutdown_owned.attempt（异步方法） · L419–L423</a></li></ul></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Application service layer shared by desktop shells and future native UI.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code></code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import asyncio</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import copy</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import inspect</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import json</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>import logging</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from dataclasses import asdict, is_dataclass</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from typing import Any, Optional, TYPE_CHECKING</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pyharness.application.message_projection import (log, _with_message_origin, _as_dict, _json_safe)</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from pyharness.application.session_access import (_session_module, _METADATA_HOSTS)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>if TYPE_CHECKING:</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    from pyharness.engine import EngineSpine</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    from pyharness.core.session import SessionLog</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>from pyharness.application.models import SHELL_CAPABILITIES</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>from pyharness.core.approval import ApprovalProvider</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>from pyharness.core.channel import normalize_channel</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>from pyharness.core.skill import SkillManager</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>from pyharness.core.task_queue import TaskQueue, queue_kwargs_of</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>from pyharness.core.task_runner import TaskRunner</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>from pyharness.core.tenant_settings import (</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    TenantSettingsStore,</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    normalize_tenant_id,</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    register_session_tenant,</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    register_tenant_store,</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    tenants_dir,</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    unregister_session_tenant,</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>from pyharness.events import call_id_of</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>from pyharness.events.vocab import validate_payload</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code></code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>from pyharness.core.url_policy import validate_service_url as _validate_registry_url</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>from pyharness.core.lifecycle import admitted, stop_admissions</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>from pyharness.application.tenant_service import TenantService</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>from pyharness.application.orchestration_service import OrchestrationService</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>from pyharness.application.history_service import HistoryService</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>from pyharness.application.interaction_service import InteractionService</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>from pyharness.application.extension_service import ExtensionService</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>class ApplicationService(TenantService, OrchestrationService, HistoryService, InteractionService, ExtensionService):</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    &quot;&quot;&quot;Session-scoped business facade independent from HTTP and UI frameworks.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    def __init__(self, ctx: Any, *, channel: str = &quot;desktop&quot;,</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                 tenant_id: str = &quot;default&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        self.ctx = ctx</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        # N5:通道经**同一契约**归一化并 fail-closed。修复前 ``str(channel or</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        # &quot;desktop&quot;)`` 会把显式 ``None``(headless 意图)与空串**静默提升为</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        # desktop**(人类通道)—— falsy 回退改写声明语义。现:非法/未知 ⇒ APR-503;</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        # ``&quot;acp:&lt;id&gt;&quot;`` ⇒ 归一为 ``&quot;acp&quot;``(保留 ACP 身份)。</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        st = normalize_channel(channel)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        if not st.is_interactive:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            raise_code(&quot;APR-503&quot;, module=&quot;application.service&quot;, field=&quot;channel&quot;,</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                       got=repr(channel),</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                       why=&quot;ApplicationService 需要明确的交互通道名&quot;</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                           &quot;(HEADLESS/非法/未知均不适用于桌面服务门面)&quot;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        self.channel = str(st.name)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        self.tenant_id = normalize_tenant_id(tenant_id)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        self._surface: Any = None</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        self._logs: dict[str, SessionLog] = {}</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        self._session_locks: dict[str, asyncio.Lock] = {}</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        self._queue_locks: dict[str, asyncio.Lock] = {}</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        self._queues: dict[str, TaskQueue] = {}</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        self._approvals: dict[str, ApprovalProvider] = {}</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        self._engines: dict[str, EngineSpine] = {}</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        self._settings_store = TenantSettingsStore(</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            tenants_dir(self._storage_root()))     # R31-2:派生点收口到 tenants_dir</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        register_tenant_store(self.tenant_id, self._settings_store)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        from pyharness.core.llm import LLMRuntime</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        self.llm_runtime = LLMRuntime()</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    @property</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    def projects(self):</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        self._ensure_open()</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        if not hasattr(self, &#x27;_projects&#x27;):</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            from pyharness.application.projects import Projects</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            self._projects = Projects(self)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        return self._projects</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    def _surface_ctx(self) -&gt; Any:</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        if self.tenant_id == &quot;default&quot;:</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            return self.ctx</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        try:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            ctx = copy.copy(self.ctx)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        except Exception:                              # noqa: BLE001</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            ctx = SimpleNamespace(**dict(vars(self.ctx)))</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        try:</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            ctx.session = None</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        except Exception:                              # noqa: BLE001</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            pass</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        return ctx</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    def capabilities() -&gt; dict:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        &quot;&quot;&quot;Return the shared UI capability contract.</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        Both shells expose this through their own adapter so feature drift is</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        visible at runtime, not only in tests.</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        rows = list(SHELL_CAPABILITIES)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        return {&quot;capabilities&quot;: rows, &quot;count&quot;: len(rows)}</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    def surface_mgr(self) -&gt; Any:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        if self._surface is None:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            ctx = self._surface_ctx()</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            sm = _session_module()</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            sessions_dir = self._tenant_sessions_dir(ctx)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            self._surface = sm._surface_of(</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                ctx, bus=getattr(ctx, &quot;bus&quot;, None),</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                config=self.effective_settings(),</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                sessions_dir=sessions_dir,</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                tenant_id=self.tenant_id)      # GAP-10:租户随会话落盘</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            if isinstance(self._surface, sm.DesktopSessionManager):</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                self._surface._ctx_repair = getattr(ctx, &quot;repair&quot;, None)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        return self._surface</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code></code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    @admitted</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    async def require_session(self, sid: str) -&gt; Any:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        sm = _session_module()</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        sid = sm.validate_session_id(sid)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        from pyharness.application.product_execution_sessions import is_product_session</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        if is_product_session(sid):return await self.projects.product_session(sid)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        lock = self._session_locks.setdefault(sid, asyncio.Lock())</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        async with lock:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            if sid in self._logs:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                register_session_tenant(sid, self.tenant_id)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                return self._logs[sid]</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            log_ = await sm._await(self.surface_mgr().open_session(sid))</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            self._logs[sid] = log_</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            register_session_tenant(sid, self.tenant_id)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            return log_</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code></code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>    @admitted</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    async def queue_for(self, sid: str, log_: Any = None) -&gt; TaskQueue:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        from pyharness.application.product_execution_sessions import reject_product_mutation</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        reject_product_mutation(sid)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        return await self._queue_for_owned(sid, log_)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code></code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    async def _queue_for_owned(self, sid: str, log_: Any = None) -&gt; TaskQueue:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        self._ensure_open()</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        if log_ is None:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            log_ = await self.require_session(sid)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        lock = self._queue_locks.setdefault(sid, asyncio.Lock())</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        async with lock:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            q = self._queues.get(sid)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>            if q is None:</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                runner = await self._engine_runner_for(sid, log_)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                q = TaskQueue(session=log_, runner=runner,</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>                              **queue_kwargs_of(getattr(self.ctx, &quot;settings&quot;, None)))</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>                self._queues[sid] = q</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                spine = self._engines.get(sid)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                if spine is not None:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                    from pyharness import engine as _eng</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                    await _eng.activate_orchestration(spine, task_queue=q)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>            return q</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code></code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    async def _engine_runner_for(self, sid: str, log_: SessionLog) -&gt; TaskRunner:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        spine = self._engines.get(sid)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        from pyharness import engine as _eng</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        from pyharness.engine import make_runner as _eng_make_runner</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        from pyharness.application.execution_config import compile_execution</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        cfg, platform_definition = compile_execution(self, log_)</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        if self.tenant_id != &#x27;default&#x27; and self._settings_store.active_profile(self.tenant_id) is None and not (platform_definition and platform_definition.executor == &#x27;codex&#x27;):</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>            # Explicit borrowed test/local adapters do not resolve host credentials.</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            models = [cfg.llm.model, *(cfg.llm.fallback_models or [])]</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>            if not all(self.llm_runtime.has_borrowed_adapter(model) for model in models):</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                raise_code(&#x27;CRED-701&#x27;, reason=&#x27;tenant_model_profile_required&#x27;)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        if spine is None:</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>            store = getattr(self.surface_mgr(), &quot;_stores&quot;, {}).get(sid)</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>            sessions_dir = self._tenant_sessions_dir()</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>            spine = _eng.build_runner_components(</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                cfg, log_=log_, bus=getattr(self.ctx, &quot;bus&quot;, None),</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                sessions_dir=sessions_dir, store=store,</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                attach_persistence=False,</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                # GAP-11:桌面服务层即 human 通道 &quot;desktop&quot;(构造期声明)——</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                # 必须下沉到 spine,否则该会话的每次工具授权都 APR-503。</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                channel=self.channel, llm_runtime=self.llm_runtime,</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                register_model=not (platform_definition and platform_definition.executor == &#x27;codex&#x27;))</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>            try:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                if platform_definition is not None:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                    from pyharness.application.platform_runtime import PlatformRuntime</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                    PlatformRuntime(self.platform, platform_definition, sid).configure_spine(spine)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            except BaseException:</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                await spine.close()</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                raise</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>            self._engines[sid] = spine</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        await _eng.prepare_plugins(spine)</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        if self.tenant_id == &quot;default&quot;:</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            if getattr(self.ctx, &quot;approval&quot;, None) is None:</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                self.ctx.approval = spine.approval</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>                self.ctx._approval_owner_sid = sid   # 归属记账:approval_for 判复用</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            if getattr(self.ctx, &quot;guard&quot;, None) is None:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                self.ctx.guard = spine.guard</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                self.ctx._guard_owner_sid = sid</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        if platform_definition is not None and platform_definition.executor == &#x27;codex&#x27;:</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>            if spine.external_runner is None:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                from pyharness.application.codex_runner import CodexRunner</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                spine.external_runner = CodexRunner(spine, spine.platform_runtime)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>            return spine.external_runner</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        return _eng_make_runner(spine)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code></code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>    def runner_seam(self) -&gt; Any:</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        ctx = self.ctx</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        make = getattr(ctx, &quot;make_runner&quot;, None)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        if callable(make):</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            return make()</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        return getattr(ctx, &quot;task_runner&quot;, None)</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code></code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>    def owner_for(self, sid: str) -&gt; str:</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        if self.tenant_id == &quot;default&quot;:</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>            return f&quot;{self.channel}:{sid}&quot;</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        return f&quot;{self.channel}:{self.tenant_id}:{sid}&quot;</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code></code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>    @admitted</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    async def public_spine_for(self, sid: str) -&gt; tuple[Any, Any]:</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        self._ensure_open()</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        log_ = await self.require_session(sid)</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        spine = self._engines.get(sid)</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        if spine is None:</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>            # One authorized construction path, before creating or caching any</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            # model adapter. A rejected request must not leave a host-bound spine.</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            await self.queue_for(sid, log_)</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            spine = self._engines[sid]</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        return log_, spine</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code></code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>    def approval_for(self, sid: str, log_: Any) -&gt; ApprovalProvider:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        provider = self._approvals.get(sid)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        if provider is None:</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>            ctx_approval = (getattr(self.ctx, &quot;approval&quot;, None)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                            if self.tenant_id == &quot;default&quot; else None)</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>            owner = getattr(self.ctx, &quot;_approval_owner_sid&quot;, None)</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            # 仅当共享 ctx.approval 确属本会话(owner==sid)或未记归属(外部单会话</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            # 注入)才复用;否则建 per-session——防第二会话拿到第一会话的审批通道。</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            if ctx_approval is not None and owner in (None, sid):</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                return ctx_approval</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>            provider = ApprovalProvider(</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>                session=log_, bus=None,</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                config=_session_module()._cfg_of(self.ctx),</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>                # R12-3:队列联动接线(惰性取值 ⇒ 与构造序无关)——挂起审批时真挂起</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>                # 本会话队列(队列是 queue.suspended/resumed 的唯一写者)。</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>                queue_getter=lambda: self._queues.get(sid))</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>            self._approvals[sid] = provider</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        return provider</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code></code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>    def all_approval_providers(self) -&gt; list:</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        seen, out = set(), []</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        ctx_approval = (getattr(self.ctx, &quot;approval&quot;, None)</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>                        if self.tenant_id == &quot;default&quot; else None)</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        engine_providers = [getattr(s, &#x27;approval&#x27;, None) for s in self._engines.values()]</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        for spine in self._engines.values():</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>            runner = getattr(getattr(spine, &#x27;subagent&#x27;, None), &#x27;_runner&#x27;, None)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            engine_providers.extend(getattr(runner, &#x27;approval_providers&#x27;, {}).values())</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        for p in list(self._approvals.values()) + engine_providers + ([ctx_approval] if ctx_approval else []):</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>            if p is not None and id(p) not in seen:</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>                seen.add(id(p))</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>                out.append(p)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        return out</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code></code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>    @admitted</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>    async def create_session(self) -&gt; str:</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        self._ensure_open()</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        mgr = self.surface_mgr()</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        fn = getattr(mgr, &quot;create&quot;, None)</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>        if not callable(fn):</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>            raise_code(&quot;CYC-999&quot;, hint=&quot;会话门面未实现 create(缺 DesktopSessionManager)&quot;)</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        sid = fn()</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        if hasattr(sid, &quot;__await__&quot;):</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>            sid = await sid</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        self._logs[sid] = await self.require_session(sid)</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        register_session_tenant(sid, self.tenant_id)</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        return str(sid)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code></code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>    @admitted</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>    async def delete_session(self, sid: str) -&gt; dict:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        &quot;&quot;&quot;Delete an idle session and all of its tenant-scoped files.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        from pyharness.application.product_execution_sessions import reject_product_mutation</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        reject_product_mutation(sid)</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        sid = _session_module().validate_session_id(sid)</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        queue = self._queues.get(sid)</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>        if queue is not None:</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>            status = queue.status()</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            if status.running or status.waiting or status.paused:</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                # BUSY 是 ERR.md 已登记的**命名状态字面量**、`errors.py` **故意不登记**</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>                # (同 QUE-001/ATT-001 先例:acp.py / core/agent.py / task_queue.py 三处</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>                # 均**直接构造**保字面码)。此处曾用 ``raise_code(&quot;BUSY&quot;)`` ⇒ 被静默改写为</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>                # CYC-999(R19):同一&quot;会话忙&quot;条件在 ACP 报 BUSY、在本路径报&quot;未知内部错误&quot;,</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                # 且 HTTP 落 500 而非 409。</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>                    &quot;session_id&quot;: sid,</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                    &quot;advice&quot;: &quot;会话仍有运行/等待任务,完成或取消后再删除&quot;})</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        spine = self._engines.get(sid)</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>        if spine is not None:</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>            # FTS 派生索引级联清理(2026-09-21 R8):`SessionQueryIndex.delete_session`</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>            # 此前**无生产调用者** ⇒ 删除会话后其索引行仍在 ⇒ **已删内容仍可被搜索**</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>            # (且搜索结果指向不存在的会话)。必须在 `spine.close()`(会 detach 关库)</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>            # **之前**清;索引未激活(无 fts)则无索引行,跳过即可。</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            fts = getattr(spine, &quot;fts&quot;, None)</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>            if fts is not None and callable(getattr(fts, &quot;delete_session&quot;, None)):</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>                try:</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>                    await fts.delete_session(sid)</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>                except Exception:                      # noqa: BLE001 清理失败不阻断删除</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>                    log.warning(&quot;fts delete_session 失败 sid=%s(索引残留,&quot;</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>                                &quot;可由 rebuild 自愈)&quot;, sid, exc_info=True)</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>            await spine.close()</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>            self._engines.pop(sid, None)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        self._approvals.pop(sid, None)</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        self._queues.pop(sid, None)</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        self._queue_locks.pop(sid, None)</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>        self._logs.pop(sid, None)</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        result = await self.surface_mgr().delete_session(sid)</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        self._session_locks.pop(sid, None)</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        unregister_session_tenant(sid, self.tenant_id)   # 只撤本租户认领</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        return {&quot;ok&quot;: True, **result}</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code></code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>    def _attachment_limits(self) -&gt; tuple[int, int, tuple]:</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        &quot;&quot;&quot;附件上限(F061)取自 ``security.attachment.*``;缺省回落模块 L1 锚点。</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code></code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        2026-09-21:**这三个配置键此前零读取者**(死配置,见 LIMITATIONS L-20),</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>        接线后运维改它们即生效。</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        from pyharness.core import attachment as att_mod</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        att = getattr(getattr(getattr(self.ctx, &quot;settings&quot;, None),</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>                              &quot;security&quot;, None), &quot;attachment&quot;, None)</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>        n = getattr(att, &quot;max_per_message&quot;, None)</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>        b = getattr(att, &quot;max_bytes&quot;, None)</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>        mimes = getattr(att, &quot;mime_whitelist&quot;, None)</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>        return (int(n) if n else att_mod.DEFAULT_MAX_PER_MESSAGE,</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>                int(b) if b else att_mod.DEFAULT_MAX_BYTES,</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>                tuple(mimes) if mimes else att_mod.DEFAULT_MIME_WHITELIST)</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code></code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>    def _session_workspace(self, sid: str) -&gt; str:</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>        &quot;&quot;&quot;会话工作区(F061 附件落点):引擎 scope 权威值,缺位则**同单点**派生。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>        spine = self._engines.get(str(sid))</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>        ws = getattr(getattr(getattr(spine, &quot;scope&quot;, None), &quot;policy&quot;, None),</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>                     &quot;workspace_root&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>        if ws:</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>            return str(ws)</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>        from pyharness.core.scope import session_workspace</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>        cfg = getattr(self.ctx, &quot;settings&quot;, None)</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>        root = getattr(getattr(cfg, &quot;storage&quot;, None), &quot;workspaces_dir&quot;,</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>                       &quot;~/.pyharness/workspaces&quot;)</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        return session_workspace(str(root), str(sid))</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code></code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>    def attachment_payloads(self, attachments: Any, *, sid: str = &quot;&quot;) -&gt; list[dict]:</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        &quot;&quot;&quot;附件入站**单点校验**(F061):数量 → 魔数/大小 → 内容寻址落盘。</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code></code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>        2026-09-21 修(L-22):此前只做 schema 形状组装(客户端自报 mime、缺省回落</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>        `image/png`;无魔数/大小/数量校验;`sha256` 可省略回落全零占位)⇒ **伪装图片的</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>        恶意文件可进事件流**,且同内容不去重。现按 PRD-Core F061 规格:魔数定类型</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>        (不信扩展名/自报 mime)→ 单张 ≤`max_bytes` → 单消息 ≤`max_per_message`</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        → `sha256(raw)[:16]` 内容寻址去重落盘到**会话工作区内**;任一不满足 →</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        `ATT-001` 零写盘。schema 校验保留为第二道(形状)。</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>        from pyharness.core import attachment as att_mod</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>        refs = list(attachments or [])</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>        if not refs:</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>            return []</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>        n_max, b_max, mimes = self._attachment_limits()</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>        if len(refs) &gt; n_max:</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>            att_mod.reject_attachment(&quot;too-many&quot;, count=len(refs), limit=n_max)</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>        workspace = self._session_workspace(sid)</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>        payloads: list[dict] = []</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>        for ref in refs:</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>            if not isinstance(ref, dict):</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>                raise_code(&quot;EVT-100&quot;, field=&quot;attachments&quot;, advice=&quot;附件须 dict 引用&quot;)</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>            payload = att_mod.ingest_image_path(</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>                ref.get(&quot;file_path&quot;) or ref.get(&quot;ref&quot;) or &quot;&quot;, workspace=workspace,</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>                mime_whitelist=mimes, max_bytes=b_max)</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>            payloads.append(validate_payload(&quot;user.attachment.image&quot;, payload))</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        return payloads</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code></code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>    @admitted</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>    async def create_message(self, sid: str, text: str, *,</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>                             attachments: Any = None) -&gt; dict:</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>        self._ensure_open()</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>        text = str(text or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>        if not text:</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>            raise_code(&quot;EVT-100&quot;, advice=&quot;消息不能为空&quot;)</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>        log_ = await self.require_session(sid)</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>        payloads = self.attachment_payloads(attachments, sid=sid)</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>        queue = await self.queue_for(sid, log_)</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>        env = await log_.append(&quot;user.message&quot;, {&quot;content&quot;: text},</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>                                actor=&quot;user&quot;, origin=self.channel, sync=True)</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>        for payload in payloads:</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>            await log_.append(&quot;user.attachment.image&quot;, payload, actor=&quot;user&quot;)</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>        task_id = await queue.submit(text, meta={&quot;channel&quot;: self.channel,</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>                                                 &quot;session_id&quot;: sid})</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>        return {&quot;task_id&quot;: task_id, &quot;user_seq&quot;: env.seq}</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code></code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code></code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>    def _ensure_open(self):</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>        if getattr(self, &#x27;_closing&#x27;, False) and asyncio.current_task() not in getattr(self, &#x27;_admissions&#x27;, {}):</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>            raise_code(&#x27;EVT-104&#x27;, reason=&#x27;service_closing&#x27;, advice=&#x27;服务正在关闭;拒绝新工作&#x27;)</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code></code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>    async def shutdown(self) -&gt; None:</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>        task = getattr(self, &#x27;_shutdown_task&#x27;, None)</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>        if task is None:</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>            self._closing = True</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>            task = self._shutdown_task = asyncio.create_task(self._shutdown_owned())</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>        await asyncio.shield(task)</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code></code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>    async def _shutdown_owned(self):</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>        await stop_admissions(self)</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>        from pyharness.application.task_graph_runtime import stop_task_graphs</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>        await stop_task_graphs(self)</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>        errors = []</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>        async def attempt(fn, *args, **kw):</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>            try:</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>                await fn(*args, **kw)</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>            except BaseException as exc:</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>                errors.append(exc)</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>        if hasattr(self, &#x27;_channels&#x27;):</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>            await attempt(self._channels.close)</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>        if hasattr(self, &#x27;_platform&#x27;):</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>            await attempt(self._platform.stop_actions)</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>        spines = list(self._engines.values())</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>        if self.tenant_id == &#x27;default&#x27;:</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>            spines.append(getattr(self.ctx, &#x27;engine_spine&#x27;, None))</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>        seen = set()</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>        for spine in spines:</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>            if spine is not None and id(spine) not in seen:</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>                seen.add(id(spine))</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>                await attempt(spine.close)</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>        for queue in self._queues.values():</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>            if callable(getattr(queue, &#x27;shutdown&#x27;, None)):</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>                await attempt(queue.shutdown, reason=&#x27;service-shutdown&#x27;)</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>        if hasattr(self, &#x27;_platform&#x27;):</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>            await attempt(self._platform.close)</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>        if hasattr(self, &#x27;_projects&#x27;):</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>            await attempt(self._projects.close)</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>        if isinstance(self._surface, _session_module().DesktopSessionManager):</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>            await attempt(self._surface.shutdown_all)</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>        await attempt(self.llm_runtime.aclose)</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>        if errors:</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>            raise BaseExceptionGroup(&#x27;application cleanup failed&#x27;, errors)</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code></code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>    # ------------------------------------------------------------ read models</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code></code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code></code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>    # ------------------------------------------------------------ 治理审计(GAP-7)</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code></code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>    # ------------------------------------------------------------ 治理证据(GAP-8)</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code></code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>    # ------------------------------------------------------------ edit / feedback</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code></code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code></code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>    # ------------------------------------------------------------ approvals / asks</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code></code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code></code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>    # ------------------------------------------------------------ attachments / workflow / budget</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code></code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code></code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>    # ------------------------------------------------------------ plugins / preset</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code></code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

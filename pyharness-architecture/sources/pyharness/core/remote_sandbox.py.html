@@ -1,0 +1,99 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/remote_sandbox.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/remote_sandbox.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 99 行</span></nav><main class="wrap source-page"><h1>pyharness/core/remote_sandbox.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：e827a71794e4751432f106f2ccd4def2d9bff3e4<br>SHA-256（内容校验）：7c3beb5ca1d0400dbf4043defdc288828e1458b7004dc524ec4a7dde8b4c6eeb</p><p><a href="../../../architecture-detailed.html?node=sandbox">Sandbox Backends（执行工作区与沙箱后端）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 11 个类、函数与方法</summary><ul><li><a href="#L11">validate_address（函数） · L11–L18</a></li><li><a href="#L21">RemoteSandboxBackend（类） · L21–L99</a><ul><li><a href="#L22">RemoteSandboxBackend.__init__（方法） · L22–L25</a></li><li><a href="#L27">RemoteSandboxBackend.request（异步方法） · L27–L39</a></li><li><a href="#L41">RemoteSandboxBackend.health（异步方法） · L41–L42</a></li><li><a href="#L44">RemoteSandboxBackend.create（异步方法） · L44–L49</a></li><li><a href="#L51">RemoteSandboxBackend.execute（异步方法） · L51–L69</a></li><li><a href="#L71">RemoteSandboxBackend.download（异步方法） · L71–L84</a></li><li><a href="#L86">RemoteSandboxBackend.upload（异步方法） · L86–L89</a></li><li><a href="#L91">RemoteSandboxBackend.file_operation（异步方法） · L91–L93</a></li><li><a href="#L95">RemoteSandboxBackend.destroy（异步方法） · L95–L99</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Tenant-scoped client for the remote Docker worker (no host fallback).&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import asyncio</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import ipaddress</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from urllib.parse import urlsplit</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import uuid</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import httpx</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.core.sandbox import fail</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>def validate_address(address):</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    parsed = urlsplit(address)</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    loopback = parsed.hostname == &#x27;localhost&#x27;</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    try: loopback |= ipaddress.ip_address(parsed.hostname).is_loopback</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    except ValueError: pass</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    if (parsed.scheme != &#x27;https&#x27; and not (parsed.scheme == &#x27;http&#x27; and loopback)) or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in (&#x27;&#x27;, &#x27;/&#x27;):</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        fail(&#x27;remote_address_requires_https&#x27;)</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    return address.rstrip(&#x27;/&#x27;)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>class RemoteSandboxBackend:</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    def __init__(self, settings, *, transport=None):</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        self.settings = settings</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        self.transport = transport</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        self.handles = {}</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    async def request(self, connection, method, path, body=None):</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        address, token = self.settings(connection)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        if not token: fail(&#x27;remote_credential_missing&#x27;)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        try:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            async with httpx.AsyncClient(base_url=validate_address(address),</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>                    headers={&#x27;Authorization&#x27;: &#x27;Bearer &#x27; + token}, timeout=15,</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>                    follow_redirects=False, trust_env=False, transport=self.transport) as client:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                response = await client.request(method, path, json=body)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                if response.status_code &gt;= 400:</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>                    fail(&#x27;remote_request_failed&#x27;, &#x27;HTTP &#x27; + str(response.status_code))</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                return response.json()</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        except (httpx.HTTPError, ValueError):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            fail(&#x27;remote_disconnected&#x27;, &#x27;远程服务连接中断；未改用本机执行&#x27;)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    async def health(self, connection):</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        return await self.request(connection, &#x27;GET&#x27;, &#x27;/v1/health&#x27;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    async def create(self, record, root, profile):</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        from pyharness.core.workspace_codec import pack_files</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        task = uuid.uuid4().hex</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        self.handles[record.sandbox_id] = (profile.remote_connection, task, root, profile)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        await self.request(profile.remote_connection, &#x27;POST&#x27;, &#x27;/v1/tasks/&#x27; + task,</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            {&#x27;profile&#x27;: profile.model_dump(), &#x27;files&#x27;: pack_files(root)})</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    async def execute(self, record, command, *, python=False):</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        connection, task, root, profile = self.handles[record.sandbox_id]</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        operation = uuid.uuid4().hex</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        try:</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>            await self.request(connection, &#x27;POST&#x27;, f&#x27;/v1/tasks/{task}/execute&#x27;,</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                {&#x27;command&#x27;: command, &#x27;python&#x27;: python, &#x27;operation&#x27;: operation})</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            async with asyncio.timeout(profile.timeout + 20):</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                while True:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                    result = await self.request(connection, &#x27;GET&#x27;, &#x27;/v1/tasks/&#x27; + task)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>                    if result[&#x27;operation&#x27;] != operation: fail(&#x27;remote_operation_mismatch&#x27;)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                    if result[&#x27;status&#x27;] == &#x27;completed&#x27;: return result[&#x27;result&#x27;]</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                    if result[&#x27;status&#x27;] in (&#x27;failed&#x27;, &#x27;cancelled&#x27;): fail(&#x27;remote_execution_failed&#x27;)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                    await asyncio.sleep(.2)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        except BaseException:</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            # A disconnected client never resubmits code. Best effort cancellation;</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            # worker timeout/lease cleanup remains authoritative if unreachable.</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            try: await asyncio.shield(self.destroy(record))</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            except Exception: pass</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            raise</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    async def download(self, record):</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        from pyharness.core.workspace_codec import unpack_files</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        connection, task, root, profile = self.handles[record.sandbox_id]</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        result = await self.request(connection, &#x27;POST&#x27;, f&#x27;/v1/tasks/{task}/files&#x27;, {})</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        # Replace the local mirror only after validating every remote path/content.</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        import tempfile</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        import shutil</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        with tempfile.TemporaryDirectory(dir=root.parent) as temporary:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            stage = __import__(&#x27;pathlib&#x27;).Path(temporary)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            unpack_files(stage, result[&#x27;files&#x27;])</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            for item in list(root.iterdir()):</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                if item.is_dir(): shutil.rmtree(item)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                else: item.unlink()</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            for item in stage.iterdir(): shutil.move(str(item), str(root / item.name))</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    async def upload(self, record):</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        from pyharness.core.workspace_codec import pack_files</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        connection, task, root, profile = self.handles[record.sandbox_id]</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        await self.request(connection, &#x27;POST&#x27;, f&#x27;/v1/tasks/{task}/files&#x27;, {&#x27;files&#x27;: pack_files(root)})</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    async def file_operation(self, record, name, args):</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        connection, task, *_ = self.handles[record.sandbox_id]</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        return (await self.request(connection, &#x27;POST&#x27;, f&#x27;/v1/tasks/{task}/file-operation&#x27;, {&#x27;name&#x27;: name, &#x27;args&#x27;: args}))[&#x27;value&#x27;]</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    async def destroy(self, record):</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        handle = self.handles.get(record.sandbox_id)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        if handle:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            await self.request(handle[0], &#x27;DELETE&#x27;, &#x27;/v1/tasks/&#x27; + handle[1])</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            self.handles.pop(record.sandbox_id, None)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

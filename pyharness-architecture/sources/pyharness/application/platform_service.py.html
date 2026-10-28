@@ -1,0 +1,175 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/platform_service.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/platform_service.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 175 行</span></nav><main class="wrap source-page"><h1>pyharness/application/platform_service.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：c52b61370ca1e0d70b1d95241fcfd3e309193d16<br>SHA-256（内容校验）：4cfaed862a6a21c616fb92517715528b550990785f1711e702f0d8b60b52d148</p><p><a href="../../../architecture-detailed.html?node=platform_service">PlatformService（平台应用服务）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 11 个类、函数与方法</summary><ul><li><a href="#L32">PlatformService（类） · L32–L174</a><ul><li><a href="#L33">PlatformService.__init__（方法） · L33–L56</a></li><li><a href="#L59">PlatformService._display_docker_health（异步方法） · L59–L76</a></li><li><a href="#L78">PlatformService.health（异步方法） · L78–L90</a></li><li><a href="#L92">PlatformService.sandbox_records（异步方法） · L92–L104</a></li><li><a href="#L106">PlatformService.destroy_sandbox（异步方法） · L106–L117</a></li><li><a href="#L120">PlatformService.dashboard（异步方法） · L120–L140</a></li><li><a href="#L142">PlatformService.usage（异步方法） · L142–L144</a></li><li><a href="#L146">PlatformService.close（异步方法） · L146–L160</a></li><li><a href="#L162">PlatformService.stop_actions（异步方法） · L162–L169</a></li><li><a href="#L171">PlatformService._write_artifact（方法） · L171–L174</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Web platform application service, sharing the existing execution owners.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import asyncio</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import base64</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import copy</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import difflib</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import hashlib</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>import json</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import mimetypes</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import httpx</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>import uuid</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from time import monotonic</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from pyharness.application.platform_models import AgentDefinition, AgentVersion, ArtifactRecord, KnowledgeSource</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>from pyharness.application.platform_projection import project, summary</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from pyharness.application.platform_store import PlatformStore</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from pyharness.core.knowledge import ExactKeywordKnowledgeProvider</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>from pyharness.core.sandbox import SandboxManager, safe_path, fail</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>from pyharness.application.platform_templates import (TEMPLATES)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>from pyharness.application.platform_agents import PlatformAgents</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>from pyharness.application.platform_history import PlatformHistory</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>from pyharness.application.platform_runs import PlatformRuns</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>from pyharness.application.platform_trajectory import PlatformTrajectory</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>from pyharness.application.platform_artifacts import PlatformArtifacts</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>from pyharness.application.platform_knowledge import PlatformKnowledge</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code></code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>class PlatformService(PlatformAgents, PlatformHistory, PlatformRuns, PlatformTrajectory, PlatformArtifacts, PlatformKnowledge):</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    def __init__(self, service):</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        self.service = service</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        self.root = service.tenant_root() / &#x27;platform&#x27;</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        self.store = PlatformStore(self.root)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        self.sandboxes = SandboxManager(self.root / &#x27;sandboxes&#x27;)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        self._docker_health_lock = asyncio.Lock()</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        self._docker_health_cache = None</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        from pyharness.application.chat_setup import ChatSetup</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        from pyharness.core.remote_sandbox import RemoteSandboxBackend</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        self.chat_setup = ChatSetup(self)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        self.sandboxes.backends[&#x27;remote&#x27;] = RemoteSandboxBackend(self.chat_setup.remote_settings)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        self.knowledge = ExactKeywordKnowledgeProvider()</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        self.locks = {}</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        self.actions = {}</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        self.connection_clients = {}</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        self.history_index = None</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        from pyharness.application.projection_cache import ProjectionCache</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        self.projection_cache = ProjectionCache()</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        self.artifact_cache = ProjectionCache()</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        self.trajectory_cache = ProjectionCache()</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        from pyharness.application.list_index import ListIndex</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        self.list_index = ListIndex(self.root / &#x27;lists-v1.db&#x27;)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        from pyharness.application.platform_workflow import PlatformWorkflows</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        self.workflows = PlatformWorkflows(self)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    async def _display_docker_health(self):</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        &quot;&quot;&quot;Reuse only this instance&#x27;s display observation, never execution admission.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        backend = self.sandboxes.backends[&#x27;isolated&#x27;]</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        cached = self._docker_health_cache</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        if cached is not None and cached[0] is backend and monotonic() &lt; cached[1]:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            return copy.deepcopy(cached[2])</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        async with self._docker_health_lock:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            while True:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                backend = self.sandboxes.backends[&#x27;isolated&#x27;]</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>                cached = self._docker_health_cache</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                if cached is not None and cached[0] is backend and monotonic() &lt; cached[1]:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                    return copy.deepcopy(cached[2])</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>                observed = await backend.health()</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                if self.sandboxes.backends[&#x27;isolated&#x27;] is not backend:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                    continue</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                snapshot = copy.deepcopy(observed)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                self._docker_health_cache = (backend, monotonic() + 5.0, snapshot)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                return copy.deepcopy(snapshot)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    async def health(self):</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        docker = await self._display_docker_health()</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        state = self.service.tenant_state()</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        return {&#x27;components&#x27;:[</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            {&#x27;component&#x27;:&#x27;Agent Runtime&#x27;,&#x27;status&#x27;:&#x27;stopping&#x27; if getattr(self.service,&#x27;_closing&#x27;,False) else &#x27;available&#x27;},</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            {&#x27;component&#x27;:&#x27;TaskQueue&#x27;,&#x27;status&#x27;:&#x27;available&#x27;,&#x27;active&#x27;:len(self.service._queues)},</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            {&#x27;component&#x27;:&#x27;数据存储&#x27;,&#x27;status&#x27;:&#x27;available&#x27; if self.root.exists() else &#x27;not_initialized&#x27;},</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            {&#x27;component&#x27;:&#x27;Docker Sandbox&#x27;,&#x27;status&#x27;:docker[&#x27;status&#x27;]},</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            {&#x27;component&#x27;:&#x27;模型连接&#x27;,&#x27;status&#x27;:&#x27;configured&#x27; if state.get(&#x27;profiles&#x27;) else &#x27;not_configured&#x27;},</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            {&#x27;component&#x27;:&#x27;Knowledge Provider&#x27;,&#x27;status&#x27;:self.knowledge_list()[&#x27;status&#x27;],&#x27;provider&#x27;:self.knowledge_list()[&#x27;provider&#x27;]},</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            {&#x27;component&#x27;:&#x27;MCP&#x27;,&#x27;status&#x27;:&#x27;not_configured&#x27; if not self.connection_definitions() and not self.service.effective_settings().plugins.mcp_servers else &#x27;not_probed&#x27;},</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            {&#x27;component&#x27;:&#x27;Schedule&#x27;,&#x27;status&#x27;:&#x27;available&#x27;},</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            {&#x27;component&#x27;:&#x27;Web 服务&#x27;,&#x27;status&#x27;:&#x27;available&#x27;}], &#x27;docker&#x27;:docker}</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    async def sandbox_records(self):</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        records={}</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        for row in (await self.service.list_sessions())[&#x27;sessions&#x27;]:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            log=await self.service.require_session(row[&#x27;sid&#x27;])</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            for e in log.events_after(0):</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                if e.type==&#x27;platform.sandbox&#x27;:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                    record=dict(e.payload[&#x27;record&#x27;])</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                    if record[&#x27;status&#x27;]==&#x27;running&#x27;:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                        record[&#x27;status&#x27;]=&#x27;orphaned&#x27;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                        record[&#x27;error_code&#x27;]=&#x27;runtime_interrupted&#x27;</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                    records[record[&#x27;sandbox_id&#x27;]]=record</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        records.update({ident:r.model_dump() for ident,r in self.sandboxes.records.items()})</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        return list(records.values())</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    async def destroy_sandbox(self, ident):</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        item=next((r for r in await self.sandbox_records() if r[&#x27;sandbox_id&#x27;]==ident),None)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        if item is None: fail(&#x27;sandbox_not_found&#x27;)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        if item[&#x27;status&#x27;]==&#x27;destroyed&#x27;: return item</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        if ident not in self.sandboxes.records:</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            from pyharness.application.platform_models import SandboxRecord</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>            await self.sandboxes.recover(SandboxRecord.model_validate(item))</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        record=await self.sandboxes.destroy(ident)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        sid,task=record.run_id.split(&#x27;~&#x27;,1)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        log=await self.service.require_session(sid)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        await log.append(&#x27;platform.sandbox&#x27;,{&#x27;action&#x27;:&#x27;destroyed&#x27;,&#x27;record&#x27;:record.model_dump()},actor=&#x27;user&#x27;,task_id=task,sync=True)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        return record.model_dump()</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code></code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code></code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    async def dashboard(self):</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        view = await self.all_views()</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        artifacts = (await self.artifacts())[&#x27;artifacts&#x27;]</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        usage = await self.usage(view)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        month=datetime.now(timezone.utc).replace(day=1,hour=0,minute=0,second=0,microsecond=0).isoformat()</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        month_usage=await self.usage(view,filters={&#x27;from&#x27;:month})</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        state=self.service.tenant_state()</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        current=next((p for p in state[&#x27;profiles&#x27;] if p[&#x27;id&#x27;]==state[&#x27;active&#x27;]),None)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        from pyharness import __version__</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        return {&#x27;operator&#x27;:self.service.tenant_id,&#x27;version&#x27;:__version__,&#x27;current_model&#x27;:current[&#x27;model&#x27;] if current else None,</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            &#x27;month_usage&#x27;:month_usage,&#x27;recent_artifacts&#x27;:artifacts[-5:],</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            &#x27;sessions&#x27;:[s for s in (await self.sessions())[&#x27;sessions&#x27;] if not s.get(&#x27;archived&#x27;)][:5],</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            &#x27;runs&#x27;:sorted(view[&#x27;runs&#x27;],key=lambda r:r[&#x27;queued_at&#x27;] or r[&#x27;started_at&#x27;] or &#x27;&#x27;,reverse=True)[:5],</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            &#x27;pending_approvals&#x27;:sum(a[&#x27;status&#x27;] == &#x27;pending&#x27; for a in (await self.approvals())[&#x27;approvals&#x27;]),</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            &#x27;failed&#x27;:sum(r[&#x27;status&#x27;] == &#x27;failed&#x27; for r in view[&#x27;runs&#x27;]),</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            &#x27;completed&#x27;:sum(r[&#x27;status&#x27;] == &#x27;completed&#x27; for r in view[&#x27;runs&#x27;]),</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            &#x27;running&#x27;:sum(r[&#x27;status&#x27;] in {&#x27;running&#x27;,&#x27;waiting_approval&#x27;} for r in view[&#x27;runs&#x27;]),</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            &#x27;usage&#x27;:usage, &#x27;knowledge&#x27;:{&#x27;count&#x27;:len(self.store.read()[&#x27;knowledge&#x27;]),</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                &#x27;bytes&#x27;:sum(d[&#x27;size&#x27;] for d in self.store.read()[&#x27;knowledge&#x27;].values())},</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            &#x27;artifact_bytes&#x27;:sum(a[&#x27;size&#x27;] for a in artifacts), &#x27;health&#x27;:await self.health(),</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            &#x27;trace&#x27;:list(reversed(view[&#x27;trace&#x27;]))[:5]}</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code></code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    async def usage(self, view=None, filters=None):</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        from pyharness.application.platform_usage import usage</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        return await usage(self, view or await self.all_views(), filters or {})</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code></code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    async def close(self):</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        await self.stop_actions()</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        if self.history_index is not None:</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>            await self.history_index.detach()</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>            self.history_index = None</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        errors=[]</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        for client in list(self.connection_clients.values()):</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            try:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                await client.close()</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>            except BaseException as exc:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                errors.append(exc)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        self.connection_clients.clear()</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        await self.sandboxes.close()</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        if errors:</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            raise BaseExceptionGroup(&#x27;connection cleanup failed&#x27;,errors)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code></code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    async def stop_actions(self):</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        await self.workflows.close()</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        tasks=list(self.actions.values())</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        for task in tasks:</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>            if not task.done():</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>                task.cancel()</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        if tasks:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            await asyncio.gather(*tasks,return_exceptions=True)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code></code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    def _write_artifact(path, raw):</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        &quot;&quot;&quot;The owning platform service is the only artifact byte writer.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        path.write_bytes(raw)</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

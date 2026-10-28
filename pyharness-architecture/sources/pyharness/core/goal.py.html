@@ -1,0 +1,473 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/goal.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/goal.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 473 行</span></nav><main class="wrap source-page"><h1>pyharness/core/goal.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：e0e0d0ec7067d5a47639003d73fc1ae763b1894a<br>SHA-256（内容校验）：d0fd3d0ef661ebef0c1aa9c8408408cd746b03944e34e6a968d08544a3a07f69</p><p><a href="../../../architecture-detailed.html?node=goals_todos">Goals and Todos（目标核对与待办管理）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 28 个类、函数与方法</summary><ul><li><a href="#L54">_clamp01（函数） · L54–L56</a></li><li><a href="#L60">CheckItem（类） · L60–L65</a></li><li><a href="#L68">Goal（类） · L68–L87</a><ul><li><a href="#L81">Goal.summary（方法） · L81–L87</a></li></ul></li><li><a href="#L90">CompletionVerdict（类） · L90–L95</a></li><li><a href="#L98">GoalCheck（类） · L98–L106</a></li><li><a href="#L110">GoalManager（类） · L110–L467</a><ul><li><a href="#L123">GoalManager.__init__（方法） · L123–L135</a></li><li><a href="#L138">GoalManager._require_session（方法） · L138–L143</a></li><li><a href="#L145">GoalManager._alloc_gid（方法） · L145–L148</a></li><li><a href="#L150">GoalManager._bump_gid_counter（方法） · L150–L153</a></li><li><a href="#L155">GoalManager._get（方法） · L155–L162</a></li><li><a href="#L164">GoalManager._nondone（方法） · L164–L166</a></li><li><a href="#L168">GoalManager._touch_activity（方法） · L168–L170</a></li><li><a href="#L172">GoalManager._iter_session_events（方法） · L172–L174</a></li><li><a href="#L176">GoalManager._task_failed（方法） · L176–L186</a></li><li><a href="#L189">GoalManager.goal（异步方法） · L189–L224</a></li><li><a href="#L227">GoalManager.goal_create（异步方法） · L227–L251</a></li><li><a href="#L253">GoalManager.goal_update（异步方法） · L253–L287</a></li><li><a href="#L289">GoalManager.goal_check（异步方法） · L289–L335</a></li><li><a href="#L337">GoalManager.verify_completion（方法） · L337–L350</a></li><li><a href="#L352">GoalManager.mark_completed（异步方法） · L352–L365</a></li><li><a href="#L367">GoalManager.goal_abandon（异步方法） · L367–L383</a></li><li><a href="#L386">GoalManager.list_active（方法） · L386–L389</a></li><li><a href="#L391">GoalManager.render_goal_segment（方法） · L391–L405</a></li><li><a href="#L408">GoalManager.round_end（方法） · L408–L420</a></li><li><a href="#L422">GoalManager.drift_reminder（方法） · L422–L434</a></li><li><a href="#L437">GoalManager.rebuild_from_events（方法） · L437–L467</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/goal.py — 会话级目标管理 (specs/goal.py.md 契约;F047 目标管理)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>F047:长任务把用户目标拆成可核对子目标(活动目标 ≤8 个),create/update/check/</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>abandon 全部事件化(goal.created/updated/completed);目标状态只从事件回放重建</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>(**溯源可回放**,INV-01);汇报&quot;完成&quot;必须先过核对(证据不足→追问,不落 completed,</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>goal.completed 恒由 system 写——SECURITY S-1 防伪造&quot;已执行&quot;);活动目标渲染进</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>系统提示词段 + 防跑偏提醒注入(软提示,不硬限制 agent 行为,soft anchor)。</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>事件模型纪律(INV-01):GoalManager._goals 内存注册表**只由事件派生**——一切&quot;状态</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>写入&quot;先 await session.append 对应 goal.* 事件(落定成功),再把内存 Goal 字段对齐到</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>事件载荷;任何内存字段不是第二真源。goal.updated/completed 前必有 goal.created</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>(created_seq = goal.created 事件 seq,升序单调);completed(done 终态)后不可再</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>updated(BUSY 拒)。checklist 打勾为瞬态工作数据(事件词表无 checklist 字段,</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>EVENT-SCHEMA §3.5.2),不参与事件回放;持久化字段(id/desc/status/progress/note/</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>task_id/created_seq)全部可由事件重建。</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>偏离说明(相对 specs/goal.py.md 伪码):</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>1. goal.updated 载荷按 EVENT-SCHEMA §3.5.2 + events.payload 模型为准(伪码过时,</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>   同 agent_loop 偏离 4 先例):payload 模型必填 status,故本模块每次 updated 均</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>   携带当前 status 值(进度更新事件亦然);created 载荷缺 task_id/progress 字段属</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>   词表模型缺口,已在 events/payload.py 补可选字段(见该文件注释)。</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>2. 事件先落、状态后对齐:伪码先改内存再 append;本实现先 append(成功返回)再改</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   内存——append 校验拒写(失败)时内存与日志保持一致,零副作用,INV-01 更严。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   唯一例外是 checklist 打勾与 claim_done 路径的 progress 赋值(瞬态核对输入,</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   事件词表不承载,先落内存供 verify_completion 纯函数核对)。</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>3. claim_done=True 且带 progress 时先落一条 goal.updated(progress)再 verify——</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>   伪码只落 completed;补落 updated 使 progress 变化可回放(INV-01 一致性),</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   不改变&quot;追问一次/不落 completed&quot;语义。</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>4. round_end() 每轮先 _round_no += 1 再扫本轮事件(_round_no 即&quot;本轮轮号&quot;,</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   与数据表&quot;agent-loop 每轮 +1 注入,round_end 同步&quot;口径一致);drift 判定同口径。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>5. g-N 单调由实例计数器 _gid_seq 分配;rebuild 时按现存 goal_id 数值后缀续号,</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>   保证折叠部分旧目标后仍不重号(compaction F058 联动)。</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>6. goal.updated 载荷为**全量状态快照**(status/note/progress 恒携带):events 层</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>   payload 模型 canonical 化时恒补齐缺省键(如 note=None),伪码&quot;缺键保留&quot;的重建</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   语义会拿显式 None 抹掉旧 note——快照写保证事件流回放逐字段一致(INV-01),</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>   与 todo.updated 全量替换先例同构。</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>7. goal() 分发先校验 op 合法性再定位 goal_id(伪码先 _get 后判 op,会使未知 op</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   在缺 id 时误报 EVT-101;以异常表&quot;op 非法 → EVT-100&quot;语义优先)。</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>import logging</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>from typing import Any, Literal, Optional</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>log = logging.getLogger(&quot;pyharness.goal&quot;)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code># 状态四值取自 EVENT-SCHEMA §3.5.2 词表(PRD open/in_progress 收敛为 active)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>GoalStatus = Literal[&quot;active&quot;, &quot;paused&quot;, &quot;done&quot;, &quot;abandoned&quot;]</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code></code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>def _clamp01(v: float) -&gt; float:</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    &quot;&quot;&quot;进度夹到 [0,1](float 化;非法输入由调用方校验)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    return min(1.0, max(0.0, float(v)))</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code># ---------------------------------------------------------------- 数据结构</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>@dataclass</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>class CheckItem:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    &quot;&quot;&quot;可核对子目标清单项:逐条打勾(done)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    text: str</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    done: bool = False</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>@dataclass</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>class Goal:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    &quot;&quot;&quot;会话级目标(id g-N 单调;状态只由事件回放重建,INV-01)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    id: str</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    desc: str</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    checklist: list[CheckItem] = field(default_factory=list)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    progress: float = 0.0                       # 0..1,clamp 后落事件</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    status: GoalStatus = &quot;active&quot;</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    task_id: Optional[str] = None               # F044 关联任务(弱耦合字符串引用)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    created_seq: int = 0                        # = goal.created 事件 seq(升序排序键)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    note: Optional[str] = None</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    def summary(self) -&gt; str:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        &quot;&quot;&quot;用户可读一行摘要(goal 命令 list/创建/更新/放弃的返回文本)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        parts = (f&quot;[{self.id}] {self.desc} | 状态:{self.status}&quot;</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                 f&quot; | 进度:{self.progress:.0%}&quot;)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        if self.task_id:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            parts += f&quot; | 关联任务:{self.task_id}&quot;</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        return parts</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>@dataclass</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>class CompletionVerdict:</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    &quot;&quot;&quot;完成核对结论(verify_completion 纯函数返回;ok=False → 追问不落 completed)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    ok: bool</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    missing: list[str]                          # 未过核对项明细(证据缺口)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>@dataclass</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>class GoalCheck:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    &quot;&quot;&quot;核对结果(goal_check 返回;reply = 追问或确认文本)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code></code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    goal_id: str</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    ok: bool</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    claim_done: bool</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    missing: list[str]</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    reply: str</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code># ------------------------------------------------------------------ GoalManager</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>class GoalManager:</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    &quot;&quot;&quot;会话级目标注册表与状态机(F047)。</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    消费 session.append(写 goal.* 事件)/session 事件读(关联任务 failed 判定);</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    被 system-prompt(F010 goal 段装配)、agent-loop(round_end 漂移判定)、</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    compaction(F058 未完成 goal 不可折叠)、命令层(goal op 分发)消费。</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    内存态只由事件派生:直接构造(新会话空表)或 rebuild_from_events(恢复重建)。</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code></code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    私有字段: _goals(注册表,created_seq 升序)/ _active_limit(=8 活动上限)/</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    _last_goal_round(最近含 goal 活动的轮号)/ _round_no(当前轮号)/ _gid_seq(g-N</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    单调计数器,rebuild 按现存 id 续号)。</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code></code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    def __init__(self, session: Any = None, *, active_limit: int = 8,</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                 round_no: int = 0) -&gt; None:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        &quot;&quot;&quot;构造:session = 会话事件落点(SessionLog 或同型 async append 协议)。</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        session 可为 None(rebuild_from_events 只读重建用;写操作将 EVT-100 拒)。</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        active_limit = 活动(active+paused)目标上限,F047 边界默认 8。</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        self.session = session</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        self._goals: dict[str, Goal] = {}</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        self._active_limit = int(active_limit)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        self._last_goal_round: Optional[int] = None</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        self._round_no = int(round_no)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        self._gid_seq: int = 0</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code></code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    # ============================================================ 内部辅助</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    def _require_session(self) -&gt; Any:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        &quot;&quot;&quot;写事件前置:未注入会话 → EVT-100(读投影实例不可写)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        if self.session is None:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;GoalManager 未注入 session,无法写 goal.* 事件&quot;,</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                       advice=&quot;构造时注入 SessionLog 或同型 append 协议对象&quot;)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        return self.session</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    def _alloc_gid(self) -&gt; str:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        &quot;&quot;&quot;g-N 单调分配(计数器前置递增;append 失败留号空洞无害——只需单调唯一)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        self._gid_seq += 1</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        return f&quot;g-{self._gid_seq}&quot;</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code></code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    def _bump_gid_counter(self, gid: str) -&gt; None:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        &quot;&quot;&quot;按现存 goal_id 续号(rebuild/折叠后不重号;非 g-N 形态忽略)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        if gid.startswith(&quot;g-&quot;) and gid[2:].isdigit():</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            self._gid_seq = max(self._gid_seq, int(gid[2:]))</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code></code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    def _get(self, goal_id: Optional[str]) -&gt; Goal:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        &quot;&quot;&quot;定位目标;不存在 → EVT-101(updated/completed 前必有 created 的引用校验)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        g = self._goals.get(goal_id or &quot;&quot;)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        if g is None:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>            raise_code(&quot;EVT-101&quot;, goal_id=goal_id,</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>                       hint=f&quot;goal {goal_id} 不存在:先 create 再操作&quot;,</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>                       advice=&quot;先 create;查 goal_id 拼写&quot;)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        return g</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code></code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    def _nondone(self) -&gt; int:</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        &quot;&quot;&quot;活动(active+paused)目标计数——超限判定用(done/abandoned 不计)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        return len(self.list_active())</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code></code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    def _touch_activity(self) -&gt; None:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        &quot;&quot;&quot;目标活动打点:最近含 goal 活动轮号 = 当前轮(漂移静默计数清零)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        self._last_goal_round = self._round_no</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code></code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    def _iter_session_events(self):</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        from pyharness.core.event_reader import session_events</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        return session_events(self.session)</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code></code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>    def _task_failed(self, task_id: str) -&gt; bool:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        &quot;&quot;&quot;关联任务是否已 failed(终态事件单调:task.failed 后不可再 completed)。</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code></code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        只读扫描会话事件,不另存第二份任务状态(INV-01)。</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        for e in self._iter_session_events():</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>            if getattr(e, &quot;type&quot;, &quot;&quot;) == &quot;task.failed&quot;:</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                p = getattr(e, &quot;payload&quot;, {}) or {}</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                if p.get(&quot;task_id&quot;) == task_id:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                    return True</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        return False</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code></code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>    # ============================================================ 命令分发</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    async def goal(self, args: dict, ctx: Any) -&gt; str:</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        &quot;&quot;&quot;F047 验收伪代码直译的 op 分发器 → 用户可读 summary。</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code></code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        args = {&quot;op&quot;, &quot;text&quot;, &quot;id&quot;, &quot;progress&quot;, &quot;checked&quot;, &quot;claim_done&quot;,</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                &quot;status&quot;, &quot;note&quot;, &quot;task_id&quot;, …};ctx = 会话实体(取 ctx.task_id</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        兜底关联,F044)。op 非法 → EVT-100;goal_id 不存在 → EVT-101。</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        op = args.get(&quot;op&quot;)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        if op is None:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;goal 命令缺 op 字段&quot;,</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>                       advice=&quot;op ∈ create/update/check/abandon/list&quot;)</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        if op not in (&quot;create&quot;, &quot;update&quot;, &quot;check&quot;, &quot;abandon&quot;, &quot;list&quot;):</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>            # op 合法性先于定位(伪码先 _get 后判 op,会使未知 op 在缺 id 时误报</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            # EVT-101;以异常表&quot;op 非法 → EVT-100&quot;语义优先——见偏离说明)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            raise_code(&quot;EVT-100&quot;, hint=f&quot;未知 goal op: {op}&quot;,</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                       advice=&quot;op ∈ create/update/check/abandon/list&quot;)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        gid = args.get(&quot;id&quot;)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        if op == &quot;create&quot;:                      # 创建:可关联当前任务 ctx.task_id</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>            g = await self.goal_create(</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                args.get(&quot;text&quot;, &quot;&quot;),</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                task_id=args.get(&quot;task_id&quot;) or getattr(ctx, &quot;task_id&quot;, None))</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>            return g.summary()</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        if op == &quot;list&quot;:</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>            return &quot;\n&quot;.join(g.summary() for g in self.list_active()) or &quot;无活动目标&quot;</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        g = self._get(gid)                      # 其余 op 先定位;不存在 → EVT-101</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        if op == &quot;update&quot;:                      # 改 note/显式切状态(paused 等)</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            await self.goal_update(gid, note=args.get(&quot;note&quot;),</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                                   status=args.get(&quot;status&quot;))</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            return g.summary()</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        if op == &quot;check&quot;:                       # 核对:打勾/报进度/声称完成</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>            r = await self.goal_check(gid, progress=args.get(&quot;progress&quot;),</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>                                      checked=args.get(&quot;checked&quot;),</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>                                      claim_done=bool(args.get(&quot;claim_done&quot;)))</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>            return r.reply</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        await self.goal_abandon(gid, reason=args.get(&quot;reason&quot;, &quot;&quot;))  # op=abandon</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        return g.summary()</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code></code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    # ============================================================ 目标操作</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>    async def goal_create(self, text: str, *, task_id: Optional[str] = None) -&gt; Goal:</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        &quot;&quot;&quot;新建活动 Goal 并写 goal.created(actor=agent)。</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code></code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        活动目标已达 active_limit(≤8)→ BUSY 拒(须先 done/abandoned 旧的);</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        text 空白 → EVT-100。事件先落,内存后对齐(INV-01)。</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        if not text or not text.strip():</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;goal 描述为空&quot;,</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                       advice=&quot;提供可核对的目标描述文本&quot;)</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        if self._nondone() &gt;= self._active_limit:   # 活动目标 ≤8(F047 边界)</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>                &quot;advice&quot;: f&quot;活动目标已达 {self._active_limit} 个上限;&quot;</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                          f&quot;请先完成/放弃旧目标&quot;, &quot;active&quot;: self._nondone()})</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        sess = self._require_session()</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        desc = text.strip()</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        gid = self._alloc_gid()</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        # 事件先落:状态机只认事件(INV-01);seq/actor 由框架打</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        env = await sess.append(&quot;goal.created&quot;,</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>                                {&quot;goal_id&quot;: gid, &quot;desc&quot;: desc,</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                                 &quot;task_id&quot;: task_id}, actor=&quot;agent&quot;)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        g = Goal(id=gid, desc=desc, status=&quot;active&quot;, task_id=task_id,</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>                 created_seq=env.seq)</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        self._goals[gid] = g                    # 事件落定 → 注册(created_seq=事件 seq)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        self._touch_activity()</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        return g</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code></code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>    async def goal_update(self, goal_id: str, *, note: Optional[str] = None,</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                          status: Optional[str] = None,</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>                          progress: Optional[float] = None) -&gt; None:</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        &quot;&quot;&quot;改 note/显式切状态(paused↔active)/报进度,统一写 goal.updated。</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code></code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        done 目标不可再 updated(EVENT-SCHEMA 词表校验 → BUSY);status 只收</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        词表值(active/paused/abandoned;done 只能经核对完成写入);无变更项</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        幂等返回不写事件。</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        g = self._get(goal_id)                  # 不存在 → EVT-101(前必有 created)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        if g.status == &quot;done&quot;:                  # completed 后不可再 updated</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>                &quot;hint&quot;: f&quot;目标 {goal_id} 已完成,不可再更新&quot;,</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>                &quot;advice&quot;: &quot;完成态不可逆;新需求请新建目标&quot;})</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        if status is not None and status not in (&quot;active&quot;, &quot;paused&quot;, &quot;abandoned&quot;):</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>            raise_code(&quot;EVT-100&quot;, hint=f&quot;非法 goal 状态 {status}&quot;,</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>                       advice=&quot;状态 ∈ active/paused/done/abandoned(词表四值;&quot;</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>                              &quot;done 只能经核对完成写入)&quot;)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        if note is None and status is None and progress is None:</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>            return                              # 幂等:无变更项不写事件</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        # 全量快照载荷:updated 事件携带目标完整状态(status/note/progress)。原因:</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        # payload 模型 canonical 化恒补齐全部键(缺省 None),rebuild 若按&quot;缺键保留&quot;</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>        # 语义会拿显式 None 抹掉旧值——快照语义保证回放逐字段一致(INV-01)。</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        new_status = status if status is not None else g.status</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        new_note = note if note is not None else g.note</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        new_progress = (_clamp01(progress) if progress is not None else g.progress)</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        payload: dict[str, Any] = {&quot;goal_id&quot;: goal_id, &quot;status&quot;: new_status,</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>                                   &quot;note&quot;: new_note, &quot;progress&quot;: new_progress}</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        sess = self._require_session()</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        await sess.append(&quot;goal.updated&quot;, payload, actor=&quot;agent&quot;)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        # 事件落定 → 内存对齐到载荷(INV-01:内存 ≡ 事件派生)</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        g.status = new_status</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        g.note = new_note</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        g.progress = new_progress</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        self._touch_activity()</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code></code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>    async def goal_check(self, goal_id: str, *,</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                         progress: Optional[float] = None,</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                         checked: Optional[list[str]] = None,</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>                         claim_done: bool = False) -&gt; GoalCheck:</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>        &quot;&quot;&quot;核对(打勾/报进度/完成声明)。</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code></code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        checked 项置 done、报 progress;claim_done=True 时先 verify_completion</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        验证据:过核 → 写 goal.completed(actor=system);不过 → 返回追问文本,</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        状态不变(未完成却说完成 → 追问一次,F047 边界,不落 completed)。</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>        g = self._get(goal_id)</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        if g.status == &quot;done&quot;:                  # 幂等:已完成核对直接确认返回</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>            return GoalCheck(goal_id, ok=True, claim_done=True, missing=[],</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                             reply=&quot;该目标已完成&quot;)</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        sess = self._require_session()</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>        if checked:</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>            done_set = set(checked)</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>            for c in g.checklist:               # 打勾(子目标核对,瞬态工作数据)</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>                if c.text in done_set:</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>                    c.done = True</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>        if progress is not None:                # 报进度(clamp;claim 前先入内存供核对)</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>            g.progress = _clamp01(progress)</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        if not claim_done:</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>            await sess.append(&quot;goal.updated&quot;,</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>                              {&quot;goal_id&quot;: goal_id, &quot;status&quot;: g.status,</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>                               &quot;note&quot;: g.note, &quot;progress&quot;: g.progress},</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>                              actor=&quot;agent&quot;)</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>            self._touch_activity()</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>            return GoalCheck(goal_id, ok=True, claim_done=False, missing=[],</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>                             reply=f&quot;已记录进度 {g.progress:.0%}&quot;)</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        # claim_done:带进度先补落一条 updated(INV-01:进度变化可回放),再验证据</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        if progress is not None:</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>            await sess.append(&quot;goal.updated&quot;,</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>                              {&quot;goal_id&quot;: goal_id, &quot;status&quot;: g.status,</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>                               &quot;note&quot;: g.note, &quot;progress&quot;: g.progress},</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>                              actor=&quot;agent&quot;)</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        verdict = self.verify_completion(g)     # 声称完成 → 先过核对(纯函数)</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        if not verdict.ok:                      # 证据不足:追问一次,不落 completed</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>            self._touch_activity()</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>            return GoalCheck(goal_id, ok=False, claim_done=True,</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>                             missing=verdict.missing,</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>                             reply=f&quot;你说已完成,但核对项未过:&quot;</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>                                   f&quot;{&#x27;、&#x27;.join(verdict.missing)};&quot;</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>                                   f&quot;逐条核对(goal check)后再报完成。&quot;)</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        await self.mark_completed(g)            # 过核 → completed(actor=system)</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        return GoalCheck(goal_id, ok=True, claim_done=True, missing=[],</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>                         reply=&quot;核对通过,目标已完成&quot;)</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code></code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>    def verify_completion(self, goal: Goal) -&gt; CompletionVerdict:</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>        &quot;&quot;&quot;完成核对(纯函数,S-1 防伪闸):progress≥1.0 且 checklist 全 done 且</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>        关联 task 无 failed;返回 ok 与 missing 明细。零写副作用,供 goal_check</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>        与测试直接调用;ok=False → 追问(不落 completed)。</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        missing: list[str] = []</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>        if goal.progress &lt; 1.0:                 # 进度未满</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>            missing.append(f&quot;进度仅 {goal.progress:.0%}&quot;)</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>        for c in goal.checklist:                # 子目标逐条核对(PRD F047)</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>            if not c.done:</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>                missing.append(f&quot;未打勾: {c.text}&quot;)</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>        if goal.task_id and self._task_failed(goal.task_id):</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>            missing.append(f&quot;关联任务 {goal.task_id} 未成功结束&quot;)</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>        return CompletionVerdict(ok=not missing, missing=missing)</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code></code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>    async def mark_completed(self, goal: Goal) -&gt; None:</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        &quot;&quot;&quot;框架侧完成(仅供核对过核后调用):写 goal.completed(actor 恒 system)。</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code></code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>        完成事实只能由框架核对后落事件;agent/用户路径只能经 goal_check</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        (claim_done) 间接触发,无直接公开调用口之外的入口(S-1)。</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>        if goal.status == &quot;done&quot;:               # 幂等(重复过核无害)</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>            return</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>        sess = self._require_session()</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>        await sess.append(&quot;goal.completed&quot;,</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>                          {&quot;goal_id&quot;: goal.id, &quot;status&quot;: &quot;done&quot;},</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>                          actor=&quot;system&quot;)       # actor=system 硬编码(S-1)</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        goal.status = &quot;done&quot;</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>        self._touch_activity()</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code></code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>    async def goal_abandon(self, goal_id: str, *, reason: str = &quot;&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>        &quot;&quot;&quot;放弃目标:写 goal.updated{status:abandoned}(词表事件,非新类型)。</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code></code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>        abandoned 目标释放活动名额并进入 compaction 可折叠集;终态幂等返回。</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>        g = self._get(goal_id)</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>        if g.status in (&quot;done&quot;, &quot;abandoned&quot;):   # 终态幂等返回</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>            return</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>        sess = self._require_session()</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>        note = reason or None</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>        await sess.append(&quot;goal.updated&quot;,</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>                          {&quot;goal_id&quot;: goal_id, &quot;status&quot;: &quot;abandoned&quot;,</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>                           &quot;note&quot;: note, &quot;progress&quot;: g.progress},</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>                          actor=&quot;agent&quot;)        # 快照载荷:model canonical 恒补 progress</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>        g.status = &quot;abandoned&quot;                  # 事件落定 → 内存对齐(INV-01)</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        g.note = note                           # 与载荷一致(reason 空则清旧 note)</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>        self._touch_activity()</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code></code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>    # ============================================================ 看板/渲染</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>    def list_active(self) -&gt; list[Goal]:</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>        &quot;&quot;&quot;活动目标看板源:active+paused,按 created_seq 升序;≤8 由 create 保证。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>        return [g for g in sorted(self._goals.values(), key=lambda x: x.created_seq)</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>                if g.status in (&quot;active&quot;, &quot;paused&quot;)]    # done/abandoned 不入板</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code></code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>    def render_goal_segment(self, *, max_tokens: int = 800) -&gt; str:</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>        &quot;&quot;&quot;活动目标板 → 系统提示词段(F010 每次 LLM 调用携带;软锚定不硬限制)。</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code></code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>        无活动目标返回空串(零开销不注入);超长按 max_tokens 截断防超窗。</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>        acts = self.list_active()</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>        if not acts:</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>            return &quot;&quot;</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>        lines = [&quot;&lt;goals&gt; 当前活动目标(软提醒:汇报完成必须先过核对):&quot;]</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>        for g in acts:</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>            pend = [c.text for c in g.checklist if not c.done]   # 待核子目标</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>            lines.append(f&quot;- [{g.id}] {g.desc} | 进度 {g.progress:.0%}&quot;</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>                         f&quot; | 待核:{&#x27;,&#x27;.join(pend) if pend else &#x27;无&#x27;}&quot;</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>                         + (f&quot; | 关联任务 {g.task_id}&quot; if g.task_id else &quot;&quot;))</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>        return &quot;\n&quot;.join(lines)[:max_tokens]    # 截断防超窗(余量 ≥25% 由 F058 控)</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code></code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>    # ============================================================ 漂移判定</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>    def round_end(self, events: list[Any]) -&gt; None:</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>        &quot;&quot;&quot;agent-loop 每轮末喂本轮事件:轮号 +1 后扫 goal.* / 带 goal 溯源任务。</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code></code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>        轮内出现 goal 关联活动(goal.* 事件或 task.enqueued 携带 meta.goal_id)</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>        → _last_goal_round = 本轮(静默轮计数清零);否则静默轮累计。</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>        self._round_no += 1</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>        for e in events:</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>            t = getattr(e, &quot;type&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>            p = getattr(e, &quot;payload&quot;, {}) or {}</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>            if t.startswith(&quot;goal.&quot;) or (t == &quot;task.enqueued&quot;</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>                                         and (p.get(&quot;meta&quot;) or {}).get(&quot;goal_id&quot;)):</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>                self._last_goal_round = self._round_no   # 本轮有目标活动</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code></code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>    def drift_reminder(self, *, quiet_rounds: int = 3) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>        &quot;&quot;&quot;离题提醒(确定性规则):有活动目标但连续 quiet_rounds(≥3)轮无任何</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>        goal 关联活动 → 返回提醒文本(注入下一轮系统提示,软提示不阻断);</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>        否则 None。会话从未有目标活动 → 不判定不提醒。</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>        if not self.list_active():              # 无活动目标:不判定不提醒</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>            return None</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>        if self._last_goal_round is None:       # 会话从未有目标活动:不判定</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>            return None</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>        if self._round_no - self._last_goal_round &gt;= quiet_rounds:</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>            return (&quot;提示:已连续数轮未推进任何活动目标(goal 板见上)。&quot;</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>                    &quot;若已偏离原目标,请说明理由或更新/放弃目标,避免跑偏。&quot;)</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>        return None</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code></code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>    # ============================================================ 事件溯源重建</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>    @classmethod</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>    def rebuild_from_events(cls, events: list[Any]) -&gt; &quot;GoalManager&quot;:</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>        &quot;&quot;&quot;事件溯源重建(INV-01):顺序重放 goal.created/updated/completed 重建</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>        注册表(seq 升序,只读不写回)——崩溃恢复/会话恢复后内存态与日志一致。</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code></code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>        孤儿 updated/completed(前无 created)属日志损坏,由 EVENT-SCHEMA 校验层</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>        拦截;此处防御性跳过并告警,重放不中断。created_seq = 事件 seq;</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>        g-N 计数器按现存 id 续号(折叠部分旧目标后新建仍单调唯一)。</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>        m = cls()                               # 全新空注册表(无 session:只读投影)</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>        for e in events:                        # 顺序重放(seq 升序)</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>            p = getattr(e, &quot;payload&quot;, {}) or {}</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>            if e.type == &quot;goal.created&quot;:</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>                gid = p[&quot;goal_id&quot;]</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code>                m._goals[gid] = Goal(id=gid, desc=p.get(&quot;desc&quot;) or &quot;&quot;,</code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>                                     task_id=p.get(&quot;task_id&quot;), status=&quot;active&quot;,</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>                                     created_seq=e.seq)</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>                m._bump_gid_counter(gid)</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>            elif e.type == &quot;goal.updated&quot;:</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>                g = m._goals.get(p.get(&quot;goal_id&quot;))</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>                if g is None:</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>                    log.warning(&quot;orphan goal.updated seq=%s&quot;, e.seq)</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>                    continue                    # 防御跳过,不中断重放</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>                g.progress = p.get(&quot;progress&quot;, g.progress)</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>                g.status = p.get(&quot;status&quot;, g.status)     # paused/abandoned 迁移</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>                g.note = p.get(&quot;note&quot;, g.note)</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>            elif e.type == &quot;goal.completed&quot;:    # actor=system;终态</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>                g = m._goals.get(p.get(&quot;goal_id&quot;))</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>                if g is not None:</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>                    g.status = &quot;done&quot;</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>        return m                                # 内存态 ≡ 日志派生态(INV-01)</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code></code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code></code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>__all__ = [</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>    &quot;GoalManager&quot;, &quot;Goal&quot;, &quot;CheckItem&quot;, &quot;GoalCheck&quot;, &quot;CompletionVerdict&quot;,</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>    &quot;GoalStatus&quot;,</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

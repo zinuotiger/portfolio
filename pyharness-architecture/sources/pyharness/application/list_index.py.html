@@ -1,0 +1,148 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/list_index.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/list_index.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 148 行</span></nav><main class="wrap source-page"><h1>pyharness/application/list_index.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：d4d665cad15056f9453f4c26ca382d1176dd0ac7<br>SHA-256（内容校验）：33df632013df3b4c5c3efc9d8b7291b5d21c305b529c85c5e50b9d34e7d08fa9</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 6 个类、函数与方法</summary><ul><li><a href="#L19">ListIndex（类） · L19–L148</a><ul><li><a href="#L20">ListIndex.__init__（方法） · L20–L24</a></li><li><a href="#L26">ListIndex.connect（方法） · L26–L38</a></li><li><a href="#L40">ListIndex.refresh（异步方法） · L40–L44</a></li><li><a href="#L46">ListIndex._refresh（异步方法） · L46–L109</a></li><li><a href="#L111">ListIndex.page（方法） · L111–L148</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Disposable tenant-local list projections. SessionLog remains the fact source.</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Only changed sessions are replayed. Pages are selected in SQLite before JSON</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>decoding; every request supplies a fresh authorized session set. Cursors are</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>keyset positions, so deleting their anchor does not skip the following row.</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import base64</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import asyncio</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>import hashlib</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>import json</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>import sqlite3</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from contextlib import contextmanager</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from pyharness.core.sandbox import fail</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>class ListIndex:</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    def __init__(self, path):</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        self.path = path</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        self.scope = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:24]</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        self.metrics = {}</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        self._refresh_lock = asyncio.Lock()</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    @contextmanager</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    def connect(self):</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        self.path.parent.mkdir(parents=True, exist_ok=True)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        db = sqlite3.connect(self.path)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        try:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            db.execute(&#x27;CREATE TABLE IF NOT EXISTS sources (sid TEXT PRIMARY KEY, stamp TEXT NOT NULL)&#x27;)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>            db.execute(&#x27;CREATE TABLE IF NOT EXISTS rows (kind TEXT, id TEXT, sid TEXT, position TEXT, payload TEXT, PRIMARY KEY(kind,id))&#x27;)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            db.execute(&#x27;CREATE INDEX IF NOT EXISTS list_order ON rows(kind,position,id)&#x27;)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            db.execute(&#x27;CREATE INDEX IF NOT EXISTS list_source ON rows(sid)&#x27;)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            yield db</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            db.commit()</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        finally:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            db.close()</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code></code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    async def refresh(self, service):</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        # A single service owns this derived index. Never let a second request</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        # synchronously wait for SQLite while its writer awaits session repair.</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        async with self._refresh_lock:</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>            return await self._refresh(service)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    async def _refresh(self, service):</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        sessions = (await service.list_sessions())[&#x27;sessions&#x27;]</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        authorized = {r[&#x27;sid&#x27;] for r in sessions}</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        self.metrics = dict(scanned_sessions=0, projection_count=0,</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>                            cache_hit=0, cache_miss=0, index_hit=0, returned_rows=0,</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                            checked_sessions=len(sessions))</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        from pyharness.application.platform_projection import project</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        from pyharness.application.platform_models import ArtifactRecord</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        # Load source facts before opening any SQLite write transaction. Failed</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        # or cancelled reads leave the previous index intact and release the gate.</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        with self.connect() as db:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            prior_stamps = dict(db.execute(&#x27;SELECT sid,stamp FROM sources&#x27;))</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        changed = []</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        for row in sessions:</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            sid = row[&#x27;sid&#x27;]</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            loaded = service._logs.get(sid)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            seq = loaded.stats()[&#x27;seq&#x27;] if loaded else row.get(&#x27;seq&#x27;)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            queue = service._queues.get(sid)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            live = []</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            if queue:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                status = queue.status()</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                live = [status.running, *status.waiting]</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            stamp = json.dumps([row.get(&#x27;updated&#x27;),row.get(&#x27;size_bytes&#x27;),seq,repr(live)])</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            if prior_stamps.get(sid) == stamp:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                self.metrics[&#x27;cache_hit&#x27;] += 1</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>                continue</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            self.metrics[&#x27;cache_miss&#x27;] += 1</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            self.metrics[&#x27;scanned_sessions&#x27;] += 1</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            log = await service.require_session(sid)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            events = list(log.events_after(0))</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            stamp = json.dumps([row.get(&#x27;updated&#x27;),row.get(&#x27;size_bytes&#x27;),log.stats()[&#x27;seq&#x27;],repr(live)])</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            changed.append((sid,stamp,events,live))</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        if changed:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            authorized.intersection_update(r[&#x27;sid&#x27;] for r in (await service.list_sessions())[&#x27;sessions&#x27;])</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        with self.connect() as db:</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            for sid, in db.execute(&#x27;SELECT sid FROM sources&#x27;).fetchall():</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                if sid not in authorized:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                    db.execute(&#x27;DELETE FROM sources WHERE sid=?&#x27;, (sid,))</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                    db.execute(&#x27;DELETE FROM rows WHERE sid=?&#x27;, (sid,))</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            for sid,stamp,events,live in changed:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                if sid not in authorized:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                    continue</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                view = project(sid, events, live, trace_limit=0)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                self.metrics[&#x27;projection_count&#x27;] += 1</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                db.execute(&#x27;DELETE FROM rows WHERE sid=?&#x27;, (sid,))</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                steps = {}</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                for step in view[&#x27;steps&#x27;]:</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                    steps.setdefault(step[&#x27;run_id&#x27;], []).append(step)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                for run in view[&#x27;runs&#x27;]:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                    payload = {**run, &#x27;_steps&#x27;:steps.get(run[&#x27;run_id&#x27;], [])}</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                    position = run[&#x27;queued_at&#x27;] or run[&#x27;started_at&#x27;] or &#x27;&#x27;</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                    db.execute(&#x27;INSERT INTO rows VALUES (?,?,?,?,?)&#x27;, (&#x27;runs&#x27;,run[&#x27;run_id&#x27;],sid,position,json.dumps(payload)))</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                artifacts = {}</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                for event in events:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                    if event.type == &#x27;platform.artifact&#x27;:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                        record = ArtifactRecord.model_validate(event.payload[&#x27;record&#x27;])</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                        if event.payload[&#x27;action&#x27;] == &#x27;deleted&#x27;:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                            artifacts.pop(record.artifact_id, None)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                        else:</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                            artifacts[record.artifact_id] = record.model_dump()</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                for ident, record in artifacts.items():</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                    db.execute(&#x27;INSERT INTO rows VALUES (?,?,?,?,?)&#x27;, (&#x27;artifacts&#x27;,ident,sid,ident,json.dumps(record)))</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                db.execute(&#x27;INSERT OR REPLACE INTO sources VALUES (?,?)&#x27;, (sid,stamp))</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        return authorized</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    def page(self, kind, authorized, *, cursor=None, limit=None):</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        if limit is not None and (type(limit) is not int or not 1 &lt;= limit &lt;= 500):</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            fail(&#x27;invalid_page_limit&#x27;)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        after = None</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        if cursor is not None:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            try:</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                if not isinstance(cursor,str) or len(cursor)&gt;4096:</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                    raise ValueError()</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                scope, cursor_kind, sid, position, ident = json.loads(base64.urlsafe_b64decode(cursor.encode()))</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                if scope != self.scope or cursor_kind != kind or sid not in authorized or not all(isinstance(v,str) for v in (position,ident)):</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                    raise ValueError()</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                after = position, ident</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            except (ValueError, TypeError, UnicodeError):</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                fail(&#x27;invalid_page_cursor&#x27;)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        descending = kind == &#x27;runs&#x27;</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        with self.connect() as db:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>            db.execute(&#x27;CREATE TEMP TABLE authorized (sid TEXT PRIMARY KEY)&#x27;)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            db.executemany(&#x27;INSERT INTO authorized VALUES (?)&#x27;, ((sid,) for sid in authorized))</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            predicate = &#x27;kind=? AND sid IN (SELECT sid FROM authorized)&#x27;</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            total = db.execute(&#x27;SELECT count(*) FROM rows WHERE &#x27;+predicate,(kind,)).fetchone()[0]</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            args = [kind]</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            if after:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                predicate += &#x27; AND (position,id) &#x27;+(&#x27;&lt;&#x27; if descending else &#x27;&gt;&#x27;)+&#x27; (?,?)&#x27;</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                args.extend(after)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            order = &#x27;DESC&#x27; if descending else &#x27;ASC&#x27;</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            sql = &#x27;SELECT id,sid,position,payload FROM rows WHERE &#x27;+predicate+&#x27; ORDER BY position &#x27;+order+&#x27;,id &#x27;+order</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            if limit is not None:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                sql += &#x27; LIMIT ?&#x27;</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                args.append(limit+1)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            records = db.execute(sql,args).fetchall()</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        more = limit is not None and len(records)&gt;limit</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        records = records[:limit] if limit is not None else records</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        next_cursor = None</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        if records and more:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            ident,sid,position,_ = records[-1]</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            next_cursor = base64.urlsafe_b64encode(json.dumps([self.scope,kind,sid,position,ident]).encode()).decode()</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        self.metrics.update(index_hit=1,returned_rows=len(records))</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        return [json.loads(r[3]) for r in records], dict(total=total,truncated=more,cursor=next_cursor)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

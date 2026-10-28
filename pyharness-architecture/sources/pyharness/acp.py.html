@@ -1,0 +1,458 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/acp.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/acp.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 458 行</span></nav><main class="wrap source-page"><h1>pyharness/acp.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：6731e6a3d776214b82733275a60c88f52049a8a9<br>SHA-256（内容校验）：0833e48f3fb55daba086873306907576f2065175c8435f301f0cc48438c4f8a8</p><p><a href="../../architecture-detailed.html?node=acp">Agent Client Protocol Bridge（代理客户端协议桥）</a> · <a href="../../architecture-detailed.html?node=acp_transport">Standard Input Output Transport（标准输入输出协议传输）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 12 个类、函数与方法</summary><ul><li><a href="#L89">_ensure_engine_queue（异步函数） · L89–L151</a></li><li><a href="#L154">cmd_initialize（异步函数） · L154–L185</a></li><li><a href="#L188">_chat_summary（函数） · L188–L216</a></li><li><a href="#L219">cmd_chat（异步函数） · L219–L268</a></li><li><a href="#L271">cmd_approve（异步函数） · L271–L302</a></li><li><a href="#L305">cmd_read_events（异步函数） · L305–L336</a></li><li><a href="#L340">notify（异步函数） · L340–L348</a></li><li><a href="#L351">dispatch（异步函数） · L351–L379</a></li><li><a href="#L386">serve（异步函数） · L386–L428</a></li><li><a href="#L431">AcpBridge（类） · L431–L450</a><ul><li><a href="#L438">AcpBridge.__init__（方法） · L438–L440</a></li><li><a href="#L442">AcpBridge.serve（异步方法） · L442–L450</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/acp.py — ACP 自动化桥:JSON-RPC 2.0 over stdio (specs/acp.py.md 契约;阶段 6)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F066(ACP 桥,DSH ACP 的 Python 等价)· F064(CLI acp 子命令装配面)· ADR-005(单进程)。</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>形态:外部程序(IDE/脚本/桌面端)用 stdin 喂 JSON-RPC 请求行、从 stdout 读响应行的长驻进程;</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>逐行读、一次一请求**串行**处理(处理完才读下一条);协议独占 stdout(日志一律 stderr);</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>approve 允许远程人类经桥下发裁决(channel=&quot;acp:&lt;client&gt;&quot;),裁决仍走引擎 ApprovalProvider</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>(guard/预算/防重放语义引擎侧全真,桥无特权);read_events 提供游标式事件订阅(断线重连从</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>返回的 to_seq 续拉);引擎错误以 F019 码进 error.data.code,协议错误用 JSON-RPC 标准码。</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>方法面:initialize(能力协商/会话绑定)/ chat(结构化驱动,wait 默认 true 阻塞)/ approve(远程</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>人类裁决)/ read_events(游标订阅)/ shutdown(净退 0);无 id 请求 = 通知,不响应(仅告警日志,</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>shutdown 通知置净退旗标)。忙拒:chat 进行中再来 chat → -32000(data.code=BUSY)。</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>偏离说明(契约=specs/acp.py.md;以下为与既有实现/规格冲突处的取舍,均列理由,与 commands.py/</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>task_queue.py 同款先例,已入 docstring 供审查):</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>1. 会话门面未落地:伪码假定 ctx.session 提供 async create()/open_session(sid)(阶段 6 cli</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>   bootstrap 尚未实现;仓库既有真面 = core/session.SessionLog + 模块函数 open_session(sid,</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>   persistence))→ 本实现按鸭子类型支持两种注入形状:(a) 门面(有 open_session/create)→</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>   委托(未来 bootstrap 注入后与伪码一致);(b) ctx.session 即已绑定会话日志(sid 匹配)→ 直用;</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>   两者皆无 → raise EVT-106 明确报错,**绝不静默自建会话**(防 S-1&quot;伪造已执行&quot;)。</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>2. append 调用面:伪码 `ctx.session.append(&quot;user.message&quot;, content=text, ...)` 为键参直传假想</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>   面;真实 SessionLog.append(type, payload: dict, *, actor, ...) 为五步校验链唯一写口 →</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   本实现传 payload dict {&quot;content&quot;: text}(payload 模型 EVENT-SCHEMA §3.2 权威)。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>3. TaskResult 聚合:伪码 res.reason/res.summary()/res.events_of() 为假想队列面;真实</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   TaskQueue.wait_for 返回 TaskResult(ok/code/summary/duration_ms)→ reason 映射</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>   complete/cancelled/error/queued;guard.rejected/approval.* 清单与终局文本按 task_id 从</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>   会话日志派生(read_events 同真源,INV-02 无第二份状态)。</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>4. BUSY 码未登记(errors.register_default_codes 无 &quot;BUSY&quot;;task_queue.py 同款先例直接构造</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   PyHError(&quot;BUSY&quot;))且 raise_code 会把未登记码改写为 CYC-999 → 本实现直接构造 PyHError</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   (&quot;BUSY&quot;),dispatch 特判 e.code == &quot;BUSY&quot; → -32000(data.code=BUSY),兑现 spec 异常表</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>   (并发 chat → -32000 而非 -32603)。</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>5. 通知副作用:伪码&quot;其余方法通知仅执行副作用(如 chat 通知=丢结果)&quot;与伪码本体(仅日志 +</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   shutdown 旗标)冲突 → 按伪码本体:通知一律只记告警日志,chat 通知**不触发引擎副作用**</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>   (无 id 无法回报结果,宁丢请求不丢结果)。</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>6. 事件信封序列化:真实 Envelope 无 envelope_dict() 面 → model_dump(exclude_none=True)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>   (pydantic v2 官方序列化口,字段与 EVENT-SCHEMA §2.1 十字段一致)。</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>7. approve 等待:伪码 await ctx.approval.approve(...);真实 ApprovalProvider.approve/deny 为</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   **同步**裁决入口(裁决事件经其后台任务强同步落盘,与 CLI prompt_approval 同款语义)→</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>   本实现同步/异步兼容(inspect.isawaitable 判别),返回即&quot;已受理&quot;;APR-503/GRD-403 等引擎</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>   错同步上抛走 engine_error 路径。approval.granted/denied 落盘与响应先后由 provider 后台</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>   任务保证(与 cli 语义一致,非桥可改)。</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>8. repair 前置未落地:伪码 ensure_repaired(ctx, sid)(pyharness.repair 模块尚不存在)→ 本实现</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>   预留 ctx.repair.ensure_repaired(sid) 扩展点,未装配即跳过(PERS-201 坏行仍由 open_session</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>   回放记跳隔离,不阻断;真装配注入后自动生效)。</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>9. 忙拒可达性:serve 串行读循环下第二请求不可能在首 chat 完成前被读到 → st.busy 为防御性</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>   不变量(并发/嵌入调用方经 dispatch 直入时生效),非串行主循环路径;单测经 st.busy 预置覆盖。</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>10. 会话同柄假设:桥内 append/队列/事件读取共用同一会话实例(st._bound_log 缓存,INV-03 缓存</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    一致防双实例漂移);多会话切换的队列重绑属未来 bootstrap 装配职责,不在桥内越权。</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code></code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>import asyncio</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>import inspect</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>import json</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>import logging</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>import os</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>import sys</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>from typing import Any, Optional, TextIO, Union</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code></code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code># ------------------------------------------------------------ 协议常量</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code></code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code># 热路径引擎码:错误只留 code+advice,不加 detail(ADR-011 远端最小化)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code># 疑似敏感键名(redact 命中即打码,INV-09 不泄密)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code># ------------------------------------------------------------ 数据结构</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code># ------------------------------------------------------------ 流式 IO 辅助</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code># ------------------------------------------------------------ 响应构造</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code></code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code># ------------------------------------------------------------ 会话门面适配</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code># ------------------------------------------------------------ 方法实现</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>from pyharness.acp_protocol import (log, PROTOCOL_VERSION, BRIDGE_METHODS, MAX_EVENT_LIMIT, DEFAULT_EVENT_LIMIT, _HOT_CODES, _SENSITIVE_KEY_HINTS, JsonRpcRequest, AcpState, _write_line, _readline_async, error_resp, _redact, engine_error, _is_id_type, parse_request)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>from pyharness.acp_sessions import (_maybe_await, _create_session, _open_session, _ensure_bound, _closed_of, _last_seq_of, _iter_log, _env_dict, _ensure_repaired, _set_channel, _engine_model, _task_enqueued_seq, close_owned_runtimes)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>async def _ensure_engine_queue(ctx: Any, log_: Any, sid: str) -&gt; Any:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    &quot;&quot;&quot;ACP 会话队列惰性装配:轻量 ctx(无队列/异会话队列)时接真实引擎。</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    原 cli.acp 只注入轻量门面,队列/runner 从未接线;这里把 engine 装配</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    原语搬到 ACP chat 前,使 initialize → chat 也能走真实 AgentLoop。</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    cfg = getattr(ctx, &quot;settings&quot;, None) or getattr(ctx, &quot;config&quot;, None)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    runtimes = getattr(ctx, &#x27;_acp_runtimes&#x27;, None)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    if runtimes is None:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        runtimes = ctx._acp_runtimes = {}</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    if sid in runtimes:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        runtime = runtimes[sid]</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        for name in (&#x27;engine_spine&#x27;, &#x27;task_queue&#x27;, &#x27;approval&#x27;, &#x27;guard&#x27;, &#x27;scope&#x27;, &#x27;llm&#x27;, &#x27;tools&#x27;, &#x27;governance&#x27;):</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            setattr(ctx, name, getattr(runtime, name))</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        return runtime.task_queue</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    q = getattr(ctx, &quot;task_queue&quot;, None)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    if q is not None and (not hasattr(q, &quot;_session&quot;)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                          or getattr(q, &quot;_session&quot;, None) is log_):</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        return q</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    if cfg is None:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        return q</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    from pathlib import Path</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    from pyharness import engine as _eng</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    storage = getattr(ctx, &quot;storage&quot;, None)</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    sessions_dir = getattr(storage, &quot;sessions_dir&quot;, None)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    if not sessions_dir:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        try:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            sessions_dir = cfg.storage.sessions_dir</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        except Exception:                    # noqa: BLE001 配置缺键:不装配</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            return q</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    import copy</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    runtime = copy.copy(ctx)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    runtime.session = log_</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    runtime.engine_spine = None</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    runtime.task_queue = None</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    if getattr(ctx, &#x27;llm_runtime&#x27;, None) is None:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        from pyharness.core.llm import LLMRuntime</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        ctx.llm_runtime = LLMRuntime()</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        ctx._acp_owns_llm = True</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    runtime.llm_runtime = ctx.llm_runtime</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    runtimes[sid] = runtime</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    session_cfg = cfg.model_copy(deep=True) if hasattr(cfg, &#x27;model_copy&#x27;) else cfg</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    try:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        await _eng.attach_engine_to_ctx(</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            runtime, session_cfg, log_=log_,</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            sessions_dir=Path(str(sessions_dir)).expanduser(),</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            bus=getattr(ctx, &quot;bus&quot;, None),</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            store=getattr(log_, &quot;_persistence&quot;, None),</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            # GAP-11:ACP 桥即人类通道。``_set_channel`` 已在 bootstrap 期写入</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            # ``ctx.channel = &quot;acp:&lt;client_id&gt;&quot;``;此处把它**声明给引擎**(spine →</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            # agent ctx),否则治理决策会 APR-503 fail-closed。字段缺失时传 None =</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            # 显式&quot;无人类通道&quot;语义(与&quot;从未声明&quot;是两件事)。</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            channel=getattr(ctx, &quot;channel&quot;, None))</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    except BaseException as primary:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        try:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            if runtime.engine_spine is not None: await runtime.engine_spine.close()</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            runtimes.pop(sid, None)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        except BaseException as secondary:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            primary.add_note(f&#x27;ACP initialization cleanup failed: {type(secondary).__name__}&#x27;)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        raise</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    for name in (&#x27;engine_spine&#x27;, &#x27;task_queue&#x27;, &#x27;approval&#x27;, &#x27;guard&#x27;, &#x27;scope&#x27;, &#x27;llm&#x27;, &#x27;tools&#x27;, &#x27;governance&#x27;):</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        setattr(ctx, name, getattr(runtime, name))</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    return runtime.task_queue</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code></code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code></code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>async def cmd_initialize(ctx: Any, st: AcpState, params: dict) -&gt; dict:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    &quot;&quot;&quot;能力协商(initialize):能力清单 + 会话绑定/新建 + 通道确立。</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code></code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>    sessionId 参数 → 绑定既有会话(repair 前置 → open → 终态 EVT-104 拒);</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    缺省 → 新建会话(session.created 由门面 create 落,created=True)。</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    st.cursor 复位 0(新连接游标从 0 起);ctx.channel = &quot;acp:&lt;client&gt;&quot;。</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    params = params or {}</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    sid = params.get(&quot;sessionId&quot;)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    if sid is not None and (not isinstance(sid, str) or not sid.strip()):</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        raise_code(&quot;EVT-100&quot;, field=&quot;sessionId&quot;, session_id=sid,</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                   hint=&quot;sessionId 须非空字符串(缺省则新建会话)&quot;)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    if sid:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        await _ensure_repaired(ctx, sid)      # 损坏先 repair(F060 前置)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        log_ = await _open_session(ctx, sid)  # 绑定既有(重放重建)</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        if _closed_of(log_):                  # 终态会话不可续 chat</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>            raise_code(&quot;EVT-104&quot;, session_id=sid,</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                       advice=&quot;会话已终态(session.finished);请另开新 sessionId&quot;)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        created = False</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    else:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        sid = await _create_session(ctx)      # 新建会话(created seq=1)</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        created = True</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>    st.session_id = sid</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    st.cursor = 0</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>    st._bound_log = None                      # 绑定柄下次操作惰性解析</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    _set_channel(ctx, st)                     # 桥 = 审批通道(非 headless)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    return {&quot;protocolVersion&quot;: PROTOCOL_VERSION,</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>            &quot;methods&quot;: list(BRIDGE_METHODS),</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>            &quot;events&quot;: {&quot;cursor&quot;: True},</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>            &quot;session&quot;: {&quot;id&quot;: sid, &quot;created&quot;: created},</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>            &quot;engine&quot;: {&quot;model&quot;: _engine_model(ctx),</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                       &quot;headless_channel&quot;: False}}</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code></code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code></code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>def _chat_summary(log_: Any, task_id: str, enq_seq: Optional[int],</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                  res: Any, reason: str) -&gt; dict:</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    &quot;&quot;&quot;阻塞 chat 终局摘要(偏离 3:从会话日志派生,无第二份状态)。</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code></code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    final:TaskResult.summary 优先 → 任务段内最后 agent.message/llm.response</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>    内容兜底 → 终态码文本;rejected = 段内 guard.rejected payload 清单;</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>    approvals = 段内 approval.* payload 清单(事件带 task_id 或窗口内无主事件)。</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>    after = enq_seq if enq_seq is not None else 0</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    final = res.summary if getattr(res, &quot;summary&quot;, None) else None</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>    rejected: list[dict] = []</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    approvals: list[dict] = []</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    for env in _iter_log(log_):</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        if env.seq &lt;= after:</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            continue</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        tid = env.task_id</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        if tid is not None and tid != task_id:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            continue                          # 异任务事件隔离(串行队列下少见)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        if env.type == &quot;guard.rejected&quot;:</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>            rejected.append(dict(env.payload))</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        elif env.type.startswith(&quot;approval.&quot;):</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            approvals.append(dict(env.payload))</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        elif final is None and env.type in (&quot;agent.message&quot;, &quot;llm.response&quot;):</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>            content = (env.payload or {}).get(&quot;content&quot;)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>            if content:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>                final = content               # 最后一条非空展示文本即终局</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>    if final is None:</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        final = str(getattr(res, &quot;code&quot;, None) or reason)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    return {&quot;final&quot;: final, &quot;rejected&quot;: rejected, &quot;approvals&quot;: approvals}</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code></code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code></code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>async def cmd_chat(ctx: Any, st: AcpState, params: dict) -&gt; dict:</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>    &quot;&quot;&quot;结构化驱动主方法(chat,F066):wait=true 阻塞至终态,wait=false 秒回 task_id。</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code></code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>    忙锁:st.busy 期间再来 chat → PyHError(&quot;BUSY&quot;)(dispatch 特判 -32000,偏离 4);</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>    空 text → EVT-100;会话经 sessionId 显式指定或 initialize 绑定;user.message</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>    强同步落盘(origin=&quot;acp:&lt;client&gt;&quot;,审计同 CLI)后 submit → wait_for。</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    params = params or {}</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>    if st.busy:                               # 防御性忙拒(偏离 9;并发入口生效)</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        raise PyHError(&quot;BUSY&quot;, ctx={&quot;advice&quot;:</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                                    &quot;上一条 chat 未完成;等 read_events 就绪或 wait=false&quot;})</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>    text = str(params.get(&quot;text&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    if not text:</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        raise_code(&quot;EVT-100&quot;, field=&quot;text&quot;,</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                   advice=&quot;text 必填(非空字符串)&quot;)</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>    log_, sid = await _ensure_bound(ctx, st, params.get(&quot;sessionId&quot;))</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>    append = getattr(log_, &quot;append&quot;, None)</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    if not callable(append):</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        raise_code(&quot;EVT-106&quot;, session_id=sid,</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>                   hint=&quot;会话无 append 写面(只读投影);无法发起 chat&quot;)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>    queue = await _ensure_engine_queue(ctx, log_, sid)</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>    if queue is None or not callable(getattr(queue, &quot;submit&quot;, None)):</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        raise_code(&quot;CYC-999&quot;, hint=&quot;桥未装配任务队列(ctx.task_queue.submit)&quot;)</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>    st.busy = True</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>    try:</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        # 强同步 user.message(审计同 CLI);origin 记桥通道溯源</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        await _maybe_await(append(&quot;user.message&quot;, {&quot;content&quot;: text},</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                                  actor=&quot;user&quot;, origin=f&quot;acp:{st.client_id}&quot;,</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                                  sync=True))</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        task_id = await _maybe_await(queue.submit(</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>            text, meta={&quot;channel&quot;: f&quot;acp:{st.client_id}&quot;, &quot;session_id&quot;: sid}))</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        enq_seq = _task_enqueued_seq(log_, task_id)</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        if not params.get(&quot;wait&quot;, True):      # 异步:read_events 跟进结果</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>            return {&quot;task_id&quot;: task_id, &quot;reason&quot;: &quot;queued&quot;, &quot;summary&quot;: {},</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>                    &quot;seq_range&quot;: [enq_seq, enq_seq] if enq_seq is not None else None}</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        wait_for = getattr(queue, &quot;wait_for&quot;, None)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        if not callable(wait_for):</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            raise_code(&quot;CYC-999&quot;, hint=&quot;队列未装配 wait_for;任务已入队&quot;</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>                       &quot;(任务仍会执行,结果经 read_events 消费)&quot;)</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        res = await _maybe_await(wait_for(task_id))     # 阻塞至终态(串行语义)</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        reason = (&quot;complete&quot; if res.ok else</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>                  (&quot;cancelled&quot; if getattr(res, &quot;code&quot;, None) == &quot;cancelled&quot;</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>                   else &quot;error&quot;))</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        summary = _chat_summary(log_, task_id, enq_seq, res, reason)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        hi = _last_seq_of(log_)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        seq_range = [enq_seq, hi] if enq_seq is not None else None</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        return {&quot;task_id&quot;: task_id, &quot;reason&quot;: reason,</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>                &quot;summary&quot;: summary, &quot;seq_range&quot;: seq_range}</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>    finally:</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        st.busy = False</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code></code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code></code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>async def cmd_approve(ctx: Any, st: AcpState, params: dict) -&gt; dict:</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>    &quot;&quot;&quot;远程人类审批(approve,F066):approval_id + decision 交裁决入口。</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code></code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>    by 缺省 &quot;acp:&lt;client&gt;&quot;;裁决仍走 ctx.approval 引擎裁决入口(approve/deny 同步</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>    面,偏离 7:await 兼容),guard 重入链/防重放(APR-503)/预算语义引擎侧全真,</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>    桥无特权。裁决结果事件由 provider 强同步落盘后,read_events 可读。</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>    params = params or {}</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>    aid = params.get(&quot;approval_id&quot;)</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>    decision = params.get(&quot;decision&quot;)</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>    if not isinstance(aid, int) or isinstance(aid, bool):</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        raise_code(&quot;EVT-100&quot;, field=&quot;approval_id&quot;, approval_id=aid,</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>                   hint=&quot;approval_id 须 int(审批请求事件 seq)&quot;)</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>    if decision not in {&quot;approve&quot;, &quot;deny&quot;}:</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        raise_code(&quot;EVT-100&quot;, field=&quot;decision&quot;, decision=decision,</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                   hint=&quot;decision 须 approve|deny&quot;)</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>    # 身份归属:恒用 ACP 通道身份,忽略客户端自报 by——否则客户端可传 by=&quot;cli&quot;/&quot;web&quot;</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>    # 冒充人类裁决通道,绕过审批者白名单(P2 收紧)。审计身份不可由对端指定。</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>    by = f&quot;acp:{st.client_id}&quot;</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>    provider = getattr(ctx, &quot;approval&quot;, None)</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>    runtimes = getattr(ctx, &#x27;_acp_runtimes&#x27;, {})</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>    if runtimes:</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>        sid = params.get(&#x27;sessionId&#x27;) or st.session_id</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>        runtime = runtimes.get(sid)</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        if runtime is None:</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>            raise_code(&#x27;APR-503&#x27;, reason=&#x27;approval_session_not_bound&#x27;)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        provider = runtime.approval</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>    fn = getattr(provider, decision + &#x27;_async&#x27;, None) or getattr(provider, decision, None)</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>    if not callable(fn):</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        raise_code(&quot;CYC-999&quot;, hint=&quot;桥未装配审批裁决入口(ctx.approval.approve/deny)&quot;)</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>    await _maybe_await(fn(aid, by=by))        # APR-503/GRD-403 等同步上抛</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>    return {&quot;ok&quot;: True, &quot;approval_id&quot;: aid, &quot;decision&quot;: decision}</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code></code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code></code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>async def cmd_read_events(ctx: Any, st: AcpState, params: dict) -&gt; dict:</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>    &quot;&quot;&quot;事件游标订阅(read_events):从游标读持久事件批,返回 to_seq 供断线续拉。</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code></code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>    after_seq/cursor 显式或取 st.cursor(单调推进);limit ≤500(锁死);空批</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>    from_seq=to_seq=当前游标;瞬时事件(如 llm.chunk)天然不在日志(append 拒写),</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>    本方法只给持久事件——真源派生,只追加流按 seq 序。</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>    params = params or {}</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>    log_, sid = await _ensure_bound(ctx, st, params.get(&quot;sessionId&quot;))</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>    after_raw = params.get(&quot;after_seq&quot;, params.get(&quot;cursor&quot;, st.cursor))</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>    if not isinstance(after_raw, int) or isinstance(after_raw, bool):</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        raise_code(&quot;EVT-100&quot;, field=&quot;after_seq&quot;, value=after_raw,</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>                   hint=&quot;after_seq/cursor 须 int(seq 游标)&quot;)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>    after = max(0, after_raw)</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>    try:</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        limit = int(params.get(&quot;limit&quot;, DEFAULT_EVENT_LIMIT))</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>    except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        raise_code(&quot;EVT-100&quot;, field=&quot;limit&quot;, value=params.get(&quot;limit&quot;),</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>                   hint=f&quot;limit 须 int(≤{MAX_EVENT_LIMIT})&quot;)</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>    limit = max(0, min(limit, MAX_EVENT_LIMIT))</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>    batch: list[dict] = []</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>    last = after</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>    ea = getattr(log_, &quot;events_after&quot;, None)</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>    if limit &gt; 0 and callable(ea):</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>        for env in ea(after_seq=after):       # 只追加流按 seq 序</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>            batch.append(_env_dict(env))</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>            last = env.seq</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>            if len(batch) &gt;= limit:</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>                break</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>    st.cursor = max(st.cursor, last)          # 游标只进不退(单连接单调)</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>    return {&quot;from_seq&quot;: after, &quot;to_seq&quot;: last, &quot;events&quot;: batch,</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>            &quot;has_more&quot;: len(batch) == limit and limit &gt; 0}</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code></code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code></code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code># ------------------------------------------------------------ 通知与分派</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>async def notify(ctx: Any, st: AcpState, req: JsonRpcRequest) -&gt; None:</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>    &quot;&quot;&quot;通知(无 id)处理:不响应;shutdown 通知置净退旗标(serve 尾检查退出)。</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code></code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>    其余方法通知只记告警日志,**不触发引擎副作用**(偏离 5:无 id 无法回报</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>    结果,chat 通知=结果无处安放,宁丢请求不丢结果)。</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>    log.warning(&quot;acp 收到通知(无 id),不响应: %s&quot;, req.method)</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>    if req.method == &quot;shutdown&quot;:</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>        st.notify_shutdown = True             # serve 循环检查后 return 0</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code></code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code></code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>async def dispatch(ctx: Any, st: AcpState, req: JsonRpcRequest) -&gt; dict:</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>    &quot;&quot;&quot;方法分派:四法 + shutdown;未知 → -32601;错误全走标准码(禁裸 raise 跨出)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>    m, p, rid = req.method, req.params, req.id</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>    try:</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>        if m == &quot;initialize&quot;:</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>            r = await cmd_initialize(ctx, st, p)</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        elif m == &quot;chat&quot;:</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>            r = await cmd_chat(ctx, st, p)          # 唯一长驻;锁下执行</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>        elif m == &quot;approve&quot;:</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>            r = await cmd_approve(ctx, st, p)</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>        elif m == &quot;read_events&quot;:</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>            r = await cmd_read_events(ctx, st, p)</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        elif m == &quot;shutdown&quot;:</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>            st.notify_shutdown = True               # 回响应后净退 0</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>            return {&quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;id&quot;: rid, &quot;result&quot;: {&quot;shutdown&quot;: True}}</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>        else:</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>            return error_resp(rid, -32601, &quot;Method not found&quot;, {&quot;method&quot;: m})</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>        return {&quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;id&quot;: rid, &quot;result&quot;: r}</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>    except PyHError as e:</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>        if e.code == &quot;BUSY&quot;:                        # 偏离 4:忙拒 → 标准码 -32000</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>            return error_resp(rid, -32000, &quot;Busy&quot;,</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>                              {&quot;code&quot;: &quot;BUSY&quot;, &quot;advice&quot;: e.ctx.get(&quot;advice&quot;)})</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>        return engine_error(rid, e)                 # F019 码进 data.code</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>    except asyncio.TimeoutError:</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>        return error_resp(rid, -32000, &quot;Busy/Timeout&quot;, {&quot;code&quot;: &quot;BUSY&quot;})</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>    except Exception as e:                          # noqa: BLE001 未预期兜底</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>        log.error(&quot;acp dispatch 未预期异常 method=%s&quot;, m, exc_info=True)</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        return error_resp(rid, -32603, &quot;Internal error&quot;,</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>                          {&quot;code&quot;: &quot;CYC-999&quot;, &quot;detail&quot;: f&quot;{type(e).__name__}: {e}&quot;[:300]})</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code></code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code></code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code># ------------------------------------------------------------ 行解析</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code></code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code></code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code># ------------------------------------------------------------ 主循环</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>async def serve(ctx: Any, *, client_id: Optional[str] = None,</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>                stdin: Any = None, stdout: Any = None) -&gt; int:</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>    &quot;&quot;&quot;桥主循环(F066 验收直译):逐行读 stdin,一次一请求串行,净退 0。</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code></code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>    client_id 缺省 &quot;acp:&lt;pid&gt;&quot;;stdin/stdout 缺省 sys.stdin/sys.stdout(单测注入</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>    StringIO 替身);EOF/空行 → 净退 0;shutdown(请求回响应后/通知)净退 0;</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>    OSError(stdin/stdout 断)→ 记日志退 1;空行容忍(编辑器/echo 尾随换行)。</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>    st = AcpState(client_id=client_id or f&quot;acp:{os.getpid()}&quot;)</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>    inp = stdin if stdin is not None else sys.stdin</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>    out = stdout if stdout is not None else sys.stdout</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>    try:</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>        while True:</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>            line = await _readline_async(inp)   # EOF → None → 净退 0</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>            if line is None:</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>                return 0</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>            line = line.strip()</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>            if not line:</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>                continue                        # 空行容忍</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>            req = parse_request(line, write=out)</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>            if req is None:</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>                continue                        # 协议错已回标准码</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>            if req.id is None:                  # 通知:处理不响应(推进净退旗标)</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>                await notify(ctx, st, req)</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>                if st.notify_shutdown:</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>                    return 0</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>                continue</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>            resp = await dispatch(ctx, st, req)  # 一次一请求串行</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>            _write_line(out, resp)</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>            if st.notify_shutdown:               # shutdown 请求已回响应 → 净退 0</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>                return 0</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>    except OSError as e:</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>        log.error(&quot;acp stdin/stdout 断(OSError): %s&quot;, e)</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>        return 1</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>    finally:</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>        errors = []</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>        try: await close_owned_runtimes(ctx)</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>        except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>        shutdown = getattr(getattr(ctx, &#x27;session&#x27;, None), &#x27;shutdown_all&#x27;, None)</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>        if callable(shutdown):</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>            try: await _maybe_await(shutdown())</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>            except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>        if errors: raise BaseExceptionGroup(&#x27;ACP shutdown failed&#x27;, errors)</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code></code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code></code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>class AcpBridge:</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>    &quot;&quot;&quot;外壳装配面(cli.py.md:AcpBridge(ctx, channel=&quot;acp:cli&quot;).serve())。</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code></code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>    channel 形如 &quot;acp:cli&quot;/&quot;acp:&lt;client&gt;&quot;:serve 时剥 &quot;acp:&quot; 前缀作 client_id</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>    (缺省 client_id 为 &quot;acp:&lt;pid&gt;&quot; 语义保持)。</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code></code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>    def __init__(self, ctx: Any, *, channel: Optional[str] = None) -&gt; None:</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>        self.ctx = ctx</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>        self.channel = channel</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code></code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>    async def serve(self, *, client_id: Optional[str] = None,</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>                    stdin: Any = None, stdout: Any = None) -&gt; int:</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>        &quot;&quot;&quot;委托模块 serve;未显式 client_id 时取 channel 后缀。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>        cid = client_id</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>        if cid is None and self.channel:</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>            cid = (self.channel[4:] if str(self.channel).startswith(&quot;acp:&quot;)</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>                   else str(self.channel))</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>        return await serve(self.ctx, client_id=cid,</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>                           stdin=stdin, stdout=stdout)</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code></code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code></code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>__all__ = [</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>    &quot;BRIDGE_METHODS&quot;, &quot;PROTOCOL_VERSION&quot;, &quot;JsonRpcRequest&quot;, &quot;AcpState&quot;,</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>    &quot;serve&quot;, &quot;AcpBridge&quot;, &quot;parse_request&quot;, &quot;dispatch&quot;, &quot;notify&quot;,</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>    &quot;cmd_initialize&quot;, &quot;cmd_chat&quot;, &quot;cmd_approve&quot;, &quot;cmd_read_events&quot;,</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>    &quot;engine_error&quot;, &quot;error_resp&quot;,</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

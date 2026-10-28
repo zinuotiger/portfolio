@@ -1,0 +1,170 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/cli_maintenance.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/cli_maintenance.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 170 行</span></nav><main class="wrap source-page"><h1>pyharness/cli_maintenance.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：4b4996f1a7b345656e72b384b263f2fa45a336c0<br>SHA-256（内容校验）：86814df3704899c283d6646aa5add17c026abf5e9d7b7683c93c79754cc397bb</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 6 个类、函数与方法</summary><ul><li><a href="#L13">_skill_cmd（函数） · L13–L45</a></li><li><a href="#L48">_target_cfg_path（函数） · L48–L53</a></li><li><a href="#L56">_scan_usage（函数） · L56–L101</a></li><li><a href="#L103">_budget_cmd（函数） · L103–L128</a></li><li><a href="#L130">_stats_cmd（函数） · L130–L143</a></li><li><a href="#L145">repair_cmd（异步函数） · L145–L170</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Cli maintenance: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import json</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import sys</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from typing import Optional</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness import config as config</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.cli_output import ShellCtx, _json_line, _report_dict, _report_field, log</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.cli_settings import _load_settings</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.cli_sessions import _repairable_unhealthy, _sessions_path</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>def _skill_cmd(positional: list[str], flags: dict) -&gt; int:</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    &quot;&quot;&quot;skill [name]:列本地技能包目录(离线零装配)或打印某技能正文。</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    技能库 = 仓库 skills/(内置示例)+ settings.skills.dir(用户目录);正文经</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    SkillManager.load 截断保护(超长截断)。CLI 此前只能由 LLM 调 skill.load</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    看技能,人看不到——本条给人一个只读入口(与桌面技能页同源数据)。</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    from pyharness.core.skill import SkillManager</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    settings = _load_settings(flags.get(&quot;config&quot;))</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    roots = [Path(__file__).resolve().parents[1] / &quot;skills&quot;]</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    extra = getattr(getattr(settings, &quot;skills&quot;, None), &quot;dir&quot;, None)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    if extra:</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        roots.append(Path(str(extra)).expanduser())</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    mgr = SkillManager(roots)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    name = &quot; &quot;.join(positional).strip()</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    if not name:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        items = mgr.list()</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        data = {&quot;roots&quot;: [str(r) for r in roots], &quot;count&quot;: len(items),</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>                &quot;skills&quot;: items}</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        if flags.get(&quot;json&quot;):</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            _json_line(data)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        else:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            print(f&quot;技能库({len(items)} 个):{&#x27;, &#x27;.join(str(r) for r in roots)}&quot;)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            for it in items:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                print(f&quot;  - {it[&#x27;name&#x27;]}: {it[&#x27;description&#x27;]}&quot;)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        return 0</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    skill = mgr.load(name)                       # 未知名 → SKL-901(带 advice)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    if flags.get(&quot;json&quot;):</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        _json_line(skill)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    else:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        print(f&quot;# {skill[&#x27;name&#x27;]}\n{skill[&#x27;description&#x27;]}\n目录: {skill[&#x27;dir&#x27;]}\n&quot;)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        print(skill[&quot;body&quot;])</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    return 0</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>def _target_cfg_path(flags: dict) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    &quot;&quot;&quot;config 子命令目标路径:--config 显式优先,否则 ~/.pyharness/config.yaml。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    p = flags.get(&quot;config&quot;)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    if p:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        return str(p)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    return str(Path(&quot;~/.pyharness/config.yaml&quot;).expanduser())</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>def _scan_usage(sessions_dir: Path) -&gt; dict:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    &quot;&quot;&quot;会话日志只读扫描(离线派生):逐**会话**数事件、尾部终态与 llm.usage 成本聚合。</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    单文件不可读(被占用/权限)只跳过并告警,**不中止整条离线命令**——与</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    ``_scan_unhealthy`` 同款容错(RT-02:此前一个坏文件使 budget/stats 整体</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    以 CYC-999 退出)。``sessions`` 仍记扫描面(含被跳过者),聚合值只含可读者。</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    2026-09-21 R14-3:改为按**会话**聚合(``session_data_paths`` = 轮转段 + 主文件,</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    每事件恰计一次)。此前按 ``glob(&quot;*.jsonl&quot;)`` **逐文件**计,而 ``{sid}.N.jsonl`` /</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    ``{sid}.corrupt-*`` / ``{sid}.quarantine-*`` 全被当作独立会话 ⇒ 修复备份是主文件的</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    **字节副本** ⇒ 事件与成本**重复计**,隔离档的坏行也计入事件数(实测:1 会话 → 报</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    &quot;3 个会话 / 3 事件&quot;)。终态只取**主文件**尾部(段不承载终态)。</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    from pyharness.persistence import session_data_paths, session_log_paths</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    sessions = session_log_paths(sessions_dir)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    total_events = 0</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    finished = 0</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    cost = 0.0</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    for main in sessions:</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        tail_type = &quot;&quot;</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        n = 0</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        try:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            for f in session_data_paths(main):</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                with open(f, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                    for line in fh:</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                        line = line.strip()</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                        if not line:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                            continue</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                        n += 1</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                        try:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                            ev = json.loads(line)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                        except json.JSONDecodeError:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                            continue              # 坏行不计(repair 域)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                        if f == main:             # 终态只见于主文件尾部(按值比较:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                            tail_type = ev.get(&quot;type&quot;, &quot;&quot;)   # Path(p) 非同对象)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                        if ev.get(&quot;type&quot;) == &quot;llm.usage&quot;:</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                            cost += float(</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                                (ev.get(&quot;payload&quot;) or {}).get(&quot;cost_est&quot;) or 0.0)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        except OSError as e:                      # 单会话不可读:跳过并告警,不中止</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            log.warning(&quot;budget 扫描跳过不可读会话 sid=%s why=%s&quot;, main.stem, e)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            continue</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        total_events += n</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        if tail_type == &quot;session.finished&quot;:</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            finished += 1</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    return {&quot;sessions&quot;: len(sessions), &quot;events&quot;: total_events,</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            &quot;finished&quot;: finished, &quot;cost_est&quot;: round(cost, 4)}</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code></code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>def _budget_cmd(flags: dict) -&gt; int:</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    &quot;&quot;&quot;budget 报表(离线,F032 数据):任务硬闸/月度上限(配置锁死)+ 实测成本聚合。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    settings = _load_settings(flags.get(&quot;config&quot;))</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    b = settings.budget</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    usage = _scan_usage(_sessions_path(settings))</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    data = {</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        &quot;task&quot;: {&quot;max_cost_yuan&quot;: b.task.max_cost_yuan,</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                 &quot;max_in_tokens&quot;: b.task.max_in_tokens,</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                 &quot;max_out_tokens&quot;: b.task.max_out_tokens,</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                 &quot;warn_ratio&quot;: b.warn_ratio},</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        &quot;monthly&quot;: {&quot;limit_yuan&quot;: b.monthly.limit_yuan,</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                    &quot;alert_ratio&quot;: b.monthly.alert_ratio},</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        &quot;usage&quot;: {&quot;cost_est&quot;: usage[&quot;cost_est&quot;],</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                  &quot;sessions_scanned&quot;: usage[&quot;sessions&quot;]},</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    }</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    if flags.get(&quot;json&quot;):</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        _json_line(data)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        return 0</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    lim = b.monthly.limit_yuan</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    limit_txt = f&quot;¥{lim:.2f}(未启用)&quot; if lim &lt;= 0 else f&quot;¥{lim:.2f}&quot;</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    print(f&quot;任务预算硬闸: ¥{b.task.max_cost_yuan:.2f}/任务 &quot;</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>          f&quot;(in≤{b.task.max_in_tokens:,} out≤{b.task.max_out_tokens:,} tok, &quot;</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>          f&quot;告警 {b.warn_ratio:.0%})&quot;)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    print(f&quot;月度上限: {limit_txt}(告警 {b.monthly.alert_ratio:.0%})&quot;)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    print(f&quot;实测估算: ¥{usage[&#x27;cost_est&#x27;]:.4f}({usage[&#x27;sessions&#x27;]} 个会话)&quot;)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    return 0</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code></code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>def _stats_cmd(flags: dict) -&gt; int:</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    &quot;&quot;&quot;stats 会话统计(只读派生):会话数/事件数/终态数。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    settings = _load_settings(flags.get(&quot;config&quot;))</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>    data = _scan_usage(_sessions_path(settings))</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    if flags.get(&quot;json&quot;):</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        _json_line({&quot;sessions&quot;: data[&quot;sessions&quot;], &quot;events&quot;: data[&quot;events&quot;],</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                    &quot;finished&quot;: data[&quot;finished&quot;],</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                    &quot;sessions_dir&quot;: str(_sessions_path(settings))})</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        return 0</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    print(f&quot;会话数: {data[&#x27;sessions&#x27;]}&quot;)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    print(f&quot;事件总数: {data[&#x27;events&#x27;]}&quot;)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    print(f&quot;已终态会话: {data[&#x27;finished&#x27;]}&quot;)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    print(f&quot;日志目录: {_sessions_path(settings)}&quot;)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    return 0</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>async def repair_cmd(sh: ShellCtx, sid: Optional[str] = None) -&gt; int:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    &quot;&quot;&quot;repair 子命令桥(F060):对 sid(缺省 = 自动扫描首损)执行修复管线;报告输出;</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    不可修复 → 明确报错 + 备份留存(PERS-201 上抛)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    from pyharness.repair import auto_scan, repair_session     # 惰性(偏离 7)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    if not sid:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        # R11-2:带上 db_path ⇒ 索引落后对账一并生效(此前该对账无提供者,恒不启用)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        _db = str(getattr(getattr(getattr(sh.ctx, &quot;settings&quot;, None), &quot;storage&quot;, None),</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                          &quot;db_path&quot;, &quot;&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        hits = await auto_scan(sh.ctx.storage.sessions_dir,</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                               db_path=_db or None)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        # R14-7:与启动自检同一候选筛选点(跳过活会话)—— 否则唯一&quot;待修&quot;是活会话时</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        # 整条命令直接抛 PERS-202,且够不到真正损坏的会话。</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        sid = _repairable_unhealthy(hits, sh.ctx.storage.sessions_dir)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    if not sid:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        print(&quot;[repair] 无损坏会话&quot;)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        return 0</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    interactive = sys.stdin.isatty()</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    report = await repair_session(sh.ctx, sid, interactive=interactive)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    if sh.flags.get(&quot;json&quot;):</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        _json_line(_report_dict(report, sid))</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    else:</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        print(f&quot;[repair] {sid}: fixed={_report_field(report, &#x27;fixed&#x27;)} &quot;</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>              f&quot;lost={_report_field(report, &#x27;lost&#x27;, 0)} &quot;</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>              f&quot;backup={_report_field(report, &#x27;backup_path&#x27;, &#x27;&#x27;)} &quot;</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>              f&quot;quarantined={_report_field(report, &#x27;quarantined&#x27;, 0)}&quot;)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    return 0</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

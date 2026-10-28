@@ -1,0 +1,131 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/execution_cancellation_store.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/execution_cancellation_store.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 131 行</span></nav><main class="wrap source-page"><h1>pyharness/application/execution_cancellation_store.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：bd855f711d15e933727bae99644b282bcf65878b<br>SHA-256（内容校验）：3d07ce6e4a3766eb714fabbe7ba2266bb595356ca535a39d657aff4e355b7914</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 11 个类、函数与方法</summary><ul><li><a href="#L8">ExecutionCancellationStore（类） · L8–L131</a><ul><li><a href="#L9">ExecutionCancellationStore.execution_control_for_attempt（异步方法） · L9–L27</a></li><li><a href="#L29">ExecutionCancellationStore.execution_session_stop_target（异步方法） · L29–L40</a></li><li><a href="#L42">ExecutionCancellationStore._cancellation_request（方法） · L42–L45</a></li><li><a href="#L47">ExecutionCancellationStore._cancel_target（方法） · L47–L53</a></li><li><a href="#L55">ExecutionCancellationStore._validate_execution_cancellation（方法） · L55–L65</a></li><li><a href="#L67">ExecutionCancellationStore._cancellation_summary（方法） · L67–L75</a></li><li><a href="#L77">ExecutionCancellationStore.cancel_execution（异步方法） · L77–L99</a></li><li><a href="#L101">ExecutionCancellationStore.execution_cancellation_submission（异步方法） · L101–L112</a></li><li><a href="#L114">ExecutionCancellationStore.cancellation_target（异步方法） · L114–L123</a></li><li><a href="#L125">ExecutionCancellationStore.execution_stop_target（异步方法） · L125–L131</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Immutable stop intents on the existing owner, without requiring source contents.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import time</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.execution_control_projection import ExecutionControlProjection</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.execution_contracts import CancelExecution,ExecutionCancellation</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.errors import PyHError,raise_code</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>class ExecutionCancellationStore(ExecutionControlProjection):</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    async def execution_control_for_attempt(self,project,ident,*,authorize):</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>        async with self._workspace_capture_lock(time.monotonic()):</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>            actor=authorize();resources,_=self._cancellation_state()</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>            if not resources.get(project,{}).get(&#x27;project&#x27;):raise_code(&#x27;GRD-403&#x27;,reason=&#x27;execution_control_unavailable&#x27;)</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>            attempt=self._context_owned(resources,ident,&#x27;run_attempt&#x27;,project,actor)</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>            reference=self._s05_ref(attempt,&#x27;attempt_id&#x27;,&#x27;run_attempt&#x27;)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>            rows=[r for r in resources.values() if r.get(&#x27;execution_authorization&#x27;,{}).get(&#x27;selection&#x27;,{}).get(&#x27;attempt_ref&#x27;)==reference]</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>            if len(rows)&gt;1:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;attempt_authorization_ambiguous&#x27;)</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>            execution=None;cancellation=None</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>            if rows:</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>                row=rows[0];value=row[&#x27;execution_authorization&#x27;]</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>                execution=dict(execution_id=value[&#x27;execution_id&#x27;],revision=1,digest=row[&#x27;digest&#x27;],source_seq=row[&#x27;source_seq&#x27;])</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>                self._cancel_target(resources,project,execution,actor)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>                stops=[r for r in resources.values() if r.get(&#x27;execution_cancellation&#x27;,{}).get(&#x27;execution_ref&#x27;)==execution]</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>                if len(stops)&gt;1:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;execution_stop_ambiguous&#x27;)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>                if stops:cancellation=self._cancellation_summary(resources,stops[0],actor,authorize)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>            self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>            return dict(schema_version=1,control_only=True,project_id=project,attempt_ref=reference,</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>                status=&#x27;authorized&#x27; if execution else &#x27;not_authorized&#x27;,execution_ref=execution,cancellation=cancellation)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    async def execution_session_stop_target(self,sid,*,authorize):</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        &quot;&quot;&quot;Locate existing control authority without opening private source blobs.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        async with self._workspace_capture_lock(time.monotonic()):</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>            actor=authorize();resources,_=self._cancellation_state()</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            rows=[r for r in resources.values() if r.get(&#x27;execution_authorization&#x27;,{}).get(&#x27;session_id&#x27;)==sid]</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            if len(rows)!=1:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;product_stop_unavailable&#x27;)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            row=rows[0];value=row[&#x27;execution_authorization&#x27;];project=value[&#x27;project_id&#x27;]</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            reference=dict(execution_id=value[&#x27;execution_id&#x27;],revision=1,digest=row[&#x27;digest&#x27;],source_seq=row[&#x27;source_seq&#x27;])</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>            self._cancel_target(resources,project,reference,actor)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            return row,dict(execution_ref=reference,session_id=sid,task_id=value[&#x27;task_id&#x27;],subject=actor,</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                tenant_id=self.tenant_id,project_id=project)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    def _cancellation_request(project,command):</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        return digest_of(canonical(dict(operation=&#x27;execution.cancel&#x27;,project_id=project,command=command.model_dump())))</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    def _cancel_target(self,resources,project,reference,actor):</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        ref=reference.model_dump() if hasattr(reference,&#x27;model_dump&#x27;) else reference</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        if not resources.get(project,{}).get(&#x27;project&#x27;):raise_code(&#x27;GRD-403&#x27;,reason=&#x27;execution_cancel_unavailable&#x27;)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        row=self._context_owned(resources,ref[&#x27;execution_id&#x27;],&#x27;execution_authorization&#x27;,project,actor)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        expected=dict(execution_id=row[&#x27;execution_authorization&#x27;][&#x27;execution_id&#x27;],revision=1,digest=row[&#x27;digest&#x27;],source_seq=row[&#x27;source_seq&#x27;])</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        if ref!=expected:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;execution_cancel_reference&#x27;)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        return row</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    def _validate_execution_cancellation(self,definition,resources,previous,event):</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        value=definition.model_dump();actor=value[&#x27;created_by&#x27;];project=value[&#x27;project_id&#x27;]</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        try:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            self._cancel_target(resources,project,value[&#x27;execution_ref&#x27;],actor)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            command=CancelExecution(schema_version=1,cancellation_id=value[&#x27;cancellation_id&#x27;],execution_ref=definition.execution_ref)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            if (previous is not None or actor!=event.payload[&#x27;actor_ref&#x27;] or value[&#x27;submission_key&#x27;]!=event.payload[&#x27;command_id&#x27;] or</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                    self._cancellation_request(project,command)!=event.payload[&#x27;request_digest&#x27;] or</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                    any(r.get(&#x27;execution_cancellation&#x27;,{}).get(&#x27;execution_ref&#x27;)==value[&#x27;execution_ref&#x27;] for r in resources.values())):</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                raise ValueError(&#x27;immutable stop binding&#x27;)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            self._context_quota(resources,&#x27;execution_cancellation&#x27;,project)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        except (ValueError,KeyError,PyHError):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;execution_cancellation_binding&#x27;)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    def _cancellation_summary(self,resources,row,actor,authorize):</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        value=row[&#x27;execution_cancellation&#x27;];project=value[&#x27;project_id&#x27;]</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        self._context_owned({value[&#x27;cancellation_id&#x27;]:row},value[&#x27;cancellation_id&#x27;],&#x27;execution_cancellation&#x27;,project,actor)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        self._cancel_target(resources,project,value[&#x27;execution_ref&#x27;],actor)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        return dict(schema_version=1,cancellation_id=value[&#x27;cancellation_id&#x27;],revision=1,project_id=project,</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            execution_ref=value[&#x27;execution_ref&#x27;],digest=row[&#x27;digest&#x27;],source_seq=row[&#x27;source_seq&#x27;],created_at=row[&#x27;created_at&#x27;],</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            submission_key=value[&#x27;submission_key&#x27;],request_digest=row[&#x27;request_digest&#x27;],persisted=True,</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            status=&#x27;cancellation_requested&#x27;,execution_stopped=None)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    async def cancel_execution(self,project,command,*,command_id,authorize):</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            actor=authorize()</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            await self._open_projected(initialize=False,project=self._project_cancellation_control)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            resources,commands=self._cancellation_state();request=self._cancellation_request(project,command)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            self._context_envelope(&#x27;execution_cancellation&#x27;,command.cancellation_id,1,command_id,actor,request)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            if old:=commands.get((actor,command_id)):</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                if old[0]!=request or &#x27;execution_cancellation&#x27; not in old[1]:raise_code(&#x27;EVT-100&#x27;,reason=&#x27;idempotency_conflict&#x27;)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                return self._cancellation_summary(resources,old[1],actor,authorize),False</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            definition=ExecutionCancellation(**command.model_dump(),project_id=project,created_by=actor,submission_key=command_id)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            def gate():</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                fresh,_=self._cancellation_state()</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                self._cancel_target(fresh,project,command.execution_ref,actor)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                if command.cancellation_id in fresh:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;cancellation_id_reserved&#x27;)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                if any(r.get(&#x27;execution_cancellation&#x27;,{}).get(&#x27;execution_ref&#x27;)==command.execution_ref.model_dump() for r in fresh.values()):</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                    raise_code(&#x27;EVT-101&#x27;,reason=&#x27;execution_already_cancel_requested&#x27;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                self._context_quota(fresh,&#x27;execution_cancellation&#x27;,project)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                self._context_finish(authorize,actor,fresh)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            gate()</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            resources,row=await self._append_context_projected(definition,&#x27;execution_cancellation&#x27;,command.cancellation_id,</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                command_id,actor,request,gate,self._cancellation_state)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            return self._cancellation_summary(resources,row,actor,authorize),True</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code></code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    async def execution_cancellation_submission(self,project,key,*,authorize):</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            actor=authorize();resources,commands=self._cancellation_state()</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>            if not resources.get(project,{}).get(&#x27;project&#x27;):raise_code(&#x27;GRD-403&#x27;,reason=&#x27;execution_cancel_unavailable&#x27;)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            old=commands.get((actor,key));row=old[1] if old else None</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            if row is not None and (not row.get(&#x27;execution_cancellation&#x27;) or row[&#x27;execution_cancellation&#x27;][&#x27;project_id&#x27;]!=project):</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                raise_code(&#x27;GRD-403&#x27;,reason=&#x27;execution_cancel_unavailable&#x27;)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            value=self._cancellation_summary(resources,row,actor,authorize) if row else None</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            return dict(schema_version=1,project_id=project,submission_key=key,status=&#x27;committed&#x27; if row else &#x27;not_found&#x27;,</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                cancellation=value,writer_requires_reopen=self._failed)</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    async def cancellation_target(self,project,ident,*,authorize):</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        async with self._workspace_capture_lock(time.monotonic()):</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            actor=authorize();resources,_=self._cancellation_state()</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            row=self._context_owned(resources,ident,&#x27;execution_cancellation&#x27;,project,actor)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            receipt=self._cancellation_summary(resources,row,actor,authorize)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            target=self._cancel_target(resources,project,row[&#x27;execution_cancellation&#x27;][&#x27;execution_ref&#x27;],actor)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            value=target[&#x27;execution_authorization&#x27;]</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            return receipt,dict(execution_ref=receipt[&#x27;execution_ref&#x27;],session_id=value[&#x27;session_id&#x27;],task_id=value[&#x27;task_id&#x27;],</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                subject=actor,tenant_id=self.tenant_id,project_id=project)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    async def execution_stop_target(self,project,reference,*,authorize):</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        async with self._workspace_capture_lock(time.monotonic()):</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>            actor=authorize();resources,_=self._cancellation_state()</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            row=self._cancel_target(resources,project,reference,actor);value=row[&#x27;execution_authorization&#x27;]</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            return dict(execution_ref=reference.model_dump(),session_id=value[&#x27;session_id&#x27;],task_id=value[&#x27;task_id&#x27;],</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                subject=actor,tenant_id=self.tenant_id,project_id=project)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

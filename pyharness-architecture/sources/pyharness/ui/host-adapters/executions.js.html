@@ -1,0 +1,297 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/ui/host-adapters/executions.js · GitHub 源码预览</title><link rel="stylesheet" href="../../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/ui/host-adapters/executions.js">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 297 行</span></nav><main class="wrap source-page"><h1>pyharness/ui/host-adapters/executions.js</h1><p class="muted">完整文件预览。Git blob（文件对象）：1ae012ce2146da59839a41591d116e4d82d3f2c3<br>SHA-256（内容校验）：aebefac638c5bc0ee1b1940dfb05603e96803b313744a07cf4f4ff3993479dda</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 0 个类、函数与方法</summary><p>此文件没有 Python 定义目录；下方完整内容与行号均可直接阅读。</p></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>/* Reference-only recovery hints; the current server remains the sole authority. */</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>(function(global) {</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>  &#x27;use strict&#x27;;</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>  global.PyharnessExecutions = {create({main, api, esc}) {</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>    const c = global.PyharnessWorkspaceContracts, memory = new Map();</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>    const same = (a,b) =&gt; c.canonical(a) === c.canonical(b);</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>    const hex = () =&gt; crypto.randomUUID().replaceAll(&#x27;-&#x27;,&#x27;&#x27;).slice(0,16);</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>    const pick = (v,k) =&gt; Object.fromEntries([k,&#x27;revision&#x27;,&#x27;digest&#x27;,&#x27;source_seq&#x27;].map(n=&gt;[n,v[n]]));</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    const validRef = (v,k,pattern) =&gt; c.keys(v,k+&#x27; revision digest source_seq&#x27;) &amp;&amp; pattern.test(v[k])</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>      &amp;&amp; v.revision===1 &amp;&amp; c.hash(v.digest) &amp;&amp; c.integer(v.source_seq);</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    const attemptRef = v =&gt; validRef(v,&#x27;attempt_id&#x27;,/^ra-[0-9a-f]{16}$/);</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    const executionRef = v =&gt; validRef(v,&#x27;execution_id&#x27;,/^ex-[0-9a-f]{16}$/);</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    const agentRef = v =&gt; c.keys(v,&#x27;agent_id version sha256&#x27;) &amp;&amp; /^a-[0-9a-f]{32}$/.test(v.agent_id)</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>      &amp;&amp; c.integer(v.version) &amp;&amp; c.hash(v.sha256);</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    let current = null, correctionPanel = null, recoveryPanel = null, observationPanel = null, regressionPanel = null;</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    const live = (d,n=d.version) =&gt; current===d &amp;&amp; d.el.open &amp;&amp; d.el.isConnected &amp;&amp; n===d.version;</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    const q = (d,s) =&gt; d.el.querySelector(s);</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    const say = (d,s) =&gt; { if(live(d)) q(d,&#x27;[data-ex-status]&#x27;).textContent=s; };</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    const base = d =&gt; &#x27;/api/v1/projects/&#x27;+d.project.project_id;</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    const slot = (d,kind) =&gt; &#x27;pyharness.execution.pending.v1:&#x27;+JSON.stringify([d.realm,d.project.project_id,d.attempt,kind]);</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    async function identity() {</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>      let who;try{who=await api(&#x27;/api/account/me&#x27;,{cache:&#x27;no-store&#x27;});}catch(error){error.requestFailed=true;throw error;}const a=who.account;</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>      return JSON.stringify(a?[a.tenant,a.user_id||a.username]:[&#x27;local&#x27;,who.username||&#x27;local&#x27;]);</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    }</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    function invalidate() {</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>      regressionPanel?.invalidate();</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>      observationPanel?.invalidate();</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>      correctionPanel?.invalidate();</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>      recoveryPanel?.invalidate();</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>      if(!current)return;</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>      const d=current;current=null;d.version++;clearTimeout(d.timer);</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>      d.el.replaceChildren();d.el.close();d.el.remove();</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    }</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    async function check(d,n) {</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>      if(!live(d,n))throw Error(&#x27;窗口已变化&#x27;);</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>      if(await identity()!==d.realm){if(current===d)invalidate();throw Error(&#x27;主体已变化，已清除私有内容&#x27;);}</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>      if(!live(d,n))throw Error(&#x27;窗口已变化&#x27;);</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    }</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    async function request(d,n,path,options={}) {</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>      await check(d,n);</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>      try {const value=await api(path,{cache:&#x27;no-store&#x27;,...options});await check(d,n);return value;}</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>      catch(error){await check(d,n);error.requestFailed=true;throw error;}</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    }</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    function save(d,r) {</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>      const key=slot(d,r.kind);memory.set(key,r);</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>      try{localStorage.setItem(key,JSON.stringify(r));return true;}catch(_){return false;}</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    }</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    function forget(d,r) {</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>      const key=slot(d,r.kind);</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>      if(memory.get(key)?.key===r.key)memory.delete(key);</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>      try{if(JSON.parse(localStorage.getItem(key))?.key===r.key)localStorage.removeItem(key);}catch(_){}</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    }</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    function validHint(d,r,kind) {</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>      if(!c.keys(r,&#x27;realm project attempt kind key body digest&#x27;) || r.realm!==d.realm || r.project!==d.project.project_id</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        || r.attempt!==d.attempt || r.kind!==kind || !/^[A-Za-z0-9._-]{1,128}$/.test(r.key)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        || typeof r.body!==&#x27;string&#x27; || r.body.length&gt;5000 || !c.hash(r.digest))return false;</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>      try {</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        const b=JSON.parse(r.body);</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        if(b.schema_version!==1)return false;</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        if(kind===&#x27;start&#x27;)return c.keys(b,&#x27;schema_version attempt_ref agent_ref execution_id confirmation_digest confirm_host_boundary&#x27;)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>          &amp;&amp; attemptRef(b.attempt_ref) &amp;&amp; b.attempt_ref.attempt_id===d.attempt &amp;&amp; agentRef(b.agent_ref)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>          &amp;&amp; /^ex-[0-9a-f]{16}$/.test(b.execution_id) &amp;&amp; c.hash(b.confirmation_digest) &amp;&amp; typeof b.confirm_host_boundary===&#x27;boolean&#x27;;</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        return c.keys(b,&#x27;schema_version cancellation_id execution_ref&#x27;) &amp;&amp; /^ec-[0-9a-f]{16}$/.test(b.cancellation_id) &amp;&amp; executionRef(b.execution_ref);</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>      }catch(_){return false;}</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    }</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    function recover(d,kind) {</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>      const key=slot(d,kind);let r=memory.get(key);</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>      try{r=r||JSON.parse(localStorage.getItem(key));}catch(_){}</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>      if(validHint(d,r,kind)){memory.set(key,r);return r;}</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>      return null;</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    }</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    const fingerprint = r =&gt; c.digest({operation:r.kind===&#x27;start&#x27;?&#x27;execution.start&#x27;:&#x27;execution.cancel&#x27;,project_id:r.project,command:JSON.parse(r.body)});</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    function controls(d) {</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>      if(!live(d))return;</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>      const start=recover(d,&#x27;start&#x27;),cancel=recover(d,&#x27;cancel&#x27;);</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>      q(d,&#x27;[data-ex-hints]&#x27;).textContent=[start&amp;&amp;&#x27;开始待核对键：&#x27;+start.key,cancel&amp;&amp;&#x27;停止待核对键：&#x27;+cancel.key].filter(Boolean).join(&#x27;\n&#x27;);</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>      d.el.querySelectorAll(&#x27;button,input,select&#x27;).forEach(n=&gt;{if(n.dataset.exAction!==&#x27;close&#x27;)n.disabled=d.busy;});</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>      q(d,&#x27;[data-ex-action=preview]&#x27;).disabled=d.busy||!d.attemptRef||!!d.control?.execution_ref||!d.agents.length||!!start;</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>      q(d,&#x27;[data-ex-action=start]&#x27;).disabled=d.busy||!d.preview||!!d.control?.execution_ref||!!start;</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>      q(d,&#x27;[data-ex-action=stop]&#x27;).disabled=d.busy||!d.control?.execution_ref||!!d.control?.cancellation||!!cancel;</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>      q(d,&#x27;[data-ex-action=corrections]&#x27;).disabled=d.busy||!d.control?.execution_ref;</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>      q(d,&#x27;[data-ex-action=recovery-plan]&#x27;).disabled=d.busy||!d.control?.execution_ref;</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>      q(d,&#x27;[data-ex-action=regression-data]&#x27;).disabled=d.busy||!d.control?.execution_ref;</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>      for(const kind of [&#x27;start&#x27;,&#x27;cancel&#x27;])for(const action of [&#x27;query&#x27;,&#x27;retry&#x27;])q(d,`[data-ex-action=${action}-${kind}]`).disabled=d.busy||!recover(d,kind);</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    }</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    function clearPrivate(d) {</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>      observationPanel?.invalidate();</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>      d.preview=null;d.agents=[];</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>      q(d,&#x27;[data-ex-agent]&#x27;).replaceChildren();q(d,&#x27;[data-ex-preview]&#x27;).textContent=&#x27;&#x27;;</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>      q(d,&#x27;[data-ex-result]&#x27;).textContent=&#x27;&#x27;;q(d,&#x27;[data-ex-summary]&#x27;).textContent=&#x27;&#x27;;q(d,&#x27;[data-ex-answer]&#x27;).textContent=&#x27;&#x27;;</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>      q(d,&#x27;[data-ex-health]&#x27;).textContent=&#x27;&#x27;;</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>      q(d,&#x27;[data-ex-artifacts]&#x27;).replaceChildren();q(d,&#x27;[data-ex-host]&#x27;).checked=false;</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    }</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    async function agents(d,n) {</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>      const listed=await request(d,n,&#x27;/api/v1/agents&#x27;);</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>      if(!Array.isArray(listed.agents)||listed.agents.length&gt;100)throw Error(&#x27;Agent 列表超出本界面加载范围&#x27;);</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>      const versions=await Promise.all(listed.agents.filter(a=&gt;a.status!==&#x27;deprecated&#x27;).map(async a=&gt;{</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        const rows=await request(d,n,&#x27;/api/v1/agents/&#x27;+a.agent_id+&#x27;/versions&#x27;);</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        if(!Array.isArray(rows.versions)||rows.versions.length&gt;200)throw Error(&#x27;Agent 版本列表超出本界面加载范围&#x27;);</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        return rows.versions.filter(v=&gt;v.snapshot?.status===&#x27;published&#x27;).map(v=&gt;({ref:{agent_id:v.agent_id,version:v.version,sha256:v.sha256},name:v.snapshot.name}));</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>      }));</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>      if(!live(d,n))return;</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>      d.agents=versions.flat().filter(v=&gt;agentRef(v.ref));</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>      q(d,&#x27;[data-ex-agent]&#x27;).innerHTML=&#x27;&lt;option value=&quot;&quot;&gt;请选择已发布版本&lt;/option&gt;&#x27;+d.agents.map((a,i)=&gt;`&lt;option value=&quot;${i}&quot;&gt;${esc(a.name)} · v${a.ref.version} · ${esc(a.ref.agent_id)}&lt;/option&gt;`).join(&#x27;&#x27;);</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    }</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    function controlMatches(d,v) {</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>      return v?.schema_version===1 &amp;&amp; v.control_only===true &amp;&amp; v.project_id===d.project.project_id</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        &amp;&amp; attemptRef(v.attempt_ref) &amp;&amp; v.attempt_ref.attempt_id===d.attempt</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        &amp;&amp; ((v.status===&#x27;not_authorized&#x27;&amp;&amp;v.execution_ref===null&amp;&amp;v.cancellation===null)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>          ||(v.status===&#x27;authorized&#x27;&amp;&amp;executionRef(v.execution_ref)));</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    }</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    function drawStop(d,value) {</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>      q(d,&#x27;[data-ex-stop]&#x27;).textContent=!value?&#x27;尚未请求停止&#x27;:value.execution_stopped===true?&#x27;已核对：实际执行已停&#x27;</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        :value.execution_stopped===false?&#x27;已保存停止请求；执行尚未停止&#x27;:&#x27;已保存停止请求；实际停止状态未知&#x27;;</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    }</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    function drawHealth(d,result) {</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>      const v=result.control_observation,h=v?.heartbeat;</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>      if(v?.schema_version!==1||v.service_status!==&#x27;connected&#x27;||v.replay_authorized!==false||v.automatic_dispatch!==false</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        ||![&#x27;live&#x27;,&#x27;absent&#x27;].includes(v.execution_owner)||h?.scope!==&#x27;service_event_loop&#x27;){</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        q(d,&#x27;[data-ex-health]&#x27;).textContent=&#x27;运行观测暂不可用；没有据此恢复或重发。&#x27;;return;</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>      }</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>      const activity={terminal:&#x27;执行已结束&#x27;,interrupted:&#x27;当前服务没有这个执行的本地执行者&#x27;,heartbeat_expired:&#x27;服务心跳过期，执行进展未知&#x27;,heartbeat_unavailable:&#x27;服务心跳监视已停止，执行进展未知&#x27;,waiting_approval:&#x27;等待原工具审批&#x27;,queued:&#x27;已在原队列等待&#x27;,running_unclassified:&#x27;原执行仍在运行，具体进展以收据为准&#x27;}[v.activity]||&#x27;活动未确认&#x27;;</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>      const heart={fresh:&#x27;当前服务心跳正常&#x27;,expired:&#x27;当前服务心跳过期&#x27;,inactive:&#x27;当前服务心跳监视已停止&#x27;,not_observed:&#x27;没有当前服务心跳证据&#x27;}[h.state]||&#x27;心跳未知&#x27;;</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>      const count=Number.isSafeInteger(v.approval_waits_total)&amp;&amp;v.approval_waits_total&gt;=0?v.approval_waits_total:&#x27;未知&#x27;;</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>      q(d,&#x27;[data-ex-health]&#x27;).textContent=&#x27;连接：服务已响应。&#x27;+activity+&#x27;。\n&#x27;+heart+&#x27;；待审批 &#x27;+count+&#x27; 项。&#x27;+</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        (v.approval_coverage===&#x27;partial&#x27;?&#x27;审批观察不完整。&#x27;:&#x27;&#x27;)+&#x27;\n心跳只观察服务事件循环，不证明模型或工具已完成。失联和过期不会自动重新投递。&#x27;;</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    }</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    function drawUnavailable(d,error) {</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>      q(d,&#x27;[data-ex-health]&#x27;).textContent=error.status===401||error.status===403?&#x27;当前读取权限不足；执行进展未知。&#x27;:error.status?&#x27;服务返回错误；执行进展未知，不会自动重新投递。&#x27;:error.requestFailed?&#x27;服务失联或请求未完成；执行进展未知，不会自动重新投递。&#x27;:&#x27;运行观察未确认；不会自动重新投递。&#x27;;</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    }</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    async function observe(d,n) {</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>      clearPrivate(d);d.control=null;d.attemptRef=null;drawStop(d,null);</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>      const control=await request(d,n,base(d)+&#x27;/run-attempts/&#x27;+d.attempt+&#x27;/execution-control&#x27;);</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>      if(!controlMatches(d,control))throw Error(&#x27;控制收据范围不符&#x27;);</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>      d.control=control;d.attemptRef=control.attempt_ref;drawStop(d,control.cancellation);</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>      if(!control.execution_ref){await agents(d,n);say(d,&#x27;尚无执行授权。请选择发布版本并预览，再明确开始。&#x27;);return;}</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>      try {</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        const result=await request(d,n,base(d)+&#x27;/executions/&#x27;+control.execution_ref.execution_id);</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        if(result.project_id!==d.project.project_id||!same(pick(result,&#x27;execution_id&#x27;),control.execution_ref)||!same(result.attempt_ref,control.attempt_ref))throw Error(&#x27;执行收据范围不符&#x27;);</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        drawHealth(d,result);</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        const quality=result.output_completeness||&#x27;unknown&#x27;,calc=result.calculation_status||&#x27;not_configured&#x27;;</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        const resultState=({complete:&#x27;回答完整&#x27;,incomplete:&#x27;输出不完整&#x27;,unknown:&#x27;完整性待确认&#x27;}[quality]||&#x27;完整性待确认&#x27;);</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        const calcState=({passed:&#x27;计算与回答核对通过&#x27;,failed:&#x27;计算与回答核对不通过&#x27;,invalid_input:&#x27;资料无法计算&#x27;,not_run:&#x27;已程序核算，等待完整回答后核对&#x27;,not_configured:&#x27;尚无计算核对记录&#x27;}[calc]||&#x27;计算核对待确认&#x27;);</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        const budget=result.budget_diagnostics;</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        q(d,&#x27;[data-ex-summary]&#x27;).textContent=`执行状态：${({completed:&#x27;执行已结束&#x27;,failed:&#x27;执行失败&#x27;,running:&#x27;执行中&#x27;,queued:&#x27;排队中&#x27;,cancelled:&#x27;已取消&#x27;}[result.status]||result.status)} · ${result.execution_reason||&#x27;&#x27;}\n${resultState} · ${calcState}\n`+</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>          (result.finish_reason===&#x27;length&#x27;?&#x27;模型达到输出上限，回答尚未完成；调整额度后明确重新执行，不会自动续写。\n&#x27;:&#x27;&#x27;)+</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>          (result.effective_output_limit?&#x27;本次有效输出上限：&#x27;+result.effective_output_limit+&#x27; tokens；连接单次配置上限：&#x27;+result.configured_output_limit+&#x27; tokens（另受任务/父级剩余额度及费用限制）。\n&#x27;:&#x27;&#x27;)+</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>          (budget?&#x27;预算不足（LLM-305）：&#x27;+({input:&#x27;输入&#x27;,output:&#x27;输出&#x27;,cost:&#x27;费用估算&#x27;}[budget.dimension]||&#x27;预算&#x27;)+&#x27;；限制来源：&#x27;+(budget.account===&#x27;task&#x27;?&#x27;当前任务&#x27;:&#x27;父级任务&#x27;)+&#x27;；上限 &#x27;+budget.limit+&#x27;，已用 &#x27;+budget.used+&#x27;，已预留 &#x27;+budget.reserved+&#x27;，本次所需预留 &#x27;+budget.requested+&#x27;，差额 &#x27;+budget.shortfall+&#x27;。&#x27;+(budget.basis===&#x27;conservative_utf8_bytes&#x27;?&#x27;本次输入预留按UTF-8字节保守估计，并非供应商实际token用量。&#x27;:&#x27;&#x27;)+&#x27;本次模型请求尚未发送。可减少资料或调整该任务授权额度后重新执行。\n&#x27;:&#x27;&#x27;)+</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>          (result.delivery_readiness===&#x27;ready_for_independent_review&#x27;?&#x27;结果可提交独立复核。\n&#x27;:&#x27;结果待处理，仅可保留为待复核材料，不能作为合格交付。\n&#x27;)+</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>          (result.unknown_effects?&#x27;存在未确认效果，需要核对。&#x27;:&#x27;当前返回的效果记录未标记未知。&#x27;)+&#x27;\n业务验收：&#x27;+({not_evaluated:&#x27;尚未评定&#x27;,passed:&#x27;独立验收通过&#x27;,rejected:&#x27;独立验收不通过&#x27;,pending:&#x27;尚无法确认&#x27;,invalidated:&#x27;原验收已失效，需重新核对&#x27;}[result.business_acceptance]||&#x27;尚未评定&#x27;)+&#x27;。执行结束不代表交付验收通过。&#x27;+</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>          (result.result_truncated?&#x27;\n界面结果摘要已裁切，完整原文仍在日志；此提示与模型输出截断分别判断。&#x27;:&#x27;&#x27;)+(result.children_truncated?&#x27;\n子任务展示已截断。&#x27;:&#x27;&#x27;);</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        q(d,&#x27;[data-ex-result]&#x27;).textContent=JSON.stringify(result,null,2);</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        q(d,&#x27;[data-ex-answer]&#x27;).textContent=result.result_summary||&#x27;尚无结果摘要。&#x27;;</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        for(const item of result.artifacts||[]) {</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>          const line=document.createElement(&#x27;p&#x27;);</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>          line.textContent=item.filename+&#x27; · &#x27;+({verified:&#x27;原字节校验一致&#x27;,mismatch:&#x27;原字节校验不符&#x27;,unavailable:&#x27;原字节无法核对&#x27;}[item.integrity]||&#x27;校验未知&#x27;)+</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>            &#x27; · &#x27;+(item.download_allowed?&#x27;已有下载许可&#x27;:&#x27;下载尚未获准&#x27;)+&#x27; · &#x27;+item.artifact_id;</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>          q(d,&#x27;[data-ex-artifacts]&#x27;).append(line);</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        }</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        say(d,&#x27;已读取原执行收据。文件哈希是字节观察；产物校验和下载许可分别显示。&#x27;);</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        if([&#x27;preparing&#x27;,&#x27;queued&#x27;,&#x27;running&#x27;].includes(result.status))schedule(d);</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>      }catch(error){</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        if(!live(d,n))throw error;</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        correctionPanel?.invalidate();</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        recoveryPanel?.invalidate();</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        clearPrivate(d);say(d,&#x27;结果当前不可读取：&#x27;+error.message+&#x27;。已清除正文；可通过控制入口请求停止。&#x27;);</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        drawUnavailable(d,error);</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        if(control.cancellation?.execution_stopped!==true)schedule(d);</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>      }</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    }</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    function schedule(d) {</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>      clearTimeout(d.timer);</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>      d.timer=setTimeout(()=&gt;{if(live(d)&amp;&amp;!d.busy)operate(d,&#x27;refresh&#x27;);},3000);</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>    }</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    function matches(d,r,value) {</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>      const b=JSON.parse(r.body);</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>      if(value?.project_id!==r.project||value.submission_key!==r.key||value.request_digest!==r.digest||value.persisted!==true)return false;</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>      if(r.kind===&#x27;start&#x27;)return executionRef(pick(value,&#x27;execution_id&#x27;))&amp;&amp;value.execution_id===b.execution_id&amp;&amp;value.execution_authorized===true</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        &amp;&amp; same(value.attempt_ref,b.attempt_ref)&amp;&amp;same(value.agent_ref,b.agent_ref);</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>      return value.cancellation_id===b.cancellation_id&amp;&amp;same(value.execution_ref,b.execution_ref)&amp;&amp;c.hash(value.digest)&amp;&amp;c.integer(value.source_seq);</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    }</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>    async function reconcile(d,n,r) {</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>      if(await fingerprint(r)!==r.digest)throw Error(&#x27;恢复线索摘要不符&#x27;);</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>      const path=r.kind===&#x27;start&#x27;?&#x27;/execution-submissions/by-key&#x27;:&#x27;/cancellation-submissions/by-key&#x27;;</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>      const value=await request(d,n,base(d)+path+&#x27;?key=&#x27;+encodeURIComponent(r.key));</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>      if(value.project_id!==r.project||value.submission_key!==r.key)throw Error(&#x27;原键查询范围不符&#x27;);</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>      if(value.status===&#x27;not_found&#x27;){say(d,&#x27;尚未找到已确认事实。保留原键原选择；查询不表示先前请求不会稍后提交。&#x27;);return;}</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>      const receipt=r.kind===&#x27;start&#x27;?value.execution:value.cancellation;</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>      if(value.status!==&#x27;committed&#x27;||!matches(d,r,receipt))throw Error(&#x27;原键与封存选择不一致&#x27;);</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>      forget(d,r);await observe(d,n);</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    }</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    async function send(d,n,r) {</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>      if(await fingerprint(r)!==r.digest)throw Error(&#x27;恢复线索摘要不符，禁止重发&#x27;);</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>      // A cancel hint is never authority to select a different execution.</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>      if(r.kind===&#x27;cancel&#x27;&amp;&amp;!same(JSON.parse(r.body).execution_ref,d.control?.execution_ref))throw Error(&#x27;停止目标尚未由当前服务端控制收据确认&#x27;);</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>      const durable=save(d,r);controls(d);</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>      say(d,&#x27;正在提交；已封存原键与选择。&#x27;+(durable?&#x27;&#x27;:&#x27;浏览器持久线索不可用，请记下原键：&#x27;+r.key));</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>      await request(d,n,base(d)+(r.kind===&#x27;start&#x27;?&#x27;/executions&#x27;:&#x27;/execution-cancellations&#x27;),{method:&#x27;POST&#x27;,body:r.body,headers:{&#x27;Idempotency-Key&#x27;:r.key}});</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>      await reconcile(d,n,r);</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    }</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>    async function makeRecord(d,kind,body) {</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>      const r={realm:d.realm,project:d.project.project_id,attempt:d.attempt,kind,key:(kind===&#x27;start&#x27;?&#x27;execute-&#x27;:&#x27;stop-&#x27;)+hex(),body:JSON.stringify(body),digest:null};</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>      r.digest=await fingerprint(r);return r;</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>    }</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>    async function operate(d,action) {</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>      if(action===&#x27;close&#x27;){invalidate();return;}</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>      if(!live(d)||d.busy||!d.realm)return;</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>      clearTimeout(d.timer);const n=++d.version;d.busy=true;controls(d);</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>      try {</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        await check(d,n);</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        if(action===&#x27;refresh&#x27;) {</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>          const attempt=q(d,&#x27;[data-ex-attempt]&#x27;).value.trim();</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>          if(!/^ra-[0-9a-f]{16}$/.test(attempt))throw Error(&#x27;请输入有效的运行尝试 ID&#x27;);</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>          d.attempt=attempt;await observe(d,n);</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        }else if(action===&#x27;preview&#x27;) {</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>          d.preview=null;q(d,&#x27;[data-ex-preview]&#x27;).textContent=&#x27;&#x27;;q(d,&#x27;[data-ex-host]&#x27;).checked=false;</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>          const selected=d.agents[Number(q(d,&#x27;[data-ex-agent]&#x27;).value)];</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>          if(q(d,&#x27;[data-ex-agent]&#x27;).value===&#x27;&#x27;||!selected||!d.attemptRef||d.control?.execution_ref)throw Error(&#x27;先核对尝试并选择已发布版本&#x27;);</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>          const body={schema_version:1,attempt_ref:d.attemptRef,agent_ref:selected.ref};</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>          const value=await request(d,n,base(d)+&#x27;/execution-previews&#x27;,{method:&#x27;POST&#x27;,body:JSON.stringify(body)});</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>          if(value.project_id!==d.project.project_id||!same(value.attempt_ref,body.attempt_ref)||!same(value.agent_ref,body.agent_ref)</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>            ||!c.hash(value.confirmation_digest)||value.status!==&#x27;confirmation_required&#x27;||![&#x27;disabled&#x27;,&#x27;host_unrestricted&#x27;,&#x27;container&#x27;,&#x27;remote&#x27;].includes(value.boundary))throw Error(&#x27;预览收据不完整&#x27;);</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>          d.preview=value;q(d,&#x27;[data-ex-preview]&#x27;).textContent=&#x27;执行边界：&#x27;+({disabled:&#x27;工具沙箱未启用&#x27;,host_unrestricted:&#x27;宿主执行：不提供操作系统、网络或内存隔离，代码可能访问宿主资源&#x27;,container:&#x27;容器执行&#x27;,remote:&#x27;远程执行&#x27;}[value.boundary])+&#x27;\n确认摘要：&#x27;+value.confirmation_digest+&#x27;\n预算：待完整请求装配后，在发送前按实际内容检查；当前预览不代表预算足够。&#x27;;</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>          say(d,&#x27;预览完成，尚未开始执行。&#x27;);</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        }else if(action===&#x27;start&#x27;) {</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>          if(!d.preview||recover(d,&#x27;start&#x27;)||d.control?.execution_ref)throw Error(&#x27;先完成新预览或核对原键&#x27;);</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>          if(d.preview.boundary===&#x27;host_unrestricted&#x27;&amp;&amp;!q(d,&#x27;[data-ex-host]&#x27;).checked)throw Error(&#x27;宿主执行需明确勾选边界确认&#x27;);</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>          const body={schema_version:1,attempt_ref:d.preview.attempt_ref,agent_ref:d.preview.agent_ref,execution_id:&#x27;ex-&#x27;+hex(),confirmation_digest:d.preview.confirmation_digest,confirm_host_boundary:q(d,&#x27;[data-ex-host]&#x27;).checked};</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>          const r=await makeRecord(d,&#x27;start&#x27;,body);await check(d,n);save(d,r);await send(d,n,r);</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        }else if(action===&#x27;stop&#x27;) {</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>          if(!d.control?.execution_ref||d.control.cancellation||recover(d,&#x27;cancel&#x27;))throw Error(&#x27;先核对控制状态或原停止键&#x27;);</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>          const r=await makeRecord(d,&#x27;cancel&#x27;,{schema_version:1,cancellation_id:&#x27;ec-&#x27;+hex(),execution_ref:d.control.execution_ref});</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>          await check(d,n);save(d,r);await send(d,n,r);</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        }else if(action===&#x27;regression-data&#x27;) {</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>          if(!d.control?.execution_ref)throw Error(&#x27;先核对实际执行记录&#x27;);</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>          if(!global.PyharnessRegressionData)throw Error(&#x27;回归用例界面尚未加载，请刷新页面&#x27;);</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>          regressionPanel=regressionPanel||global.PyharnessRegressionData.create({main,api,esc});</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>          await regressionPanel.open(d.project,q(d,&#x27;[data-ex-action=regression-data]&#x27;),{execution_id:d.control.execution_ref.execution_id});</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        }else if(action===&#x27;observations&#x27;) {</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>          if(!global.PyharnessObservations)throw Error(&#x27;运行观测界面尚未加载，请刷新页面&#x27;);</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>          observationPanel=observationPanel||global.PyharnessObservations.create({main,api,esc});</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>          const selected=d.agents[Number(q(d,&#x27;[data-ex-agent]&#x27;).value)];</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>          const selection=d.preview?{schema_version:1,attempt_ref:d.preview.attempt_ref,agent_ref:d.preview.agent_ref}</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            :q(d,&#x27;[data-ex-agent]&#x27;).value!==&#x27;&#x27;&amp;&amp;selected&amp;&amp;d.attemptRef?{schema_version:1,attempt_ref:d.attemptRef,agent_ref:selected.ref}:null;</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>          await observationPanel.open(d.project,q(d,&#x27;[data-ex-action=observations]&#x27;),{selection,execution_id:d.control?.execution_ref?.execution_id});</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        }else if(action===&#x27;recovery-plan&#x27;) {</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>          if(!d.control?.execution_ref)throw Error(&#x27;先核对已有执行&#x27;);</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>          if(!global.PyharnessRecoveryPlans)throw Error(&#x27;恢复预检界面尚未加载，请刷新页面&#x27;);</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>          recoveryPanel=recoveryPanel||global.PyharnessRecoveryPlans.create({main,api,esc,onOpenAttempt:(project,attempt)=&gt;open(project,attempt)});</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>          await recoveryPanel.open(d.project,d.control.execution_ref,q(d,&#x27;[data-ex-action=recovery-plan]&#x27;));</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>          await observe(d,n);</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        }else if(action===&#x27;corrections&#x27;) {</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>          if(!d.control?.execution_ref)throw Error(&#x27;先核对已有执行&#x27;);</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>          if(!global.PyharnessExecutionCorrections)throw Error(&#x27;纠偏界面尚未加载，请刷新页面&#x27;);</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>          correctionPanel=correctionPanel||global.PyharnessExecutionCorrections.create({main,api,esc});</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>          await correctionPanel.open(d.project,d.control.execution_ref,q(d,&#x27;[data-ex-action=corrections]&#x27;));</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>          await observe(d,n);</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        }else {</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>          const [verb,kind]=action.split(&#x27;-&#x27;),r=recover(d,kind);</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>          if(!r)throw Error(&#x27;没有可用的原键线索&#x27;);</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>          if(verb===&#x27;query&#x27;)await reconcile(d,n,r);</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>          else if(verb===&#x27;retry&#x27;)await send(d,n,r);</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        }</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>      }catch(error){if(live(d,n)){if(error.status===401||error.status===403||error.requestFailed){clearPrivate(d);correctionPanel?.invalidate();recoveryPanel?.invalidate();drawUnavailable(d,error);}say(d,&#x27;操作未确认：&#x27;+error.message+&#x27;。待核对的原键和原选择保留；没有自动重发。&#x27;);}}</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>      finally{if(live(d,n)){d.busy=false;controls(d);}}</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>    }</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>    async function open(project,attempt=&#x27;&#x27;) {</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>      invalidate();const el=document.createElement(&#x27;dialog&#x27;);</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>      const d={el,project,attempt,realm:&#x27;&#x27;,version:0,busy:false,agents:[],attemptRef:null,control:null,preview:null,timer:null};current=d;</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>      el.setAttribute(&#x27;aria-label&#x27;,&#x27;任务执行与收据&#x27;);el.style.cssText=&#x27;width:min(1000px,94vw);max-height:90vh;overflow:auto;padding:24px;font:inherit&#x27;;</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>      el.innerHTML=`&lt;h2&gt;任务执行与收据 · ${esc(project.name)}&lt;/h2&gt;&lt;button data-ex-action=&quot;close&quot;&gt;关闭&lt;/button&gt;</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        &lt;p&gt;核对既有尝试、选择发布版本并明确开始。页面刷新和状态查询不会自动执行。&lt;/p&gt;</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        &lt;label&gt;运行尝试 ID &lt;input data-ex-attempt maxlength=&quot;19&quot; value=&quot;${esc(attempt)}&quot;&gt;&lt;/label&gt; &lt;button data-ex-action=&quot;refresh&quot;&gt;核对执行&lt;/button&gt;</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        &lt;p role=&quot;status&quot; data-ex-status&gt;&lt;/p&gt;&lt;pre data-ex-hints style=&quot;white-space:pre-wrap&quot;&gt;&lt;/pre&gt;</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>        &lt;label&gt;发布的 Agent 版本 &lt;select data-ex-agent&gt;&lt;/select&gt;&lt;/label&gt; &lt;button data-ex-action=&quot;preview&quot;&gt;预览执行&lt;/button&gt;</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        &lt;pre data-ex-preview style=&quot;white-space:pre-wrap;overflow-wrap:anywhere&quot;&gt;&lt;/pre&gt;</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        &lt;label&gt;&lt;input type=&quot;checkbox&quot; data-ex-host&gt; 我确认宿主执行边界及其资源访问权限&lt;/label&gt; &lt;button data-ex-action=&quot;start&quot;&gt;明确开始执行&lt;/button&gt;</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        &lt;p&gt;工具需要人工审批时，可&lt;a href=&quot;#approvals&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;打开审批中心&lt;/a&gt;核对并处理；批准后仍会检查权限。&lt;/p&gt;</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        &lt;p&gt;&lt;button data-ex-action=&quot;query-start&quot;&gt;核对原开始键&lt;/button&gt; &lt;button data-ex-action=&quot;retry-start&quot;&gt;原开始键原选择重试&lt;/button&gt;&lt;/p&gt;</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        &lt;p&gt;&lt;button data-ex-action=&quot;corrections&quot;&gt;运行中纠偏 / 查看版本&lt;/button&gt; &lt;button data-ex-action=&quot;recovery-plan&quot;&gt;只读恢复预检&lt;/button&gt; &lt;button data-ex-action=&quot;observations&quot;&gt;上下文 / 权限预演 / 运行比较&lt;/button&gt; &lt;button data-ex-action=&quot;regression-data&quot;&gt;失败记录转回归用例&lt;/button&gt;&lt;/p&gt;</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        &lt;h3&gt;停止控制&lt;/h3&gt;&lt;button data-ex-action=&quot;stop&quot;&gt;请求停止&lt;/button&gt; &lt;button data-ex-action=&quot;query-cancel&quot;&gt;核对原停止键&lt;/button&gt; &lt;button data-ex-action=&quot;retry-cancel&quot;&gt;原停止键原目标重试&lt;/button&gt;&lt;p data-ex-stop&gt;&lt;/p&gt;</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        &lt;h3&gt;长任务观察&lt;/h3&gt;&lt;p data-ex-health style=&quot;white-space:pre-wrap&quot;&gt;&lt;/p&gt;</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        &lt;h3&gt;执行结果&lt;/h3&gt;&lt;p data-ex-summary style=&quot;white-space:pre-wrap&quot;&gt;&lt;/p&gt;&lt;pre data-ex-answer style=&quot;white-space:pre-wrap;overflow-wrap:anywhere&quot;&gt;&lt;/pre&gt;&lt;section data-ex-artifacts style=&quot;overflow-wrap:anywhere&quot;&gt;&lt;/section&gt;&lt;details&gt;&lt;summary&gt;原始执行、文件观察、子任务与产物收据&lt;/summary&gt;&lt;pre data-ex-result style=&quot;white-space:pre-wrap;overflow-wrap:anywhere&quot;&gt;&lt;/pre&gt;&lt;/details&gt;`;</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>      main.append(el);el.showModal();controls(d);</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>      el.oncancel=e=&gt;{e.preventDefault();invalidate();};</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>      el.onclick=e=&gt;{const b=e.target.closest(&#x27;[data-ex-action]&#x27;);if(b)operate(d,b.dataset.exAction);};</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>      el.onchange=e=&gt;{</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        if(d.busy)return;</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        if(e.target.matches(&#x27;[data-ex-agent]&#x27;)){d.version++;d.preview=null;q(d,&#x27;[data-ex-preview]&#x27;).textContent=&#x27;&#x27;;q(d,&#x27;[data-ex-host]&#x27;).checked=false;controls(d);}</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        if(e.target.matches(&#x27;[data-ex-attempt]&#x27;)){d.version++;clearTimeout(d.timer);d.attempt=e.target.value.trim();clearPrivate(d);d.control=null;d.attemptRef=null;drawStop(d,null);controls(d);}</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>      };</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>      try{const n=d.version,realm=await identity();if(!live(d,n))return;d.realm=realm;controls(d);if(attempt)await operate(d,&#x27;refresh&#x27;);else say(d,&#x27;请输入运行尝试 ID 后只读核对。&#x27;);}</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>      catch(error){if(live(d))say(d,&#x27;身份核对失败：&#x27;+error.message);}</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>    }</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>    return {open,invalidate};</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>  }};</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>})(window);</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../../assets/views/source-return.js"></script></body></html>

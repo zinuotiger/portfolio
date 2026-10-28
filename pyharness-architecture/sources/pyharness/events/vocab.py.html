@@ -1,0 +1,332 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/events/vocab.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/events/vocab.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 332 行</span></nav><main class="wrap source-page"><h1>pyharness/events/vocab.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：e3ff50a48ed93fd2870c4244da0d637c6e4e3aee<br>SHA-256（内容校验）：257bb3be7d47633c33e8a3f535df71f35dd2201c6ac8eefccf72f1544f401653</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 8 个类、函数与方法</summary><ul><li><a href="#L132">register_event_type（函数） · L132–L142</a></li><li><a href="#L145">payload_model_for（函数） · L145–L147</a></li><li><a href="#L150">is_registered（函数） · L150–L152</a></li><li><a href="#L155">is_transient（函数） · L155–L157</a></li><li><a href="#L160">registered_event_types（函数） · L160–L162</a></li><li><a href="#L169">summarize_validation（函数） · L169–L179</a></li><li><a href="#L182">validate_payload（函数） · L182–L194</a></li><li><a href="#L319">_install_core_vocabulary（函数） · L319–L322</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/events/vocab.py — 事件词表注册 (specs/events.py.md)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>_EVENT_REGISTRY 类型 → payload 模型注册表;register_event_type/payload_model_for/</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>validate_payload 三函数 = 校验链第 2、3 步。70 个核心类型在模块导入期一次性注册</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>(EVENT-SCHEMA §3 的 57 基线 + 词表外扩展:llm.retry/plan.done/plan.aborted/</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>schedule.registered/updated/removed/blocked/missed,按 §7 规则登记);</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>插件运行时以 plugin.&lt;id&gt;.&lt;name&gt; 命名空间注册,只增不改。</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>抛错一律 raise_code(EVT-1xx),禁裸 raise str。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from typing import Optional</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>from pydantic import BaseModel, ValidationError</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from pyharness.events.payload_product_execution import ExecutionLifecyclePayload, ExecutionEffectPayload</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from pyharness.events.payload_product_child import ExecutionChildPayload</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>from pyharness.events.payload_checkpoint import ExecutionCheckpointPayload</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>from pyharness.events.payload_correction import ExecutionCorrectionAppliedPayload</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>from pyharness.events.payload_state_checkpoint import ExecutionStateCheckpointPayload</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>from pyharness.events.payload_context import ExecutionContextPayload</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>from pyharness.events.payload import (  # noqa: F401 — 模型类仅供注册引用</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    ExecutorEventPayload,</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    WorkspaceResourceCommittedPayload,</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    PlatformResourcePayload,</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    AgentMessagePayload,</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    ApprovalOutcomePayload,</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    ApprovalRequestedPayload,</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    ApprovalReviewedPayload,</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    BudgetPausedPayload,</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    BusBackpressurePayload,</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    ConfigUpdatedPayload,</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    ContextCompactedPayload,</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    DecisionIssuedPayload,</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    EvidenceArchivedPayload,</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    ForkCreatedPayload,</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    GoalCompletedPayload,</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    GoalCreatedPayload,</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    GoalUpdatedPayload,</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    GuardEvaluatedPayload,</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    GuardRejectedPayload,</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    JobCompletedPayload,</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    JobFailedPayload,</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    JobStartedPayload,</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    LlmChunkPayload,</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    LlmErrorPayload,</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    LlmRequestPayload,</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    LlmResponsePayload,</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    LlmRetryPayload,</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    LlmUsagePayload,</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    PlanApprovedPayload,</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    PlanAbortedPayload,</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    PlanDonePayload,</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    PlanExecStepPayload,</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    PlanProposedPayload,</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    PlanRejectedPayload,</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    PluginInstalledPayload,</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    PluginUninstalledPayload,</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    PolicyUpdatedPayload,</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    QueueResumedPayload,</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    QueueSuspendedPayload,</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    ReceiptEmittedPayload,</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    ScheduleBlockedPayload,</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    ScheduleMissedPayload,</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    ScheduleRegisteredPayload,</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    ScheduleRemovedPayload,</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    ScheduleTriggerPayload,</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    ScheduleUpdatedPayload,</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    ScopeUpdatedPayload,</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    SegmentEndPayload,</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    SegmentStartPayload,</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    SessionCreatedPayload,</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    SessionFinishedPayload,</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    SessionRecoveredPayload,</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    SessionRenamedPayload,</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    SkillInstalledPayload,</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    SkillRemovedPayload,</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    SkillRolledBackPayload,</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    SkillUsedPayload,</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    SubagentFailedPayload,</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    SubagentJoinedPayload,</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    SubagentSpawnedPayload,</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    SyscheckFailPayload,</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    SystemCancelledPayload,</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    SystemErrorPayload,</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    TaskCompletedPayload,</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    TaskEnqueuedPayload,</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    TaskFailedPayload,</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    TaskStartedPayload,</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    TodoUpdatedPayload,</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    ToolCallPayload,</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    ToolErrorPayload,</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    ToolResultPayload,</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    UserAnswerPayload,</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    UserAttachmentImagePayload,</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    UserCommandPayload,</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    UserFeedbackPayload,</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    UserMessageEditedPayload,</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    UserMessagePayload,</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    UserQuestionPayload,</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    WorkflowStepPayload,</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code># actor 六枚举(Envelope.actor Literal 唯一取值源;单一真源在 vocab.py)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>ACTORS = (&quot;user&quot;, &quot;agent&quot;, &quot;llm&quot;, &quot;tool&quot;, &quot;system&quot;, &quot;plugin&quot;)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code># 强同步事件族:落盘成功才返回(EVENT-SCHEMA §1.2/§8.1 强同步矩阵)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>SYNC_TYPES = frozenset({</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    &quot;user.message&quot;, &quot;guard.rejected&quot;,</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    &quot;approval.requested&quot;, &quot;approval.granted&quot;, &quot;approval.denied&quot;, &quot;approval.timeout&quot;, &quot;approval.reviewed&quot;,</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    &quot;session.finished&quot;, &quot;session.recovered&quot;, &quot;segment.start&quot;,</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    &quot;fork.created&quot;, &quot;context.compacted&quot;,</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    &quot;policy.updated&quot;,                      # 治理层策略事件(ADR-020:强同步)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    &quot;decision.issued&quot;,                     # 治理层决策事件(ADR-015:M3;强同步)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    &quot;receipt.emitted&quot;,                     # 治理层凭证事件(M4;强同步)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    &quot;workspace.resource_committed&quot;,        # 产品控制事实先提交后投影</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    &quot;execution.lifecycle&quot;, &quot;execution.effect&quot;, &quot;execution.child&quot;,  # S07 actual runtime facts</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    &quot;execution.checkpoint&quot;,  # S08 must persist before the actual logical model round</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    &quot;execution.correction_applied&quot;,  # S08 trusted context application, not a provider receipt</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    &quot;execution.state_checkpoint&quot;,  # S08 actual private state companion, no replay grant</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>})</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code># 瞬时事件(仅总线,禁 append 入日志;registry.updated 为总线内部广播,无 payload 模型)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>TRANSIENT_TYPES = frozenset({&quot;llm.chunk&quot;, &quot;registry.updated&quot;, &quot;config.updated&quot;})</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code></code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>_EVENT_REGISTRY: dict[str, type[BaseModel]] = {}</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>_TRANSIENT: set[str] = set(TRANSIENT_TYPES)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code></code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code></code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>def register_event_type(type_: str, model: type[BaseModel], *,</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                        transient: bool = False) -&gt; None:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    &quot;&quot;&quot;词表注册(框架 70 类型启动期注册;插件运行时注册 plugin.&lt;id&gt;.&lt;name&gt;)。</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code></code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    重复注册拒绝(EVT-102,§3.8 只增不改):破坏性变更 = 新类型名,旧类型冻结。</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    if type_ in _EVENT_REGISTRY:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        raise_code(&quot;EVT-102&quot;, type_=type_, detail=&quot;重复注册,事件类型只增不改&quot;)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    _EVENT_REGISTRY[type_] = model</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    if transient:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        _TRANSIENT.add(type_)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code></code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>def payload_model_for(type_: str) -&gt; Optional[type[BaseModel]]:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    &quot;&quot;&quot;查类型 → payload 模型;未注册返回 None(由调用方按 EVT-102 拒)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    return _EVENT_REGISTRY.get(type_)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code></code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code></code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>def is_registered(type_: str) -&gt; bool:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    &quot;&quot;&quot;类型是否已注册(校验链第 2 步前置判断)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    return type_ in _EVENT_REGISTRY</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code></code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code></code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>def is_transient(type_: str) -&gt; bool:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    &quot;&quot;&quot;是否瞬时事件(仅总线;session.append 须拒 transient 入日志)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>    return type_ in _TRANSIENT</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code></code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code></code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>def registered_event_types() -&gt; tuple[str, ...]:</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    &quot;&quot;&quot;当前注册的全部事件名(插入序);自检/测试用。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    return tuple(_EVENT_REGISTRY)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code></code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code></code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code># EVENT_TYPES 公开别名:词表全量(类型 → payload 模型),自检/审计/上层读取用</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>EVENT_TYPES = _EVENT_REGISTRY</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code></code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code></code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>def summarize_validation(e: ValidationError) -&gt; str:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    &quot;&quot;&quot;ValidationError → 字段明细文本(如 &quot;content: String should have at least 1 character&quot;)。</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code></code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    只取 loc+msg,绝不携带输入值(input 可能含敏感原文)。</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>    parts: list[str] = []</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    for err in e.errors():</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        loc = &quot;.&quot;.join(str(x) for x in err.get(&quot;loc&quot;, ()))</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        msg = str(err.get(&quot;msg&quot;, &quot;&quot;))</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        parts.append(f&quot;{loc}: {msg}&quot; if loc else msg)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    return &quot;; &quot;.join(parts)[:2000]</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code></code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code></code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>def validate_payload(type_: str, payload: dict) -&gt; dict:</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>    &quot;&quot;&quot;payload 强类型二次校验(EVENT-SCHEMA §2.2 第 3 步)。</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code></code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    成功返回规范化 dict(model_dump);失败 → EVT-100 带字段明细。</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    model = payload_model_for(type_)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>    if model is None:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        raise_code(&quot;EVT-102&quot;, type_=type_)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    try:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        return model(**payload).model_dump()</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    except ValidationError as e:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        # 未注册已在上面抛 EVT-102;此处只可能是字段非法 → EVT-100</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        raise_code(&quot;EVT-100&quot;, type_=type_, detail=summarize_validation(e))</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code></code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code></code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code># ------------------------------------------------------------------ 核心词表</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code># 77 事件类型全量入册(EVENT-SCHEMA §3 的 57 A-E 分组**权威**[基线引用,非当前</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code># 计数] + 词表外扩展 20 项 = 77;按 §7 登记:llm.retry F028 /</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code># plan.done·plan.aborted F046 / schedule.registered·updated·removed·blocked·</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code># missed F048 / policy.updated ADR-020 / decision.issued ADR-015 /</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code># receipt.emitted M4 / evidence.archived M6;PARAMETER-ANCHOR 基线 57,扩展只增不改)。</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code># 元组元素:(type, payload_model, transient)</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>_CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>    # ---- A 会话生命周期(§3.1)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>    (&quot;session.created&quot;, SessionCreatedPayload, False),</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    (&quot;session.renamed&quot;, SessionRenamedPayload, False),</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>    (&quot;session.finished&quot;, SessionFinishedPayload, False),</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>    (&quot;session.recovered&quot;, SessionRecoveredPayload, False),</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>    # ---- B 用户输入侧(§3.2)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    (&quot;user.message&quot;, UserMessagePayload, False),</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>    (&quot;user.message_edited&quot;, UserMessageEditedPayload, False),</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>    (&quot;user.feedback&quot;, UserFeedbackPayload, False),</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>    (&quot;user.attachment.image&quot;, UserAttachmentImagePayload, False),</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>    (&quot;user.command&quot;, UserCommandPayload, False),</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    # ---- C 模型侧(§3.3)</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>    (&quot;llm.request&quot;, LlmRequestPayload, False),</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>    (&quot;llm.response&quot;, LlmResponsePayload, False),</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>    (&quot;llm.usage&quot;, LlmUsagePayload, False),</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>    (&quot;llm.error&quot;, LlmErrorPayload, False),</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>    (&quot;agent.message&quot;, AgentMessagePayload, False),</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>    (&quot;llm.chunk&quot;, LlmChunkPayload, True),          # 瞬时,仅总线</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>    (&quot;llm.retry&quot;, LlmRetryPayload, False),         # F028 落盘留痕(词表外扩展)</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>    # ---- D 工具侧:guard 与审批链(§3.4)</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>    (&quot;tool.call&quot;, ToolCallPayload, False),</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    (&quot;guard.evaluated&quot;, GuardEvaluatedPayload, False),</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>    (&quot;guard.rejected&quot;, GuardRejectedPayload, False),   # 强同步三类之一</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>    (&quot;approval.requested&quot;, ApprovalRequestedPayload, False),  # 强同步三类之一</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>    (&quot;approval.reviewed&quot;, ApprovalReviewedPayload, False),</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>    (&quot;approval.granted&quot;, ApprovalOutcomePayload, False),      # 强同步</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    (&quot;approval.denied&quot;, ApprovalOutcomePayload, False),       # 强同步</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>    (&quot;approval.timeout&quot;, ApprovalOutcomePayload, False),      # 强同步</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>    (&quot;tool.result&quot;, ToolResultPayload, False),</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>    (&quot;tool.error&quot;, ToolErrorPayload, False),</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>    # ---- E 编排与任务段(§3.5.1-3.5.3)</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    (&quot;task.enqueued&quot;, TaskEnqueuedPayload, False),</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>    (&quot;task.started&quot;, TaskStartedPayload, False),</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>    (&quot;task.completed&quot;, TaskCompletedPayload, False),</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>    (&quot;task.failed&quot;, TaskFailedPayload, False),</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>    (&quot;segment.start&quot;, SegmentStartPayload, False),   # 强同步(段锚先落)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>    (&quot;segment.end&quot;, SegmentEndPayload, False),</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>    (&quot;plan.proposed&quot;, PlanProposedPayload, False),</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>    (&quot;plan.approved&quot;, PlanApprovedPayload, False),</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>    (&quot;plan.rejected&quot;, PlanRejectedPayload, False),</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>    (&quot;plan.exec.step&quot;, PlanExecStepPayload, False),</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>    # 词表外扩展(§7 规则登记;specs/plan_mode.py.md F046 终态事件,PRD 伪代码用词)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>    (&quot;plan.done&quot;, PlanDonePayload, False),</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>    (&quot;plan.aborted&quot;, PlanAbortedPayload, False),</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>    (&quot;goal.created&quot;, GoalCreatedPayload, False),</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>    (&quot;goal.updated&quot;, GoalUpdatedPayload, False),</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>    (&quot;goal.completed&quot;, GoalCompletedPayload, False),</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    (&quot;schedule.trigger&quot;, ScheduleTriggerPayload, False),</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>    # schedule.* 词表外扩展(specs/schedule.py.md F048,EVENT-SCHEMA §7 登记,</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>    # llm.retry 同款先例;§3.5.3 字段表待文档管线同步——见规格&quot;词表外新增&quot;)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>    (&quot;schedule.registered&quot;, ScheduleRegisteredPayload, False),</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>    (&quot;schedule.updated&quot;, ScheduleUpdatedPayload, False),</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>    (&quot;schedule.removed&quot;, ScheduleRemovedPayload, False),</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>    (&quot;schedule.blocked&quot;, ScheduleBlockedPayload, False),</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>    (&quot;schedule.missed&quot;, ScheduleMissedPayload, False),</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>    (&quot;job.started&quot;, JobStartedPayload, False),</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>    (&quot;job.completed&quot;, JobCompletedPayload, False),</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>    (&quot;job.failed&quot;, JobFailedPayload, False),</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>    (&quot;subagent.spawned&quot;, SubagentSpawnedPayload, False),</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>    (&quot;subagent.joined&quot;, SubagentJoinedPayload, False),</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>    (&quot;subagent.failed&quot;, SubagentFailedPayload, False),</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>    (&quot;workflow.step&quot;, WorkflowStepPayload, False),</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>    (&quot;queue.suspended&quot;, QueueSuspendedPayload, False),</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>    (&quot;queue.resumed&quot;, QueueResumedPayload, False),</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>    # ---- E 系统侧(§3.5.4-3.5.6)</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>    (&quot;fork.created&quot;, ForkCreatedPayload, False),         # 强同步(分叉锚必须持久)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>    (&quot;context.compacted&quot;, ContextCompactedPayload, False),  # 强同步(空洞合法化声明)</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>    (&quot;plugin.installed&quot;, PluginInstalledPayload, False),</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>    (&quot;plugin.uninstalled&quot;, PluginUninstalledPayload, False),</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>    (&quot;bus.backpressure&quot;, BusBackpressurePayload, False),</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>    (&quot;system.cancelled&quot;, SystemCancelledPayload, False),</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>    (&quot;system.error&quot;, SystemErrorPayload, False),</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>    (&quot;todo.updated&quot;, TodoUpdatedPayload, False),</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>    (&quot;syscheck.fail&quot;, SyscheckFailPayload, False),</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>    # F032/F014 策略与预算事件(F032 预算闸/BudgetGuard 与 scope 单调收紧同源落盘)</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>    (&quot;scope.updated&quot;, ScopeUpdatedPayload, False),</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>    (&quot;budget.paused&quot;, BudgetPausedPayload, False),</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>    # #38 agent 反问(F063 词表外新增:user.question/answer 对,ask_id=question seq)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>    (&quot;user.question&quot;, UserQuestionPayload, False),</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>    (&quot;user.answer&quot;, UserAnswerPayload, False),</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>    # F073 技能系统装载审计(skill.load 工具调用留痕;目录注入另走 sysprompt 段)</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>    (&quot;skill.used&quot;, SkillUsedPayload, False),</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>    (&quot;skill.installed&quot;, SkillInstalledPayload, False),</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>    (&quot;skill.removed&quot;, SkillRemovedPayload, False),</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>    (&quot;skill.rollback&quot;, SkillRolledBackPayload, False),</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>    # 配置热更审计(瞬时,仅总线:无会话维度,不进 JSONL)</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>    (&quot;config.updated&quot;, ConfigUpdatedPayload, True),</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>    # 治理层策略事件(ADR-020:op∈{add,enable,disable};tighten 归 scope.updated;</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>    # 强同步见 SYNC_TYPES;config_ref 经 Envelope.trace 携带,不入载荷)</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>    (&quot;policy.updated&quot;, PolicyUpdatedPayload, False),</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>    # 治理层决策事件(ADR-015:M3;每次治理求值一条,含全放行;强同步见 SYNC_TYPES;</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>    # call_id 经 Envelope.trace 携带,不入载荷;verdict∈{allow,reject,approval})</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>    (&quot;decision.issued&quot;, DecisionIssuedPayload, False),</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>    # 治理层凭证事件(M4;薄引用 + 完整性链:receipt_id/decision_id/kind/digest/</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>    # prev_hash;完整 Receipt 由 decision.issued 派生;强同步见 SYNC_TYPES)</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>    (&quot;receipt.emitted&quot;, ReceiptEmittedPayload, False),</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>    # 治理层证据事件(M6;S5-1:只存引用,不复制事件内容,INV-G4;**普通攒批,</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>    # 不入 SYNC_TYPES**——证据是索引,丢失可由既有事件再派生,INV-E3)</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>    (&quot;evidence.archived&quot;, EvidenceArchivedPayload, False),</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>    (&quot;platform.artifact&quot;, PlatformResourcePayload, False),</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>    (&quot;executor.event&quot;, ExecutorEventPayload, False),</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>    (&quot;platform.sandbox&quot;, PlatformResourcePayload, False),</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>    (&quot;platform.knowledge&quot;, PlatformResourcePayload, False),</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>    (&quot;workspace.resource_committed&quot;, WorkspaceResourceCommittedPayload, False),</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>    (&quot;execution.lifecycle&quot;, ExecutionLifecyclePayload, False),</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>    (&quot;execution.effect&quot;, ExecutionEffectPayload, False),</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>    (&quot;execution.child&quot;, ExecutionChildPayload, False),</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>    (&quot;execution.checkpoint&quot;, ExecutionCheckpointPayload, False),</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>    (&quot;execution.correction_applied&quot;, ExecutionCorrectionAppliedPayload, False),</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>    (&quot;execution.state_checkpoint&quot;, ExecutionStateCheckpointPayload, False),</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>    (&quot;execution.context&quot;, ExecutionContextPayload, False),</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>)</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code></code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code></code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>def _install_core_vocabulary() -&gt; None:</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>    &quot;&quot;&quot;框架 70 类型启动期注册(模块导入即完成;只增不改)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>    for type_, model, transient in _CORE_EVENT_TYPES:</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        register_event_type(type_, model, transient=transient)</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code></code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code></code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>_install_core_vocabulary()</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code></code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>__all__ = [</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>    &quot;ACTORS&quot;, &quot;SYNC_TYPES&quot;, &quot;TRANSIENT_TYPES&quot;,</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>    &quot;EVENT_TYPES&quot;, &quot;register_event_type&quot;, &quot;payload_model_for&quot;, &quot;is_registered&quot;,</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>    &quot;is_transient&quot;, &quot;registered_event_types&quot;, &quot;validate_payload&quot;,</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>    &quot;summarize_validation&quot;,</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

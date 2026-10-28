@@ -1,0 +1,478 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/llm.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/llm.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 478 行</span></nav><main class="wrap source-page"><h1>pyharness/core/llm.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：625f417bcf76292f32b9f2f509034db809af869e<br>SHA-256（内容校验）：e81f93797986c0595c54045150d2638808ec57fb99474188b99d959148e5ba54</p><p><a href="../../../architecture-detailed.html?node=llm">Model Client and Adapters（模型客户端与适配器）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 24 个类、函数与方法</summary><ul><li><a href="#L95">LLMClient（类） · L95–L246</a><ul><li><a href="#L104">LLMClient.__init__（方法） · L104–L110</a></li><li><a href="#L112">LLMClient.chain（方法） · L112–L119</a></li><li><a href="#L121">LLMClient.require（方法） · L121–L127</a></li><li><a href="#L129">LLMClient._chat_any（异步方法） · L129–L143</a></li><li><a href="#L145">LLMClient._egress_guard（方法） · L145–L192</a></li><li><a href="#L194">LLMClient.chat（异步方法） · L194–L197</a></li><li><a href="#L199">LLMClient.chat_stream（异步方法） · L199–L202</a></li><li><a href="#L204">LLMClient.mini（异步方法） · L204–L215</a></li><li><a href="#L217">LLMClient.summarize（异步方法） · L217–L225</a></li><li><a href="#L227">LLMClient.json_chat（异步方法） · L227–L246</a></li></ul></li><li><a href="#L249">_extract_json_text（函数） · L249–L257</a></li><li><a href="#L260">LLMRuntime（类） · L260–L291</a><ul><li><a href="#L266">LLMRuntime.__init__（方法） · L266–L269</a></li><li><a href="#L271">LLMRuntime.has_borrowed_adapter（方法） · L271–L273</a></li><li><a href="#L275">LLMRuntime.aclose（异步方法） · L275–L280</a></li><li><a href="#L282">LLMRuntime._close_owned（异步方法） · L282–L291</a></li></ul></li><li><a href="#L296">OpenAICompatAdapter（类） · L296–L345</a><ul><li><a href="#L303">OpenAICompatAdapter.__init__（方法） · L303–L320</a></li><li><a href="#L322">OpenAICompatAdapter.mark_degraded_from（方法） · L322–L329</a></li><li><a href="#L332">OpenAICompatAdapter._ensure_transport（方法） · L332–L345</a></li></ul></li><li><a href="#L365">resolve_secret_ref（函数） · L365–L404</a></li><li><a href="#L407">build_client（函数） · L407–L430</a></li><li><a href="#L437">model_configuration_admission（函数） · L437–L459</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/llm.py — LLM 唯一出口模块(specs/llm.py.md 契约;阶段 1 核心)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>F012/F017/F027/F029/F030:脊柱唯一 LLM 出口——请求组装与发送、tool_calls wire 解析</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>(arguments 二次 json.loads 容错)、流式聚合、错误归一(五码)、usage 计量;LLM 零信任</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>(原则 4)的物理闸门。全系统除本模块外不存在&quot;直连模型端点&quot;路径(INV-02),消费方</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>agent-loop 唯一经注入的 ctx.llm.chat / ctx.llm.chat_stream 出网。</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>三层超时(PARAMETER-ANCHOR 锁死 10s/60s/180s):连接/写池 = connect_s(httpx 层)、</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>首 token = first_token_s(httpx read 档)、总闸 = total_s(asyncio.wait_for 编排闸)。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>错误全走 errors.raise_code(LLM-301~304 等;LLM-305/310 归 llm_fallback 编排层),</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>禁裸 raise str、禁匹配厂商错误文本(ADR-011,只按异常类别/HTTP 状态)。</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>HTTP 客户端注入式(可测性铁律 5):本模块不硬编码 SDK 调用细节——OpenAICompatAdapter</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>只依赖传输协议 {complete/stream/ping}(与 chat.completions.create 语义同构),单测注入</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>替身传输零网络;真实端点由 build_client(httpx OpenAI 兼容)构造,仅 e2e(-m e2e)触碰</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>网络。API key 只经 config 的 env:/file: 秘密引用(F016),模块内零字面量密钥。</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>偏离说明(契约以 specs/llm.py.md 伪码为准,以下为与已落地模块冲突处的取舍):</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>1. chat/chat_stream 除 spec 伪码的 llm.request 外,额外落单条 llm.response 事件并回填</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>   LLMResponse.seq:agent_loop 已实现契约要求(trace.parent_seq=resp.seq;test_agent_loop</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>   FakeLLM 注释明示&quot;真实 llm 层职责&quot;);且 session 派生折叠(INV-01)以 llm.response 为</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>   assistant 消息唯一事实源,chat 不落则文本轮历史断裂。流式与 chat 同型返回(GWT-L4-04:</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   日志恰 1 条 llm.response)。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>2. build_client 返回 httpx OpenAI 兼容传输而非 spec 的 openai.AsyncOpenAI:openai SDK 非</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   本阶段运行依赖(pyproject deps 无 openai,阶段约束&quot;真实 API 调用留 e2e&quot;);传输对象暴露</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>   complete/stream/ping 三接口,Provider 可整体注入。SDK 装后其异常类经 normalize_exc</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>   惰性 import 自动生效(e2e/未来阶段),映射矩阵与 ADI §7 一致。</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>3. normalize_exc 在 SDK 矩阵之外增补内置传输异常类:ProviderStatusError(HTTP 状态,401/403</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   →302、429/≥500→303、其余 4xx→304)、ProviderProtocolError(响应结构非法→304)、</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   httpx.TransportError(断网/连接/读超时→303)——类别判定同 ADI §7,不匹配厂商文本。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>4. report_usage 对价格表缺模型单价 → cost_est=None 照常记账(spec estimate_cost 内</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>   prices[model] 直取,缺价表会 KeyError 击穿&quot;纯记账不抛&quot;纪律);estimate_cost 本函数</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   保持 spec 语义(直取,调用方先查表)。</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>5. LLMResponse 增 seq 字段(偏离 1);ToolCall 增 call_id 别名属性(=id,工具层按 call_id</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   配对 tool.result 的消费契约)。两处均为字段级扩展,不破坏 spec 命名。</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>6. resolve_secret_ref = F016 最小落地(env:NAME/file:PATH 解析,缺失 CRED-701):credentials</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>   模块(真 F016,TTL/600 权限)未在本阶段实现,凭据模块落地后由装配层以 resolver 注入</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   build_client 替换,本函数即默认 resolver。</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>7. 单适配器 = 请求全生命周期单元(llm.request/总闸/归一/计量/llm.response 一次请求一</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>   套);降级链/退避/健康探针(F013/F028/F033)属 llm_fallback 编排层(下一阶段),按</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>   adapters[name].chat 复用同一事件路径,llm 零改动。</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>import asyncio</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>import json</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>import logging</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>import os</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>import re</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>import time</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>from abc import ABC, abstractmethod</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>from typing import TYPE_CHECKING, Any, AsyncIterator, Optional</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>from pyharness.core.llm_types import (_RETRYABLE_CODES, _L1_SETTINGS, _l1_settings, TimeoutLimits, ToolCall, LLMResponse, UsageCounters, AdapterTriple, ProviderStatusError, ProviderProtocolError, ToolCallSyntaxError, LLMAdapter)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>from pyharness.core.llm_protocol import (_sanitize_tool_name, _sanitize_tools, _restore_call_names, _load_arguments, parse_tool_calls, assistant_and_tool_messages, _emit_chunk, _slot_to_call, accumulate_stream, _est_tokens, _http_status_code, _openai_module, normalize_exc)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>from pyharness.core.llm_usage import (estimate_cost, _price_table, _llm_cfg_from_ctx, _request_payload, _response_payload, report_usage)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>from pyharness.core.llm_runtime import adapters, register_adapter, require_adapter</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>from pyharness.core.llm_transport import (_OpenAICompatHTTPTransport, _to_ns)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>if TYPE_CHECKING:  # 仅类型标注;装配对象鸭子注入(session/bus 经 ctx)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    pass</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>from pyharness.core.llm_protocol import log</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code></code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>try:  # httpx 为项目硬依赖;极端缺环境下模块仍可导入(纯解析/单测路径可用)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    import httpx</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>except ImportError:  # pragma: no cover — 缺依赖兜底</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    httpx = None  # type: ignore[assignment]</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code># LLM 错误归一后可重试码(F028 依据;LLM-304 业务错不重试不降级)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code># ================================================================ 数据结构</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code></code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code># ================================================================ 传输层异常</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code># ================================================================ wire 解析层</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code># ================================================================ 错误归一</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code># ================================================================ 成本与计量</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code># ================================================================ 适配器层</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>class LLMClient:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    &quot;&quot;&quot;会话级 LLM 门面(装配后 ctx.llm;agent-loop 唯一经此出网)。</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    模型解析:显式 model → cfg.llm.model → L1 deepseek-chat;注册表缺该模型 → LLM-304</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    (核对模型名 F030,不自动造适配器——装配层 register_adapter 显式登记,禁隐式端点)。</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    降级链/退避(F013/F028):chain 注入后本类代理到 FallbackChain.chat_with_fallback</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    (指数退避 + 单调降级 + BudgetGuard 前置;链缺位 = 直连适配器,行为同旧版)。</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    def __init__(self, cfg: Any = None, *, model: Optional[str] = None,</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                 registry: Optional[dict] = None,</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                 chain: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        llm = getattr(cfg, &quot;llm&quot;, None) if cfg is not None else None</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        self.model: str = model or (llm.model if llm is not None else &quot;deepseek-chat&quot;)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        self.registry: dict = registry if registry is not None else adapters</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        self._chain: Any = chain                 # FallbackChain(F013/F028;可 None)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code></code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    @property</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    def chain(self) -&gt; Any:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        &quot;&quot;&quot;降级链只读别名(F013/F028/F033 观测面;None = 未装配链)。</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code></code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        装配层需要它来启动健康探针(``probe_loop``)并观测 ``idx``/健康状态;</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        直接读 ``_chain`` 属跨模块私名依赖,故给只读别名。</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        return self._chain</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    def require(self) -&gt; LLMAdapter:</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        &quot;&quot;&quot;解析当前模型适配器(未注册 → LLM-304)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        inst = self.registry.get(self.model)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        if inst is None:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            raise_code(&quot;LLM-304&quot;, model=self.model,</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                       hint=&quot;模型未注册:核对模型名,或 register_adapter 后重试(F030)&quot;)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        return inst</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code></code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    async def _chat_any(self, method: str, messages: list[dict],</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                        tools: Optional[list], ctx: Any) -&gt; LLMResponse:</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        &quot;&quot;&quot;统一路由:chain 在岗(engine 装配)走降级编排;否则直连适配器。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        ch = self._chain</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        self._egress_guard(method, ctx)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        if ch is not None and callable(getattr(ch, &quot;chat_with_fallback&quot;, None)):</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            return await ch.chat_with_fallback(messages, tools, ctx=ctx,</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                                               method=method)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        inst = self.require()</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        if not isinstance(inst, ModelRequests):</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            from pyharness.core.context_observation import observe_adapter_request</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            await observe_adapter_request(ctx, self.model, method, messages, tools)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        from pyharness.core.product_model_gate import check_model_attempt</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        await check_model_attempt(ctx, self.model, method)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        return await getattr(inst, method)(messages, tools, ctx=ctx)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    def _egress_guard(self, method: str, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        &quot;&quot;&quot;LLM 出网治理闸——**统一边界 + 显式 Negative Space**(GAP-1)。</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code></code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        ``_chat_any`` 是 LLM 出网的**唯一汇点**:``chat`` / ``chat_stream`` /</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        ``mini`` / ``summarize`` / ``json_chat`` 五个公开出口全部经它,故治理只</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        需在此**一处**加闸——不需要在 8 个出口复制 ``authorize()``(那会造成</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        架构碎片化,且多份副本迟早漂移)。</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code></code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        **为什么边界不是 ``governance.authorize()``**</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code></code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        ``governance`` 包是**工具调用**授权层:g1–g7 按**工具名**前缀匹配</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        (``fs.*`` / ``web.*`` / ``exec.*``),``authorize()`` 收 ``ToolCall``,产出的</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        ``decision.issued`` / ``receipt.emitted`` 经 ``call_id`` 串联 ``tool.call`` /</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        ``tool.result``。**LLM 请求不是工具调用**:无工具名、无参数集合、无</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        Provider 副作用。把它塞进 ``authorize()`` 只能靠伪造 ``ToolCall``,会污染</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        工具治理链语义。故**不这么做**(P1:决策权与执行权分离,不因凑指标而破坏)。</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code></code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        **LLM 出网实际适用的治理面 = 会话级预算硬闸**,本闸把它下沉到唯一汇点:</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        ``ctx.scope.check_budget()``(超限抛 ``BudgetExhausted``,与 ``agent_loop``</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        轮起点**同源同信号**)。修复前该闸只在轮起点调用,``mini``(自动标题)/</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        ``summarize``(压缩)/``json_chat``(计划)三条**轮内**系统出口可绕过。</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code></code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        **三态语义**</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code></code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        1. scope 在位且预算 ok ⇒ 放行(正常落 ``llm.request`` / usage);</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        2. scope 在位且 paused/exhausted ⇒ **拒**(抛 ``BudgetExhausted``,</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>           **零出网**:不产生 ``llm.request``);</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        3. scope 缺失(纯内存/轻装配/单测替身)⇒ **降级放行**。理由:预算闸是</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>           **配额面**而非**授权面**,缺配额不等于越权;而事件落点/守卫缺失会让</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>           审计不成立,那些才必须 fail-closed(见 executor ``_require_wiring``)。</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code></code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        **Negative Space(显式声明哪些 LLM 出口不经本闸,及理由)**</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code></code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        - ``OpenAICompatAdapter.chat`` / ``.chat_stream``:适配器层,位于本类之后。</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>          已核验**全库无生产代码直接调用**(CI 静态闸扫此),唯一路径 = 本类</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>          ``_chat_any`` ⇒ 已被本闸覆盖。</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        - ``OpenAICompatAdapter.ping`` / 降级链健康探针:``ping`` 不产生 tokens、不落</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>          F029 计量、不进 ``llm.request``;让其受会话预算约束会使&quot;探测可用性&quot;被预算</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>          拒,语义颠倒。**明确不治理**,并登记于 ``LIMITATIONS.md``。</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        - 出网**之后**的审计面(``llm.request`` / ``llm.response`` / ``llm.usage``)</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>          不属本闸:那是**观测**面,由适配器落事件(唯一真源仍是 append-only 日志)。</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        scope = getattr(ctx, &quot;scope&quot;, None) if ctx is not None else None</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        if scope is None:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>            return                                   # 三态 ③:未装配配额面</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        check = getattr(scope, &quot;check_budget&quot;, None)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        if callable(check):</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            check()                                  # 三态 ②:超限即抛,零出网</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code></code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>    async def chat(self, messages: list[dict], tools: Optional[list] = None, *,</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                   ctx: Any) -&gt; LLMResponse:</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        &quot;&quot;&quot;唯一出口(代理到适配器/降级链;请求全生命周期单元,事件路径唯一)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        return await self._chat_any(&quot;chat&quot;, messages, tools, ctx)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code></code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    async def chat_stream(self, messages: list[dict], tools: Optional[list] = None, *,</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>                          ctx: Any) -&gt; LLMResponse:</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        &quot;&quot;&quot;流式出口(代理到适配器/降级链;chunk 上总线不入日志)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        return await self._chat_any(&quot;chat_stream&quot;, messages, tools, ctx)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code></code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>    async def mini(self, prompt: str, *, ctx: Any) -&gt; str:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        &quot;&quot;&quot;系统工具级单次文本出口(F042 auto_title 等消费):单 prompt 进 → 纯文本出。</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code></code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        与 ``chat`` 属**不同类**:无 messages 列表 / 无 tools 面 / 无对话轮语义 /</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        不返回 ``LLMResponse``。``chat``/``chat_stream`` 是 **Agent Loop 对话出口**</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        (INV-02:唯一合法调用方 = agent-loop);本出口是 **System Tool LLM 出口**,</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        与 ``summarize``/``json_chat`` 同类(同为 ``_chat_any`` 薄包装),差别仅在输出</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        形态。超时(F017)/计量(F029)/事件/降级链全部复用既有链,不新增真源。</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        resp = await self._chat_any(&quot;chat&quot;, [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: prompt}],</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>                                    None, ctx)</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        return (resp.content or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code></code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>    async def summarize(self, prompt: str, *, budget: int = 400,</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>                        ctx: Any = None) -&gt; str:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        &quot;&quot;&quot;压缩摘要出口(F058 Consumer):单次 chat 取 content;同走降级链。</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code></code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        compaction._call_summarize 经 ctx.llm.summarize 消费;未装配该面时</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        compaction 走规则降级(LLM-399 → degrade_summary,不炸)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        messages = [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: prompt}]</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        resp = await self._chat_any(&quot;chat&quot;, messages, None, ctx)</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        return (resp.content or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code></code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>    async def json_chat(self, prompt: str, **kw: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        &quot;&quot;&quot;JSON 强约束出口(plan_mode 等编排消费):单次 chat 后稳健抽取 JSON。</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code></code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        只负责把模型文本解析成 dict/list;结构校验由消费方(PlanManager)完成。</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        代码块围栏/前后叙述裁剪,坏 JSON → LLM-304(可重试错误,不静默伪装)。</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        goal = str(kw.get(&quot;goal&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        max_steps = int(kw.get(&quot;max_steps&quot;) or 8)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        ctx = kw.get(&quot;ctx&quot;)</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        user = f&quot;目标: {goal}\n最多 {max_steps} 步&quot; if goal else \</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>            f&quot;最多 {max_steps} 步&quot;</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        messages = [{&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: prompt},</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                    {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: user}]</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        resp = await self._chat_any(&quot;chat&quot;, messages, None, ctx)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        text = (resp.content or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        try:</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            return _extract_json_text(text)</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        except ValueError as e:</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            raise_code(&quot;LLM-304&quot;, hint=f&quot;json_chat 输出解析失败: {e}&quot;,</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                       advice=&quot;提示模型只回 JSON;重试&quot;)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code></code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code></code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>def _extract_json_text(text: str) -&gt; Any:</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>    &quot;&quot;&quot;裁剪 ```json 围栏后抽取首个完整 JSON 对象/数组。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>    cleaned = re.sub(r&quot;^```(?:json)?\s*&quot;, &quot;&quot;, text.strip(), flags=re.I)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    cleaned = re.sub(r&quot;\s*```$&quot;, &quot;&quot;, cleaned).strip()</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>    for open_ch, close_ch in ((&quot;{&quot;, &quot;}&quot;), (&quot;[&quot;, &quot;]&quot;)):</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        lo, hi = cleaned.find(open_ch), cleaned.rfind(close_ch)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        if lo != -1 and hi &gt; lo:</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            return json.loads(cleaned[lo:hi + 1])</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>    raise ValueError(&quot;模型输出不含 JSON 对象/数组&quot;)</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code></code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code></code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>class LLMRuntime:</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>    &quot;&quot;&quot;Application-owned connections; session counters are never retained here.</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code></code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>    Explicit non-production adapters in the public registry remain a borrowed</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>    test/plugin seam. New production clients are closed by this owner once.</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>    def __init__(self):</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        self.registry = {key: value for key, value in adapters.items()</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>                         if not isinstance(value, OpenAICompatAdapter)}</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        self.closed = False</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code></code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>    def has_borrowed_adapter(self, name):</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        adapter = self.registry.get(name)</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        return adapter is not None and not isinstance(adapter, OpenAICompatAdapter)</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code></code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>    async def aclose(self):</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        self.closed = True</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        task = getattr(self, &#x27;_close_task&#x27;, None)</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>            task = self._close_task = asyncio.create_task(self._close_owned())</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        await asyncio.shield(task)</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code></code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>    async def _close_owned(self):</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        errors = []</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        for adapter in {id(a): a for a in self.registry.values()}.values():</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            if isinstance(adapter, OpenAICompatAdapter):</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                try:</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>                    await adapter.aclose()</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>                except BaseException as exc:</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                    errors.append(exc)</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        if errors:</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>            raise BaseExceptionGroup(&#x27;model transport cleanup failed&#x27;, errors)</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code></code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code></code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>from pyharness.core.llm_requests import ModelRequests</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code></code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>class OpenAICompatAdapter(ModelRequests, LLMAdapter):</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>    &quot;&quot;&quot;OpenAI 兼容端点默认适配器(ADR-007/ADI §1):spec llm.py.md chat 主体实现。</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code></code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>    传输层注入式:transport(缺省经 build_client 由 httpx 构造)只暴露 complete/stream/ping;</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>    单测注入替身传输即零网络覆盖全链路(可测性铁律 5);真实调用仅 e2e。</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code></code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>    def __init__(self, model: str, triple: Optional[AdapterTriple] = None,</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>                 limits: Optional[TimeoutLimits] = None, *, cfg: Any = None,</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>                 transport: Any = None,</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                 counters: Optional[UsageCounters] = None) -&gt; None:</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        &quot;&quot;&quot;model=适配器名(与模型名一致,注册表键);triple/transport 二选一(注入则无需网络)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        if limits is None:</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            llm = getattr(cfg, &quot;llm&quot;, None) if cfg is not None else None</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>            limits = TimeoutLimits.from_cfg(llm.timeout) if llm is not None \</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>                else TimeoutLimits()</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        self.model: str = model</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        self.timeout: TimeoutLimits = limits</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>        self._triple = triple</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        self._cfg = cfg</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        self._transport = transport</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        self._closed = False</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        self._counters = counters if counters is not None else UsageCounters()</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        self._counters_injected: bool = counters is not None</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        self._deg: Optional[str] = None            # 降级来源(fallback 切链后置位 F013)</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code></code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>    def mark_degraded_from(self, source: Optional[str]) -&gt; None:</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        &quot;&quot;&quot;置位降级来源(Producer:降级链在降级时调用;F013)。</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code></code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        是 ``_deg`` 的唯一写入口:下一次 ``chat()`` 的 llm.request 据此携带</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        ``degraded_from``(EVENT-SCHEMA §3.x / ADI §3.3 / specs/llm.py.md)。</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        CND-08:此前 ``_deg`` 无赋值点 → ``degraded_from`` 恒缺失(dead trigger)。</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>        self._deg = source</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code></code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>    # ------------------------------------------------------ 传输解析</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>    def _ensure_transport(self) -&gt; Any:</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        &quot;&quot;&quot;惰性取传输:注入优先;否则 build_client(解析 key 需真实凭据,仅真调用路径)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        if self._closed:</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>            raise_code(&#x27;CRED-703&#x27;, reason=&#x27;model_runtime_closed&#x27;)</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>        if self._triple is not None and self._triple.credential_store is not None:</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>            self._triple.credential_store.validate_binding(</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>                self._triple.api_key_ref, self._triple.credential_binding)</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>        if self._transport is None:</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>            if self._triple is None:</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>                raise_code(&quot;CFG-601&quot;, reason=&quot;structural&quot;, fields=[&quot;llm&quot;],</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>                           detail=&quot;适配器缺端点三元组:构造 OpenAICompatAdapter 需 &quot;</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>                                  &quot;triple 或注入 transport&quot;)</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>            self._transport = build_client(self._triple, self.timeout)</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>        return self._transport</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code></code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code></code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>    # ------------------------------------------------------ 非流式唯一出口</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code></code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code></code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>    # ------------------------------------------------------ 流式入口(F027)</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code></code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code></code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>    # ------------------------------------------------------ 计量钩子</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code></code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code></code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>    # ------------------------------------------------------ F033 探针</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code></code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code></code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code># ================================================================ 注册表</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code># AdapterRegistry(F030):name(= 模型名) → 适配器实例;换模型 = 注册 + 配置,llm 零改动</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code></code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code></code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code># ================================================================ 凭据与客户端</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>def resolve_secret_ref(ref: str) -&gt; str:</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>    &quot;&quot;&quot;F016 单口最小落地:env/file/tenant 引用。缺失 → CRED-701。</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code></code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>    偏离 6:credentials 模块(真 F016)未在本阶段实现,此为默认 resolver;凭据模块落地后</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>    由装配层以 resolver 注入 build_client 替换。禁字面量密钥(配置层已拒载,CFG §7.1)。</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>    val: Optional[str] = None</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>    if ref.startswith(&quot;tenant:&quot;):</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>        from pyharness.core.tenant_settings import resolve_tenant_secret</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>        return resolve_tenant_secret(ref)</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>    if ref.startswith(&quot;env:&quot;):</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>        val = os.environ.get(ref[4:].strip())</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>    elif ref.startswith(&quot;file:&quot;):</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        path = os.path.expanduser(ref[5:].strip())</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>        # CRED-702(2026-09-21 R27 接线):凭据文件**权限过宽** ⇒ 拒载,不静默读。</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>        # 该码此前**已登记但全库从不抛出**(TS-06 实测:43 码中唯一无测试者)——</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>        # 文档承诺的&quot;权限过宽(&gt;600)→ 启动拒载&quot;在实现里根本不存在。POSIX 查 mode</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        # 的 group/other 位;Windows 的 mode 位是合成的、无安全含义(仓库既有口径:</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>        # ACL 尽力而为),故 Windows 上跳过该检查。</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>        if os.name != &quot;nt&quot;:</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>            try:</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>                mode = os.stat(path).st_mode &amp; 0o777</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>            except OSError:</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>                mode = None</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>            if mode is not None and mode &amp; 0o077:</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>                raise_code(&quot;CRED-702&quot;, ref=ref, path=path, mode=oct(mode),</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>                           hint=&quot;凭据文件权限过宽(&gt;600):chmod 600 后重试&quot;)</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>        try:</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>            with open(path, &quot;r&quot;, encoding=&quot;utf-8&quot;) as fh:</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>                val = (fh.readline().strip() or None)   # 首行;空文件 = 缺失</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>        except OSError as e:</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>            raise_code(&quot;CRED-701&quot;, ref=ref, reason=type(e).__name__,</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>                       hint=&quot;凭据缺失:检查 file:PATH 与权限(600)&quot;)</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>    else:</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>        raise_code(&quot;CRED-701&quot;, ref=ref, reason=&quot;secret_ref 语法非法&quot;,</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>                   hint=&quot;凭据只接受 env:NAME / file:PATH / tenant:租户:档案 引用&quot;)</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>    if not val:</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>        raise_code(&quot;CRED-701&quot;, ref=ref,</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>                   hint=&quot;凭据缺失:配置 env/file/tenant 引用后重试&quot;)</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>    return val</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code></code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code></code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>def build_client(triple: AdapterTriple, limits: TimeoutLimits, *,</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>                 resolver: Any = None) -&gt; _OpenAICompatHTTPTransport:</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>    &quot;&quot;&quot;客户端构建(ADI §1.1):按三元组建传输客户端;key 经 resolver(F016 单口)缺失 → CRED-701。</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code></code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>    偏离 2:spec 返回 openai.AsyncOpenAI——openai SDK 非本阶段运行依赖(真实调用留 e2e),</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>    此处返回 httpx OpenAI 兼容传输(complete/stream/ping,语义与 create 对齐),可整体注入。</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>    if triple.credential_store is not None:</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>        resolver = lambda ref: triple.credential_store.resolve_ref(ref, binding=triple.credential_binding)</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>    else:</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>        resolver = resolver or resolve_secret_ref</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>    key = resolver(triple.api_key_ref)              # 缺失 → CRED-701(绝不空串/None 续跑)</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>    if not key:</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>        raise_code(&quot;CRED-701&quot;, ref=triple.api_key_ref,</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>                   hint=&quot;凭据解析为空,拒绝构建客户端(绝不空串续跑)&quot;)</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>    base = triple.base_url.rstrip(&quot;/&quot;)              # 裸域或 /v1 结尾;禁写 /chat/completions</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>    timeout = httpx.Timeout(limits.connect_s,       # 连接/写/池 档</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>                            read=limits.first_token_s,   # 首 token 档(60s)</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>                            write=limits.connect_s, pool=limits.connect_s)</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>    transport = _OpenAICompatHTTPTransport(base_url=base, api_key=key, timeout=timeout)</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>    if triple.credential_store is not None:</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>        transport._validate = lambda: triple.credential_store.validate_binding(</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>            triple.api_key_ref, triple.credential_binding)</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>    return transport</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code></code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code></code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code># ================================================================ 会话门面</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code></code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code></code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code></code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>def model_configuration_admission(actual,expected,registry,model):</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>    from pyharness.core.model_connection_identity import connection_registry_key</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>    actual_keys=[actual.model,*(actual.fallback_models or [])]</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>    wanted=[expected.model,*(expected.fallback_models or [])]</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>    if len(actual_keys)!=len(wanted):return False,False</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>    limits=TimeoutLimits.from_cfg(expected.timeout)</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>    for key,name in zip(actual_keys,wanted):</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>        if key==name:continue  # old explicit borrowed-adapter configuration</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>        adapter=registry.get(key)</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>        if type(adapter) is not OpenAICompatAdapter or adapter._closed:return False,False</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>        triple=adapter._triple</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>        if (triple is None or adapter.model!=name or triple.model!=name or</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>                triple.api_key_ref!=expected.api_key or triple.base_url!=expected.base_url or</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>                adapter.timeout!=limits):return False,False</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code>        store=triple.credential_store;binding=triple.credential_binding</code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>        if store is not None:</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>            # Original store validates the exact generation; no secret is read.</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>            store.validate_binding(triple.api_key_ref,binding)</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>        derived=connection_registry_key(expected.api_key,expected.base_url,name,limits,binding,</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>            str(store.root.resolve()) if store is not None else &#x27;&#x27;)</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>        if key!=derived:return False,False</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>    value=actual.model_dump();value[&#x27;model&#x27;]=expected.model;value[&#x27;fallback_models&#x27;]=expected.fallback_models</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>    return value==expected.model_dump(),model in [*actual_keys,*wanted]</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code></code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code></code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>__all__ = [</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>    &quot;model_configuration_admission&quot;,</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>    # 数据结构</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>    &quot;TimeoutLimits&quot;, &quot;ToolCall&quot;, &quot;LLMResponse&quot;, &quot;UsageCounters&quot;, &quot;AdapterTriple&quot;,</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>    # 异常</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>    &quot;ToolCallSyntaxError&quot;, &quot;ProviderStatusError&quot;, &quot;ProviderProtocolError&quot;,</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code>    # wire 解析层</code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code>    &quot;parse_tool_calls&quot;, &quot;assistant_and_tool_messages&quot;, &quot;accumulate_stream&quot;,</code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>    # 错误归一/成本/计量</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>    &quot;normalize_exc&quot;, &quot;estimate_cost&quot;, &quot;report_usage&quot;,</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>    # 适配器与注册表(F030)</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>    &quot;LLMAdapter&quot;, &quot;OpenAICompatAdapter&quot;, &quot;adapters&quot;, &quot;register_adapter&quot;, &quot;require_adapter&quot;,</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>    # 客户端构建(ADI §1.1)/凭据单口(F016 占位)</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code>    &quot;build_client&quot;, &quot;resolve_secret_ref&quot;,</code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>    # 会话门面(ctx.llm)</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>    &quot;LLMClient&quot;,</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

@@ -1,0 +1,325 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/model_configuration_history.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/model_configuration_history.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 325 行</span></nav><main class="wrap source-page"><h1>pyharness/core/model_configuration_history.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：581136b32348199e099801668bb88dee9ba8775c<br>SHA-256（内容校验）：3c72962bc4df02691d57018126a784405ff4d0aea95d8f2b051056ca1340e15e</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 26 个类、函数与方法</summary><ul><li><a href="#L14">_snapshot（函数） · L14–L35</a></li><li><a href="#L38">_increases（函数） · L38–L53</a></li><li><a href="#L56">_ConfigurationDependencyView（类） · L56–L130</a><ul><li><a href="#L58">_ConfigurationDependencyView.__init__（方法） · L58–L60</a></li><li><a href="#L62">_ConfigurationDependencyView._check（方法） · L62–L65</a></li><li><a href="#L67">_ConfigurationDependencyView.authority（方法） · L67–L68</a></li><li><a href="#L70">_ConfigurationDependencyView.public（方法） · L70–L72</a></li><li><a href="#L74">_ConfigurationDependencyView.base_fingerprint（方法） · L74–L76</a></li><li><a href="#L78">_ConfigurationDependencyView.model（方法） · L78–L92</a></li><li><a href="#L94">_ConfigurationDependencyView.service（方法） · L94–L110</a></li><li><a href="#L112">_ConfigurationDependencyView.remote（方法） · L112–L130</a></li></ul></li><li><a href="#L133">ModelConfigurationHistory（类） · L133–L325</a><ul><li><a href="#L134">ModelConfigurationHistory.configuration_dependency_view（方法） · L134–L148</a></li><li><a href="#L150">ModelConfigurationHistory.configuration_public_metadata（方法） · L150–L153</a></li><li><a href="#L155">ModelConfigurationHistory.configuration_base_fingerprint（方法） · L155–L157</a></li><li><a href="#L159">ModelConfigurationHistory._configuration_access（方法） · L159–L171</a></li><li><a href="#L173">ModelConfigurationHistory._model_configuration_state（方法） · L173–L198</a></li><li><a href="#L200">ModelConfigurationHistory.model_configuration_current（方法） · L200–L205</a></li><li><a href="#L207">ModelConfigurationHistory.model_configuration_dependency（方法） · L207–L210</a></li><li><a href="#L212">ModelConfigurationHistory._model_configuration_revision（方法） · L212–L219</a></li><li><a href="#L221">ModelConfigurationHistory.model_configuration_history（方法） · L221–L229</a></li><li><a href="#L231">ModelConfigurationHistory.capture_model_configuration（方法） · L231–L256</a></li><li><a href="#L258">ModelConfigurationHistory._model_configuration_preview（方法） · L258–L274</a></li><li><a href="#L276">ModelConfigurationHistory.preview_model_configuration（方法） · L276–L278</a></li><li><a href="#L280">ModelConfigurationHistory.apply_model_configuration（方法） · L280–L317</a></li><li><a href="#L319">ModelConfigurationHistory.model_configuration_command（方法） · L319–L325</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Model revisions share the original settings transaction and secret authority.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import copy</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import os</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import re</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from contextlib import contextmanager</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from urllib.parse import urlsplit</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.core import configuration_revision_contracts as c</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.core.tenant_identity import normalize_tenant_id, normalize_profile_id</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>def _snapshot(row, known=()):</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    result = c.public_tree({k: row[k] for k in c.MODEL_FIELDS if k in row}, known)</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    if (type(result.get(&#x27;id&#x27;)) is not str or type(result.get(&#x27;model&#x27;)) is not str</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>            or not 1 &lt;= len(result[&#x27;model&#x27;]) &lt;= 200</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>            or type(result.get(&#x27;base_url&#x27;)) is not str):</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        c.reject(&#x27;configuration_invalid_model&#x27;)</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    try:</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        url = urlsplit(result[&#x27;base_url&#x27;])</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        if url.scheme not in (&#x27;http&#x27;, &#x27;https&#x27;) or not url.hostname or url.username or url.password or url.query or url.fragment:</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>            c.reject(&#x27;configuration_private_endpoint&#x27;)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    except ValueError:</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        c.reject(&#x27;configuration_invalid_model&#x27;)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    if &#x27;temperature&#x27; in result and (type(result[&#x27;temperature&#x27;]) not in (int, float) or not 0 &lt;= result[&#x27;temperature&#x27;] &lt;= 1.5):</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        c.reject(&#x27;configuration_invalid_model&#x27;)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    if &#x27;max_tokens&#x27; in result and (type(result[&#x27;max_tokens&#x27;]) is not int or not 1 &lt;= result[&#x27;max_tokens&#x27;] &lt;= 32768):</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        c.reject(&#x27;configuration_invalid_model&#x27;)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    if &#x27;supports_vision&#x27; in result and type(result[&#x27;supports_vision&#x27;]) is not bool:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        c.reject(&#x27;configuration_invalid_model&#x27;)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    fallbacks = result.get(&#x27;fallback_models&#x27;, [])</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    if type(fallbacks) is not list or len(fallbacks) &gt; 10 or any(type(v) is not str or not 1 &lt;= len(v) &lt;= 200 for v in fallbacks):</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        c.reject(&#x27;configuration_invalid_model&#x27;)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    return result</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>def _increases(current, target, active, resource):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    result = []</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    if active != resource:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        result.append(&#x27;active_model_connection_changed&#x27;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    for name in (&#x27;model&#x27;, &#x27;base_url&#x27;):</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        if current.get(name) != target.get(name):</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>            result.append(name+&#x27;_changed&#x27;)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    if &#x27;max_tokens&#x27; not in current or &#x27;max_tokens&#x27; not in target:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        result.append(&#x27;legacy_output_limit_requires_confirmation&#x27;)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    elif target[&#x27;max_tokens&#x27;] &gt; current[&#x27;max_tokens&#x27;]:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        result.append(&#x27;max_tokens_increased&#x27;)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    if set(target.get(&#x27;fallback_models&#x27;, [])) - set(current.get(&#x27;fallback_models&#x27;, [])):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        result.append(&#x27;fallback_models_added&#x27;)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    if target.get(&#x27;supports_vision&#x27;) and not current.get(&#x27;supports_vision&#x27;):</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        result.append(&#x27;vision_capability_added&#x27;)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    return result</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>class _ConfigurationDependencyView:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    &quot;&quot;&quot;Read-only metadata view whose original model transaction remains owned.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    def __init__(self, store, tenant, doc, values, authorize):</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        self._store, self._tenant, self._doc = store, tenant, doc</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        self._values, self._authorize, self._closed = values, authorize, False</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    def _check(self):</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        if self._closed:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            c.reject(&#x27;configuration_dependency_view_closed&#x27;)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        return self._authorize()</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    def authority(self):</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        return self._check()</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    def public(self, value):</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        self._check()</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        return c.public_tree(value, tuple(self._values.values()))</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    def base_fingerprint(self, value):</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        self._check()</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        return c.base_fingerprint(value, tuple(self._values.values()))</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    def model(self, profile_id=None):</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        self._check()</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        selected = profile_id or self._doc.get(&#x27;active&#x27;)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        if not selected:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            return {&#x27;profile_id&#x27;: None, &#x27;credential_status&#x27;: &#x27;unversioned_base_configuration&#x27;,</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                    &#x27;sha256&#x27;: c.digest({&#x27;tenant&#x27;: self._tenant, &#x27;profile&#x27;: None})}</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        if type(selected) is not str:</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            c.reject(&#x27;configuration_invalid_resource&#x27;)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        selected = normalize_profile_id(selected)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        state = self._store._model_configuration_state(self._tenant, selected, self._doc)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        execution = {k: state[&#x27;snapshot&#x27;][k] for k in (&#x27;model&#x27;, &#x27;base_url&#x27;, &#x27;temperature&#x27;,</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            &#x27;max_tokens&#x27;, &#x27;fallback_models&#x27;, &#x27;supports_vision&#x27;) if k in state[&#x27;snapshot&#x27;]}</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        return {&#x27;profile_id&#x27;: selected, &#x27;credential_status&#x27;: state[&#x27;credential_status&#x27;],</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                &#x27;sha256&#x27;: c.digest({&#x27;tenant&#x27;: self._tenant, &#x27;profile&#x27;: selected,</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                    &#x27;execution&#x27;: execution, &#x27;_binding&#x27;: state[&#x27;_binding&#x27;]})}</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    def service(self, reference, endpoint):</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        self._check()</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        prefix = &#x27;service:&#x27;+self._tenant+&#x27;:&#x27;</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        status, binding = &#x27;invalid_reference&#x27;, {}</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        if type(reference) is str and reference.startswith(prefix):</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            ident = reference[len(prefix):]</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            rows = self._doc.get(&#x27;service_credentials&#x27;, {})</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            row = rows.get(ident) if type(rows) is dict else None</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            if type(row) is dict and row.get(&#x27;endpoint&#x27;) == endpoint and self._values.get(&#x27;service:&#x27;+ident):</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                revision = row.get(&#x27;credential_revision&#x27;)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                if type(revision) is str and re.fullmatch(r&#x27;[a-f0-9]{32}&#x27;, revision):</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                    status = &#x27;valid&#x27;</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                    binding = {&#x27;tenant&#x27;: self._tenant, &#x27;service_id&#x27;: ident,</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                               &#x27;endpoint&#x27;: endpoint, &#x27;revision&#x27;: revision}</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                else:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                    status = &#x27;unversioned_reference&#x27;</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        return {&#x27;credential_status&#x27;: status, &#x27;sha256&#x27;: c.digest(binding)}</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code></code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    def remote(self, root, record):</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        &quot;&quot;&quot;Validate the original versioned remote blob without exporting its token.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        self._check()</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        status, binding = &#x27;invalid_reference&#x27;, {}</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        if type(record) is dict and type(record.get(&#x27;secret_id&#x27;)) is str and re.fullmatch(r&#x27;[a-f0-9]{32}&#x27;, record[&#x27;secret_id&#x27;]):</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            try:</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                from pyharness.core.sandbox import safe_path, read_regular</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                from pyharness.core.tenant_settings import _dpapi</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                raw = read_regular(safe_path(root, &#x27;remote-&#x27;+record[&#x27;secret_id&#x27;]+&#x27;.bin&#x27;), 16384)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                token = (_dpapi(raw, protect=False) if os.name == &#x27;nt&#x27; else raw).decode(&#x27;utf-8&#x27;)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                if not 32 &lt;= len(token) &lt;= 4096 or not token.isascii() or any(c.isspace() or ord(c) &lt; 33 for c in token):</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                    raise ValueError(&#x27;invalid remote credential&#x27;)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                self._values[&#x27;configuration-remote:&#x27;+record[&#x27;secret_id&#x27;]] = token</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                binding = self.public({&#x27;tenant&#x27;: self._tenant, &#x27;id&#x27;: record[&#x27;id&#x27;],</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                                       &#x27;address&#x27;: record[&#x27;address&#x27;], &#x27;revision&#x27;: record[&#x27;secret_id&#x27;]})</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                status = &#x27;valid&#x27;</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            except (PyHError, ValueError, TypeError, KeyError, OSError):</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>                pass</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        return {&#x27;credential_status&#x27;: status, &#x27;sha256&#x27;: c.digest(binding)}</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code></code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code></code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>class ModelConfigurationHistory:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    @contextmanager</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    def configuration_dependency_view(self, tenant_id, *, authorize):</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        &quot;&quot;&quot;Keep model bindings stable through an owned outer platform commit.</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        Caller acquires the platform transaction first, then this original model</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        transaction, and releases this view only after the platform commits.</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        Secret values stay inside the core view and never become a return value.</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        with self._configuration_access(tenant_id, &#x27;configuration-dependency&#x27;, authorize) as (tenant, _, doc):</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            view = _ConfigurationDependencyView(self, tenant, doc, self._load_secrets(tenant), authorize)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            try:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                yield view</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            finally:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                view._closed = True</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                view._values = {}</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code></code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    def configuration_public_metadata(self, tenant_id, value, *, authorize):</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        &quot;&quot;&quot;Check known tenant secrets without exporting them to application code.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        with self.configuration_dependency_view(tenant_id, authorize=authorize) as view:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            return view.public(value)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code></code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    def configuration_base_fingerprint(self, tenant_id, value, *, authorize):</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        with self.configuration_dependency_view(tenant_id, authorize=authorize) as view:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>            return view.base_fingerprint(value)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code></code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    @contextmanager</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>    def _configuration_access(self, tenant_id, profile_id, authorize):</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        if not callable(authorize):</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>            c.reject(&#x27;configuration_authority_required&#x27;)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        authorize()</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        if type(tenant_id) is not str or type(profile_id) is not str:</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>            c.reject(&#x27;configuration_invalid_resource&#x27;)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        tenant = normalize_tenant_id(tenant_id)</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        profile = normalize_profile_id(profile_id)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        with self._transaction(tenant):</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            authorize()</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>            yield tenant, profile, self._load_doc(tenant)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>            authorize()</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code></code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    def _model_configuration_state(self, tenant, profile, doc):</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        rows = [p for p in doc[&#x27;profiles&#x27;] if type(p) is dict and p.get(&#x27;id&#x27;) == profile]</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        if len(rows) &gt; 1:</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            c.reject(&#x27;configuration_resource_ambiguous&#x27;)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        values, credential_status = {}, &#x27;unavailable&#x27;</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        try:</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>            values = self._load_secrets(tenant)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        except PyHError:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>            pass  # Only status is exposed; invalid storage cannot authorize restore.</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        row = rows[0] if rows else None</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        if row is None:</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>            binding, snapshot = {}, {}</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>            credential_status = &#x27;resource_missing&#x27;</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        else:</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>            snapshot = _snapshot(row, tuple(values.values()))</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            binding = {&#x27;profile_id&#x27;: profile, &#x27;revision&#x27;: row.get(&#x27;credential_revision&#x27;, &#x27;&#x27;),</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                       &#x27;endpoint&#x27;: row[&#x27;base_url&#x27;], &#x27;source&#x27;: self._mask_ref(row)}</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>            if binding[&#x27;source&#x27;] in (&#x27;env&#x27;, &#x27;file&#x27;):</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                credential_status = &#x27;unversioned_external_reference&#x27;</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            elif values.get(profile) and binding[&#x27;revision&#x27;] and binding[&#x27;source&#x27;] == &#x27;encrypted&#x27;:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                credential_status = &#x27;valid&#x27;</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        source = {&#x27;tenant_id&#x27;: tenant, &#x27;resource_kind&#x27;: &#x27;model&#x27;, &#x27;resource_id&#x27;: profile,</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                  &#x27;snapshot&#x27;: snapshot, &#x27;_binding&#x27;: binding, &#x27;active_profile&#x27;: doc.get(&#x27;active&#x27;, &#x27;&#x27;),</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                  &#x27;credential_status&#x27;: credential_status, &#x27;updated_at&#x27;: row.get(&#x27;updated_at&#x27;) if row else None}</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        source[&#x27;source_sha256&#x27;] = c.digest(source)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        return source</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code></code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    def model_configuration_current(self, tenant_id, profile_id, *, authorize):</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        with self._configuration_access(tenant_id, profile_id, authorize) as (tenant, profile, doc):</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            state = self._model_configuration_state(tenant, profile, doc)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            if not state[&#x27;snapshot&#x27;]:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                c.reject(&#x27;configuration_resource_not_found&#x27;)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            return c.public_tree({k: v for k, v in state.items() if not k.startswith(&#x27;_&#x27;)})</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code></code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    def model_configuration_dependency(self, tenant_id, profile_id, *, authorize):</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        &quot;&quot;&quot;Opaque exact model/credential binding, independent of labels/activation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        with self.configuration_dependency_view(tenant_id, authorize=authorize) as view:</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>            return view.model(profile_id)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code></code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>    def _model_configuration_revision(self, tenant, profile, ident, doc):</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        value = c.history(doc)[&#x27;revisions&#x27;].get(ident) if type(ident) is str else None</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        if value is None:</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            c.reject(&#x27;configuration_revision_not_found&#x27;)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        value = c.checked_revision(value, ident, tenant, &#x27;model&#x27;, profile)</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        if _snapshot(value[&#x27;snapshot&#x27;]) != value[&#x27;snapshot&#x27;] or value[&#x27;snapshot&#x27;][&#x27;id&#x27;] != profile:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>            c.reject(&#x27;configuration_revision_integrity&#x27;)</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        return value</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code></code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>    def model_configuration_history(self, tenant_id, profile_id, *, authorize):</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        with self._configuration_access(tenant_id, profile_id, authorize) as (tenant, profile, doc):</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            rows = [self._model_configuration_revision(tenant, profile, ident, doc)</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>                    for ident, value in c.history(doc)[&#x27;revisions&#x27;].items()</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>                    if type(value) is dict and value.get(&#x27;resource_id&#x27;) == profile]</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>            return {&#x27;resource_kind&#x27;: &#x27;model&#x27;, &#x27;resource_id&#x27;: profile,</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                    &#x27;revisions&#x27;: [c.public_revision(v) for v in sorted(rows, key=lambda v: v[&#x27;number&#x27;])],</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                    &#x27;commands&#x27;: c.recent_commands(c.history(doc), tenant, &#x27;model&#x27;, profile),</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                    &#x27;execution_authorized&#x27;: False}</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code></code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    def capture_model_configuration(self, tenant_id, profile_id, body, *, authorize):</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        c.request(body, {&#x27;command_key&#x27;, &#x27;source_sha256&#x27;})</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        with self._configuration_access(tenant_id, profile_id, authorize) as (tenant, profile, doc):</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            request_digest = c.digest({&#x27;tenant&#x27;: tenant, &#x27;resource&#x27;: profile, &#x27;body&#x27;: body})</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>            previous = c.command(c.history(doc), body[&#x27;command_key&#x27;], &#x27;capture_model&#x27;, request_digest)</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>            if previous is not None:</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>                return previous</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>            state = self._model_configuration_state(tenant, profile, doc)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>            if not state[&#x27;snapshot&#x27;]:</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                c.reject(&#x27;configuration_resource_not_found&#x27;)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>            if state[&#x27;source_sha256&#x27;] != body[&#x27;source_sha256&#x27;]:</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>                c.reject(&#x27;configuration_source_stale&#x27;)</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            c.public_tree(body, tuple(self._load_secrets(tenant).values()))</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            history_ = c.history(doc, create=True)</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            if len(history_[&#x27;revisions&#x27;]) &gt;= c.MAX_REVISIONS:</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                c.reject(&#x27;configuration_revision_history_limit&#x27;)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>            prior = [v[&#x27;number&#x27;] for v in history_[&#x27;revisions&#x27;].values() if v[&#x27;resource_id&#x27;] == profile]</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>            value = c.revision(tenant, &#x27;model&#x27;, profile, max(prior, default=0)+1,</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                               state[&#x27;snapshot&#x27;], state[&#x27;source_sha256&#x27;], state[&#x27;_binding&#x27;])</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>            history_[&#x27;revisions&#x27;][value[&#x27;revision_id&#x27;]] = value</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>            result = {&#x27;status&#x27;: &#x27;captured&#x27;, &#x27;revision&#x27;: c.public_revision(value),</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>                      &#x27;historical_result&#x27;: True, &#x27;execution_authorized&#x27;: False}</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>            c.save_command(history_, body[&#x27;command_key&#x27;], &#x27;capture_model&#x27;, request_digest, result)</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>            authorize()</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>            self._save_doc(tenant, doc)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            return result</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code></code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>    def _model_configuration_preview(self, tenant, profile, ident, doc):</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        value = self._model_configuration_revision(tenant, profile, ident, doc)</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        state = self._model_configuration_state(tenant, profile, doc)</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        issues = []</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        if not state[&#x27;snapshot&#x27;]:</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            issues.append(&#x27;resource_missing&#x27;)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        if state[&#x27;credential_status&#x27;] != &#x27;valid&#x27;:</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>            issues.append(&#x27;credential_&#x27;+state[&#x27;credential_status&#x27;])</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        if value[&#x27;_binding&#x27;] != state[&#x27;_binding&#x27;]:</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>            issues.append(&#x27;credential_binding_changed&#x27;)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        result = c.preview(state, value, issues=issues,</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>            increases=_increases(state[&#x27;snapshot&#x27;], value[&#x27;snapshot&#x27;], state[&#x27;active_profile&#x27;], profile))</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        result[&#x27;active_profile_before&#x27;] = state[&#x27;active_profile&#x27;]</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        result[&#x27;active_profile_after&#x27;] = profile</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        # Activation choice is part of the exact preview, not a hidden second write.</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        result[&#x27;preview_sha256&#x27;] = c.digest({k: v for k, v in result.items() if k != &#x27;preview_sha256&#x27;})</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        return result</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code></code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>    def preview_model_configuration(self, tenant_id, profile_id, ident, *, authorize):</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        with self._configuration_access(tenant_id, profile_id, authorize) as (tenant, profile, doc):</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>            return self._model_configuration_preview(tenant, profile, ident, doc)</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code></code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>    def apply_model_configuration(self, tenant_id, profile_id, ident, body, *, authorize):</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        c.confirm(body)</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        with self._configuration_access(tenant_id, profile_id, authorize) as (tenant, profile, doc):</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>            request_digest = c.digest({&#x27;tenant&#x27;: tenant, &#x27;resource&#x27;: profile, &#x27;revision&#x27;: ident, &#x27;body&#x27;: body})</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>            previous = c.command(c.history(doc), body[&#x27;command_key&#x27;], &#x27;apply_model&#x27;, request_digest)</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            if previous is not None:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                return previous</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>            c.public_tree(body, tuple(self._load_secrets(tenant).values()))</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            preview = self._model_configuration_preview(tenant, profile, ident, doc)</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>            if not preview[&#x27;compatible&#x27;]:</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                c.reject(&#x27;configuration_restore_not_active&#x27;)</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>            if body[&#x27;preview_sha256&#x27;] != preview[&#x27;preview_sha256&#x27;]:</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>                c.reject(&#x27;configuration_preview_stale&#x27;)</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            if preview[&#x27;permission_increases&#x27;] and body[&#x27;confirm_permission_increase&#x27;] is not True:</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                c.reject(&#x27;configuration_permission_confirmation_required&#x27;)</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>            value = self._model_configuration_revision(tenant, profile, ident, doc)</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>            row = next(p for p in doc[&#x27;profiles&#x27;] if p[&#x27;id&#x27;] == profile)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>            for name in c.MODEL_FIELDS:</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                if name == &#x27;id&#x27;:</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                    continue</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                if name in value[&#x27;snapshot&#x27;]:</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>                    row[name] = copy.deepcopy(value[&#x27;snapshot&#x27;][name])</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                else:</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>                    row.pop(name, None)</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>            row[&#x27;updated_at&#x27;] = datetime.now(timezone.utc).isoformat()</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>            doc[&#x27;active&#x27;] = profile</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>            state = self._model_configuration_state(tenant, profile, doc)</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>            if state[&#x27;credential_status&#x27;] != &#x27;valid&#x27; or state[&#x27;_binding&#x27;] != value[&#x27;_binding&#x27;]:</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>                c.reject(&#x27;configuration_restore_not_active&#x27;)</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            result = {&#x27;status&#x27;: &#x27;applied&#x27;, &#x27;revision&#x27;: c.public_revision(value),</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>                      &#x27;profile_id&#x27;: profile, &#x27;active&#x27;: profile,</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>                      &#x27;new_source_sha256&#x27;: state[&#x27;source_sha256&#x27;], &#x27;historical_result&#x27;: True,</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>                      &#x27;old_attempts_changed&#x27;: False, &#x27;external_effects_rolled_back&#x27;: False,</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>                      &#x27;execution_authorized&#x27;: False}</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>            c.save_command(c.history(doc, create=True), body[&#x27;command_key&#x27;], &#x27;apply_model&#x27;, request_digest, result)</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>            authorize()</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>            self._save_doc(tenant, doc)  # Sole commit: model metadata + receipt; secret file untouched.</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>            return result</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code></code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>    def model_configuration_command(self, tenant_id, command_key, *, authorize):</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        # No profile is required to observe an already committed command.</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>        with self._configuration_access(tenant_id, &#x27;configuration-query&#x27;, authorize) as (_, _, doc):</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>            value = c.history(doc)[&#x27;commands&#x27;].get(c.key(command_key))</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>            if value is None:</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>                c.reject(&#x27;configuration_command_not_found&#x27;)</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>            return c.public_tree(c.checked_command(value)[&#x27;result&#x27;])</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

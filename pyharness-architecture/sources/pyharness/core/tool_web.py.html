@@ -1,0 +1,552 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/tool_web.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/tool_web.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 552 行</span></nav><main class="wrap source-page"><h1>pyharness/core/tool_web.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：6b1d1e9ec2061ee0c2c8966f8dc20597f61ae4f5<br>SHA-256（内容校验）：3f4f38cab4a96bac065820889c40cedc44ac6c57f039de29d4209cef0b6dde7b</p><p><a href="../../../architecture-detailed.html?node=web_tools">Web Retrieval Tools（受限网络搜索与抓取）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 24 个类、函数与方法</summary><ul><li><a href="#L120">_get_secret（函数） · L120–L131</a></li><li><a href="#L138">_bump_search_calls（函数） · L138–L168</a></li><li><a href="#L172">web_search（异步函数） · L172–L212</a></li><li><a href="#L215">_summarize_search（函数） · L215–L237</a></li><li><a href="#L241">_DuckDuckGoParser（类） · L241–L282</a><ul><li><a href="#L244">_DuckDuckGoParser.__init__（方法） · L244–L249</a></li><li><a href="#L251">_DuckDuckGoParser._is（方法） · L251–L254</a></li><li><a href="#L256">_DuckDuckGoParser.handle_starttag（方法） · L256–L266</a></li><li><a href="#L268">_DuckDuckGoParser.handle_data（方法） · L268–L270</a></li><li><a href="#L272">_DuckDuckGoParser.handle_endtag（方法） · L272–L282</a></li></ul></li><li><a href="#L285">DuckDuckGoBackend（类） · L285–L308</a><ul><li><a href="#L296">DuckDuckGoBackend.__init__（方法） · L296–L297</a></li><li><a href="#L299">DuckDuckGoBackend.search（异步方法） · L299–L308</a></li></ul></li><li><a href="#L311">BingRssBackend（类） · L311–L339</a><ul><li><a href="#L316">BingRssBackend.__init__（方法） · L316–L317</a></li><li><a href="#L319">BingRssBackend.search（异步方法） · L319–L339</a></li></ul></li><li><a href="#L343">web_fetch（异步函数） · L343–L375</a></li><li><a href="#L378">_looks_binary（函数） · L378–L380</a></li><li><a href="#L383">_spill_put（异步函数） · L383–L402</a></li><li><a href="#L406">_RawResponse（类） · L406–L413</a></li><li><a href="#L416">_http_once（异步函数） · L416–L453</a></li><li><a href="#L456">_header（函数） · L456–L462</a></li><li><a href="#L465">http_get（异步函数） · L465–L491</a></li><li><a href="#L507">register（函数） · L507–L542</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>r&quot;&quot;&quot;pyharness/core/tool_web.py — Web 工具族 web.* (specs/tool_web.py.md 契约;阶段 3 模块)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F037(Web 搜索)· F038(Web 抓取);联动 F016(凭据 get_secret/出口脱敏)/</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>F023(g-net-outbound 域闸)/F024(抓取内容指令视为数据)/F039(&gt;32KB 转 spill)。</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>权威口径:specs/tool_web.py.md(编码契约,伪代码权威)、PRD-Core §5.4 F037/F038、</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>SECURITY.md §7.3(网络影响域:allowlist 默认空 = 禁一切外发/搜索次数闸)、</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>CFG.md §3.2(loop.content.search_result_chars=8000、fetch_max_chars=32768)/§3.3</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>(security.network.web_search_per_session=20、allowed_domains=[])、ERR.md §2.9/§2.11</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>(TLB-805/TLB-806/GRD-401 POL-NET-1/CRED-701);冲突以 PRD-Core 为准。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>职责一句话:Web 工具族——web.search(关键词搜索,单会话次数闸 ≤20、结果合计</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>≤8KB 截断、key 走 F016)与 web.fetch(URL 抓取 → 正文提取 Markdown、HTML 不入</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>上下文、&gt;32KB 转 spill、域名必须命中 allowed_domains);网络默认全禁,抓取是注入</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>攻击主入口,三层限制 = allowlist + 正文提取(HTML 不进上下文)+ 截断。</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>偏离说明(契约=spec 伪码;以下为既有实现冲突/空白处的取舍,均列理由):</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>1. 单跳传输抽为 seam _http_once:伪码把 httpx 调用内联在 http_get,而依赖节/任务</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>   要求『HTTP 客户端注入式、测试零外发(mock transport,T-SEC-07)』→ 把『单跳</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>   GET(不跟随重定向,限量读流,超时/错误映射)』抽为模块私有 _http_once,http_get</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>   的递归重定向 + 逐跳域重验 + 状态分支保持伪码原样;真实路径与伪码逐位等价</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>   (httpx.AsyncClient 每次递归新建,与伪码 async with 同语义),单测注入 fake 零触网。</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>2. 重定向预算判改为 redirects &lt;= 0:伪码 `redirects &lt; 0` 在剩余 0 时仍会跟随第 4 个</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   重定向响应才报错(实际放行 4 跳),与模块职责『重定向 ≤3 跳』、SECURITY §7.3</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   『≤3 跳』及错误文案『重定向超过 3 跳』自相矛盾 → 落地 ≤0 即拒(允许恰 3 跳),</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   伪码此处为笔误。</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>3. counters 未接线回落零读数:spec 伪码直用 ctx.counters.bump,而装配期 counters</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>   可能缺位(本仓库计数对象未定型,spill 只写不入读)→ _bump_search_calls 支持</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   dict/带 bump 对象/属性三形态,均不可用则 debug 日志 + 回落 0(沿用 scope.py</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   『未接线 → 零读数=ok』先例;正常会话装配必有 counters,次数闸真实生效)。</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>4. register 补 owner 与 Provider 绑定:本项目 ToolDefinition 无 handler 字段且</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>   extra=forbid(spec register 伪码的 handler= 参数在此注册表不可编译)→ 按</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>   tool_fs 偏离 10 同款:owner=&quot;builtin&quot; + register_tool(d, provider=PROVIDERS[...]),</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   否则 executor 关3 lookup_provider 报『契约已注册但未绑定 Provider』。</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>5. _summarize_search 字段容错:伪码 h[&quot;title&quot;] 直取与自身异常表『hits 字段缺失按</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   空串容错』矛盾 → 落地 h.get(title/url/snippet, 默认空串);total 恒 = len(hits)。</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>6. 噪声正则加 re.I:spec 正则 `(^|[\s_-])(nav|menu|ad|ads?|footer|sidebar|banner)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>   ([\s_-]|$)` 原样保留但忽略大小写(HTML class/id 大小写不敏感,误伤面收敛);</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   li/tr 等块只换行不加列表符/缩进(spec 只承诺『决定换行与缩进』的功能面,列表</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>   符不在功能清单;正文丢失不扩大,格式不加戏)。</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>7. html_to_markdown 命名与防御上限:_Extractor/_TextExtractor 伪码两处并存,取</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>   _TextExtractor;_MAX_MD 伪码引用未列值,与 RAW_HTML_MAX 同为 2MB(HTML 原文本</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>   就 ≤2MB,Markdown 为其子集,超限由调用方 spill 兜底)。</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>8. 搜索后端:默认装配 BingRssBackend(无 key,稳定 XML),保留 DuckDuckGoBackend</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>   作为可选 HTML 后端;端点由 security.network.search_backend/search_endpoint</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>   控制。web.* 仍受 scope 的 allowed_domains 显隐约束,未配置时 fail-closed。</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>依赖方向(INV-08):本文件 → errors(raise_code)、tools_registry(ToolDefinition 五</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>要素)、httpx(唯一外发传输,openai 传输层同库)、urllib.parse/html.parser(标准库</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>正文提取);不 import guard/executor/approval 内部符号(ctx 注入面全部鸭子读取)。</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code></code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>import html.parser</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>import inspect</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>import logging</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>import re</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>import xml.etree.ElementTree as ET</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>from dataclasses import dataclass</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>from urllib.parse import (parse_qs, urlencode, urljoin, urlsplit,</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                           unquote)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>import asyncio</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>import httpx</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>from pyharness.core.tools_registry import ToolDefinition</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>from pyharness.core.web_markdown import (_SKIP_TAGS, _BLOCK_TAGS, _HEADING_LEVELS, _NOISE_RE, _WS_RE, _TextExtractor, _attr, _class_hit, html_to_markdown)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>from pyharness.core.web_domains import (_normalize_hostname, _domain_allowed)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code># ------------------------------------------------------------------ 常量</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>&quot;&quot;&quot;web.search 单会话次数闸默认(security.network.web_search_per_session;0=禁用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>&quot;&quot;&quot;搜索结果合计字符预算默认(loop.content.search_result_chars)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code></code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>&quot;&quot;&quot;web.fetch 正文转 spill 阈值默认(loop.content.fetch_max_chars)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>&quot;&quot;&quot;原始 HTML 抓取上限 2MB(防内存/带宽滥用,超限 PERS-223)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>&quot;&quot;&quot;F038 单次 HTTP 请求墙钟总超时(秒)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>&quot;&quot;&quot;F038 连接阶段超时(秒)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code></code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>&quot;&quot;&quot;重定向跟随上限(≤3 跳,逐跳重验域名;SECURITY §7.3)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>&quot;&quot;&quot;二进制探测样本字节数(NUL 命中即 TLB-806 拒读,与 tool_fs 同口径)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>&quot;&quot;&quot;html_to_markdown 防御性输出上限(= RAW_HTML_MAX;超限由调用方 spill,偏离 7)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>&quot;&quot;&quot;超跳数回喂文案(spec 伪码 advice)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>from pyharness.core.web_policy import (log, SEARCH_PER_SESSION, SEARCH_RESULT_CHARS, FETCH_MAX_CHARS, RAW_HTML_MAX, HTTP_TIMEOUT, CONNECT_TIMEOUT, REDIRECT_MAX, BINARY_SAMPLE, _MAX_MD, _MAX_REDIRECT_ADVICE)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>from pyharness.core.web_domains_config import (_cfg_holder, _cfg_read, _allowed_domains)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>_POL_NET_ADVICE: str = &quot;目标域不在 allowed_domains;需会话显式放行(默认全禁)&quot;</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>&quot;&quot;&quot;allowlist 未命中回喂文案(spec 伪码 advice;重定向域逃逸复用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code></code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code># 标签级丢弃(后代全跳):script/style 是 CDATA 指令载体,noscript/svg/head 非正文,</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code># nav/footer 属导航/页脚噪声块(职责 3);iframe 同族噪声(内容不可信渲染面)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code># 块级换行集(spec 实现要点权威:p/div/li/tr/h1-h6/pre 决定换行;br 单断另行处理)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code></code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>&quot;&quot;&quot;标题级别映射(开标签时写入 &#x27;#&#x27;*level + &#x27; &#x27; 前缀)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code># class/id 噪声黑名单(spec 正则权威 + re.I,偏离 6):命中即跳过该块及其后代</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>&quot;&quot;&quot;行内空白折叠(HTML 空白 → 单空格)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code># ---------------------------------------------------------------- 配置辅助</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code></code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code></code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>from pyharness.core.tool_redaction import _redact</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code></code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code></code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>def _get_secret(ctx: Any, name: str) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    &quot;&quot;&quot;F016 凭据单一读取口:ctx.get_secret(name) → 缺失/空串一律 None(CRED-701</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    由调用方抛,绝不空串继续);读取口未接线/异常同样按缺失 fail-closed。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    fn = getattr(ctx, &quot;get_secret&quot;, None)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    if not callable(fn):</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        return None</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    try:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        v = fn(name)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    except Exception:                           # noqa: BLE001 底层故障 = 缺失</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        log.warning(&quot;ctx.get_secret(%s) 异常,按凭据缺失处理&quot;, name)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        return None</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    return v if isinstance(v, str) and v else None</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code></code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code># ---------------------------------------------------------------- 域名归一闸</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code></code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code></code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code># ------------------------------------------------------------ 会话计数(次数闸)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>def _bump_search_calls(ctx: Any) -&gt; int:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    &quot;&quot;&quot;web.search 会话计数 +1,返回新计数值(spec: ctx.counters.bump(&quot;search_calls&quot;))。</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code></code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    counters 三形态兼容(dict / 带 bump 的对象 / 属性形态);均不可用 → debug 日志</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    回落 0 读数(偏离 3,零读数=未超限放行,沿用 scope 先例)。计数键 search_calls</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    会话级,新会话清零(次数闸 ≤20 次/会话)。</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    c = getattr(ctx, &quot;counters&quot;, None)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    if c is None:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        log.debug(&quot;ctx.counters 未接线:搜索次数闸失读(回落 0)&quot;)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        return 0</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    if isinstance(c, dict):</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        nxt = int(c.get(&quot;search_calls&quot;, 0)) + 1</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        c[&quot;search_calls&quot;] = nxt</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        return nxt</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    bump = getattr(c, &quot;bump&quot;, None)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    if callable(bump):</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        try:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            out = bump(&quot;search_calls&quot;, 1)       # (key, delta) 形态</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        except TypeError:</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            out = bump(&quot;search_calls&quot;)          # (key) 形态(内部自增)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        if isinstance(out, int):</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            return out</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        cur = getattr(c, &quot;search_calls&quot;, None)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        return int(cur) if cur is not None else 1</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    cur = int(getattr(c, &quot;search_calls&quot;, 0) or 0) + 1   # 属性形态</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    try:</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        setattr(c, &quot;search_calls&quot;, cur)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    except Exception:                           # noqa: BLE001 只读对象:降级</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        log.debug(&quot;counters 属性形态不可写 search_calls&quot;)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    return cur</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code></code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code></code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code># ================================================================ web.search</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>async def web_search(args: dict, ctx: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    &quot;&quot;&quot;web.search(F037):次数闸 → F016 取 key → SearchBackend → ≤8KB 摘要返回。</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code></code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    目标域固定为已授权搜索服务端点(ctx.search_backend 装配注入),不受逐调用</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>    allowlist 约束(职责 1 区分依据);受次数闸与凭据闸约束。异常全走 raise_code。</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>    used = _bump_search_calls(ctx)              # 会话计数 +1(先计数后判断,伪码序)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    limit = _cfg_read(ctx, &quot;security.network.web_search_per_session&quot;,</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                      SEARCH_PER_SESSION)</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    try:</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        limit = int(limit)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>    except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        limit = SEARCH_PER_SESSION</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    if limit == 0 or used &gt; limit:              # 0=禁用;超闸零外发拒绝</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        raise_code(&quot;GRD-401&quot;, reason=&quot;search-quota&quot;, used=used, limit=limit,</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                   policy_ref=&quot;PRD F037 / CFG security.network.web_search_per_session&quot;,</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                   advice=f&quot;本会话搜索次数已达上限({limit});&quot;</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                          &quot;改用 web.fetch 直抓已知 URL 或新开会话&quot;)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    backend = getattr(ctx, &quot;search_backend&quot;, None)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    key = _get_secret(ctx, &quot;SEARCH_API_KEY&quot;)    # F016 单一读取口</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    needs_key = True if backend is None else bool(</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        getattr(backend, &quot;requires_key&quot;, True))</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>    if needs_key and key is None:</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>        raise_code(&quot;CRED-701&quot;, hint=&quot;配置 SEARCH_API_KEY(F016)&quot;)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>    if backend is None or not callable(getattr(backend, &quot;search&quot;, None)):</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        raise_code(&quot;CYC-999&quot;, module=&quot;tool_web&quot;,</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>                   hint=&quot;ctx.search_backend 未接线:搜索服务后端缺失&quot;</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>                        &quot;(装配 bug),fail-closed 拒绝外发&quot;)</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    top_k = args.get(&quot;top_k&quot;)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>    try:</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        top_k = int(top_k) if top_k is not None else 5</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        top_k = 5                               # 契约层已拦;直调路径兜底</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>    hits = await backend.search(query=args[&quot;query&quot;], top_k=top_k, key=key)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>    max_chars = _cfg_read(ctx, &quot;loop.content.search_result_chars&quot;,</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                          SEARCH_RESULT_CHARS)</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>    try:</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        max_chars = int(max_chars)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>    except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        max_chars = SEARCH_RESULT_CHARS</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>    return _summarize_search(hits, max_chars=max_chars)</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code></code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code></code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>def _summarize_search(hits: list, *, max_chars: int) -&gt; dict:</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    &quot;&quot;&quot;搜索结果摘要截断(spec 伪码权威,偏离 5 字段容错)。</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code></code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>    逐条标题/URL/摘要压进 max_chars(8000)预算,单条字段各自截断(title 200 /</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>    url 500 / snippet 600)防单条长文独占预算;装不下整条即停并置 truncated;</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>    total 恒 = 后端命中总数(含被预算截掉者)。返回 _SearchOut 字典。</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>    out: list[dict] = []</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>    budget = int(max_chars)</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>    truncated = False</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>    for h in hits or []:</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        if not isinstance(h, dict):             # 脏数据防御:非 dict 单条跳过</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>            continue</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        item = {&quot;title&quot;: str(h.get(&quot;title&quot;, &quot;&quot;))[:200],</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                &quot;url&quot;: str(h.get(&quot;url&quot;, &quot;&quot;))[:500],</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                &quot;snippet&quot;: str(h.get(&quot;snippet&quot;, &quot;&quot;))[:600]}</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        cost = sum(len(v) for v in item.values())</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        if budget - cost &lt; 0:                   # 装不下:截断留痕</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            truncated = True</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            break</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        out.append(item)</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        budget -= cost</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>    return {&quot;results&quot;: out, &quot;truncated&quot;: truncated, &quot;total&quot;: len(hits or [])}</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code></code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code></code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code># ------------------------------------------------------------ 默认搜索后端</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>class _DuckDuckGoParser(html.parser.HTMLParser):</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>    &quot;&quot;&quot;Small parser for DuckDuckGo&#x27;s no-JS HTML result page.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code></code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>    def __init__(self) -&gt; None:</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        super().__init__(convert_charrefs=True)</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        self.hits: list[dict] = []</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        self._mode: Optional[str] = None</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        self._buf: list[str] = []</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        self._href = &quot;&quot;</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code></code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    def _is(attrs: list, needle: str) -&gt; bool:</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        return needle in &quot; &quot;.join(</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>            str(v) for k, v in attrs if k in (&quot;class&quot;, &quot;id&quot;) and v)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code></code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>    def handle_starttag(self, tag: str, attrs: list) -&gt; None:</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        if tag != &quot;a&quot;:</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            return</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        if self._is(attrs, &quot;result__a&quot;):</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>            href = next((str(v) for k, v in attrs if k == &quot;href&quot; and v), &quot;&quot;)</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>            parsed = urlsplit(href)</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>            qs = parse_qs(parsed.query)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            href = unquote((qs.get(&quot;uddg&quot;) or [href])[0])</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            self._mode, self._buf, self._href = &quot;title&quot;, [], href</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        elif self._is(attrs, &quot;result__snippet&quot;):</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>            self._mode, self._buf = &quot;snippet&quot;, []</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code></code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>    def handle_data(self, data: str) -&gt; None:</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        if self._mode:</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>            self._buf.append(data)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code></code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>    def handle_endtag(self, tag: str) -&gt; None:</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        if tag != &quot;a&quot; or not self._mode:</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>            return</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>        text = &quot; &quot;.join(&quot;&quot;.join(self._buf).split())</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        if self._mode == &quot;title&quot; and text and self._href:</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>            self.hits.append({&quot;title&quot;: text, &quot;url&quot;: self._href,</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>                              &quot;snippet&quot;: &quot;&quot;})</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        elif self._mode == &quot;snippet&quot; and text and self.hits:</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>            if not self.hits[-1][&quot;snippet&quot;]:</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                self.hits[-1][&quot;snippet&quot;] = text</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        self._mode, self._buf, self._href = None, [], &quot;&quot;</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code></code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code></code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>class DuckDuckGoBackend:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>    &quot;&quot;&quot;No-key HTML search backend for local/agent use.</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code></code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>    ``web.search`` still requires a non-empty domain allowlist at scope level so</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>    the default security posture remains fail-closed.  Once a caller explicitly</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>    enables the network domain, this backend provides a working search without</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>    an API key.</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code></code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>    requires_key = False</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code></code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>    def __init__(self, endpoint: str = &quot;https://html.duckduckgo.com/html/&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        self.endpoint = endpoint</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code></code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>    async def search(self, *, query: str, top_k: int, key: Optional[str] = None) -&gt; list:</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        url = f&quot;{self.endpoint}?{urlencode({&#x27;q&#x27;: query})}&quot;</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>        resp = await _http_once(None, url, max_bytes=RAW_HTML_MAX)</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        if resp.status &gt;= 400:</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>            raise_code(&quot;TLB-805&quot;, url=url, http_status=resp.status,</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>                       advice=f&quot;DuckDuckGo HTML 搜索返回 HTTP {resp.status}&quot;)</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>        parser = _DuckDuckGoParser()</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>        parser.feed(resp.raw.decode(&quot;utf-8&quot;, errors=&quot;replace&quot;))</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        parser.close()</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        return parser.hits[:max(1, int(top_k))]</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code></code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code></code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>class BingRssBackend:</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>    &quot;&quot;&quot;No-key Bing RSS backend (stable XML, no HTML scraping).&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code></code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>    requires_key = False</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code></code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>    def __init__(self, endpoint: str = &quot;https://cn.bing.com/search&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        self.endpoint = endpoint</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code></code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>    async def search(self, *, query: str, top_k: int, key: Optional[str] = None) -&gt; list:</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        url = f&quot;{self.endpoint}?format=rss&amp;{urlencode({&#x27;q&#x27;: query})}&quot;</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>        resp = await _http_once(None, url, max_bytes=RAW_HTML_MAX)</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        if resp.status &gt;= 400:</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>            raise_code(&quot;TLB-805&quot;, url=url, http_status=resp.status,</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>                       advice=f&quot;Bing RSS 搜索返回 HTTP {resp.status}&quot;)</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        try:</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>            root = ET.fromstring(resp.raw.decode(&quot;utf-8&quot;, errors=&quot;replace&quot;))</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        except ET.ParseError as exc:</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>            raise_code(&quot;TLB-805&quot;, url=url, stage=&quot;parse&quot;,</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>                       cause=exc, advice=&quot;Bing RSS 返回非 XML&quot;)</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        out: list[dict] = []</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>        for item in root.findall(&quot;.//item&quot;):</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>            title = &quot; &quot;.join((item.findtext(&quot;title&quot;) or &quot;&quot;).split())</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>            link = (item.findtext(&quot;link&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>            snippet = &quot; &quot;.join((item.findtext(&quot;description&quot;) or &quot;&quot;).split())</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>            if title or link or snippet:</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>                out.append({&quot;title&quot;: title, &quot;url&quot;: link, &quot;snippet&quot;: snippet})</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>            if len(out) &gt;= max(1, int(top_k)):</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>                break</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>        return out</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code></code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code></code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code># ================================================================ web.fetch</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>async def web_fetch(args: dict, ctx: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>    &quot;&quot;&quot;web.fetch(F038):域名 allowlist 自检 → http_get(15s/2MB/≤3 跳)→ 二进制</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>    拒 → html_to_markdown 正文提取 → redact → ≤max 直返 / &gt;32KB 转 spill 引用。</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code></code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>    三层限制 = allowlist + 正文提取(HTML 原文永不进上下文)+ 截断;抓取内容</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>    指令视为数据(F024),本函数不执行页面任何指令形态。返回 _FetchOut 字典。</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>    url = args[&quot;url&quot;]</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>    domain = _domain_allowed(url, ctx)          # 域名归一 + allowlist 自检(第二道)</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>    if domain is None:                          # 默认空 = 禁一切外发</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        raise_code(&quot;GRD-401&quot;, reason=&quot;POL-NET-1&quot;, url=url,</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>                   advice=_POL_NET_ADVICE)</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>    raw, final_url = await http_get(url, max_bytes=RAW_HTML_MAX, ctx=ctx)</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>    if _looks_binary(raw):                      # 二进制/非文本拒(TLB-806)</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        raise_code(&quot;TLB-806&quot;, url=url,</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>                   advice=&quot;目标为二进制/非文本内容,换其它手段&quot;)</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>    md = html_to_markdown(raw.decode(&quot;utf-8&quot;, errors=&quot;replace&quot;),</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>                          base_url=final_url)   # 正文提取;HTML 原文即弃</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>    md = _redact(ctx, md)                       # 出口脱敏(INV-09)</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>    cfg_max = _cfg_read(ctx, &quot;loop.content.fetch_max_chars&quot;, FETCH_MAX_CHARS)</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>    try:</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        cfg_max = int(cfg_max)</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>    except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>        cfg_max = FETCH_MAX_CHARS</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>    max_chars = args.get(&quot;max&quot;)</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>    if max_chars is None:</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>        max_chars = cfg_max                     # 参数缺省回落配置阈值</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>    if len(md) &lt;= int(max_chars):               # 小正文直接返回</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>        return {&quot;content&quot;: md, &quot;truncated&quot;: False, &quot;final_url&quot;: final_url}</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>    meta = await _spill_put(ctx, md, kind=&quot;fetch&quot;)   # &gt;阈值转 spill(F039)</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>    return {&quot;content&quot;: str(meta.get(&quot;preview&quot;, &quot;&quot;))[:500],</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>            &quot;truncated&quot;: True,                  # 上下文只放摘要 + 引用</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>            &quot;spill_ref&quot;: meta, &quot;final_url&quot;: final_url}</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code></code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code></code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>def _looks_binary(data: bytes) -&gt; bool:</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>    &quot;&quot;&quot;二进制探测:NUL 字节样本命中(BINARY_SAMPLE=8192 头样本,与 tool_fs 同口径)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>    return b&quot;\x00&quot; in data[:BINARY_SAMPLE]</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code></code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code></code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>async def _spill_put(ctx: Any, text: str, kind: str) -&gt; dict:</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>    &quot;&quot;&quot;ctx.storage.spill.put 封装(与 tool_fs._spill_put 同款):spill 未接线 →</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>    PERS-221 结构化上抛(超长输出无法归档,不静默);返回须为 F039 SpillMeta dict。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>    spill = getattr(getattr(ctx, &quot;storage&quot;, None), &quot;spill&quot;, None)</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>    if spill is None:</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>        raise_code(&quot;PERS-221&quot;, module=&quot;tool_web&quot;,</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>                   hint=&quot;storage.spill 未接线(能力未激活),超限内容无法归档&quot;)</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>    try:</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>        r = spill.put(text, kind=kind)</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>        if inspect.isawaitable(r):</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>            r = await r</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>    except PyHError:</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>        raise</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>    except Exception as exc:                    # noqa: BLE001 落盘故障 → PERS-221</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>        raise_code(&quot;PERS-221&quot;, module=&quot;tool_web&quot;, cause=exc,</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>                   advice=&quot;spill 写失败,查 spill 目录权限与磁盘空间&quot;)</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>    if not isinstance(r, dict):</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>        raise_code(&quot;PERS-221&quot;, module=&quot;tool_web&quot;,</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>                   hint=&quot;storage.spill.put 返回非 dict(契约违约)&quot;)</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>    return r</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code></code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code></code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code># ------------------------------------------------------------ 受限 HTTP 传输层</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>class _RawResponse:</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>    &quot;&quot;&quot;单跳原始响应契约(传输 seam 返回型):状态码/头/字节/终址。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code></code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>    status: int</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>    headers: dict</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>    raw: bytes</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>    final_url: str</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code></code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code></code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>async def _http_once(ctx: Any, url: str, *, max_bytes: int) -&gt; _RawResponse:</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>    &quot;&quot;&quot;单跳 GET(不跟随重定向;传输 seam,偏离 1)——真实路径走 httpx。</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code></code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>    连接 10s/总 15s 超时(httpx.Timeout(15, connect=10),F038);3xx/4xx/5xx 只取</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>    头不读体(重定向/错误响应无需下载);2xx 限量读流,读满 max_bytes 即 PERS-223</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>    (超 2MB 拒,防内存/带宽滥用);httpx 超时/网络错误映射 TLB-805 明确原因。</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>    测试注入面:monkeypatch 本函数即可(mock transport,零 HTTP 外发,T-SEC-07)。</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>    timeout = httpx.Timeout(HTTP_TIMEOUT, connect=CONNECT_TIMEOUT)</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>    try:</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>        # 墙钟总闸:httpx.Timeout 是&quot;每步&quot;超时,慢滴流服务器(m每步都 &lt;15s)可无限拖延;</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>        # asyncio.timeout 给整次抓取一个硬上限(P3:tool_web 每步超时→墙钟)。</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>        async with asyncio.timeout(HTTP_TIMEOUT):</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>            async with httpx.AsyncClient(timeout=timeout,</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>                                         follow_redirects=False) as client:</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>                async with client.stream(&quot;GET&quot;, url) as resp:   # 手动控跳</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>                    headers = {str(k).lower(): str(v)</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>                               for k, v in resp.headers.items()}</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>                    if resp.status_code &gt;= 300:     # 重定向/错误:不读体</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>                        return _RawResponse(resp.status_code, headers, b&quot;&quot;,</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>                                            str(resp.url))</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>                    raw = b&quot;&quot;</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>                    async for chunk in resp.aiter_bytes():      # 限量读流</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>                        raw += chunk</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>                        if len(raw) &gt; max_bytes:    # 超原始上限 → 停并拒</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>                            raise_code(&quot;PERS-223&quot;, url=url, got=len(raw),</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>                                       max=max_bytes,</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>                                       advice=&quot;页面超过 2MB 抓取上限,换更小目标&quot;)</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>                    return _RawResponse(resp.status_code, headers, raw,</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>                                        str(resp.url))</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>    except PyHError:</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>        raise</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>    except (TimeoutError, httpx.TimeoutException):</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>        raise_code(&quot;TLB-805&quot;, url=url, stage=&quot;timeout&quot;,</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>                   advice=&quot;抓取超时(15s 墙钟)&quot;)</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code>    except httpx.HTTPError as e:</code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>        raise_code(&quot;TLB-805&quot;, url=url, stage=&quot;transport&quot;,</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>                   cause=e, advice=f&quot;网络失败:{type(e).__name__}&quot;)</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code></code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code></code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>def _header(resp: _RawResponse, name: str) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>    &quot;&quot;&quot;大小写不敏感头读取(fake/真实传输头键形态统一收敛)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>    target = name.lower()</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>    for k, v in (resp.headers or {}).items():</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>        if str(k).lower() == target:</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>            return str(v)</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>    return None</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code></code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code></code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>async def http_get(url: str, *, max_bytes: int, ctx: Any,</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>                   redirects: int = REDIRECT_MAX) -&gt; tuple[bytes, str]:</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>    &quot;&quot;&quot;受限 HTTP 抓取(F038 传输层,spec 伪码权威 + 偏离 1/2)。</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code></code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code>    跟随重定向但逐跳对目标域名重验 allowlist(防白名单域名跳黑名单域名),超</code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>    跳数/域逃逸即拒(GRD-401 POL-NET-1 / TLB-805);4xx/5xx 抛结构化错误带</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>    http_status;成功返回 (raw_bytes, final_url=重定向终址)。</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>    if redirects &lt;= 0:                          # 偏离 2:预算耗尽即停(≤3 跳)</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>        raise_code(&quot;TLB-805&quot;, url=url, redirects=REDIRECT_MAX,</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code>                   advice=_MAX_REDIRECT_ADVICE)</code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>    if _domain_allowed(url, ctx) is None:       # 每跳重验域(含首跳,第二道闸)</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>        raise_code(&quot;GRD-401&quot;, reason=&quot;POL-NET-1&quot;, url=url,</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code>                   advice=&quot;重定向目标域未放行,已停止&quot;)</code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code>    resp = await _http_once(ctx, url, max_bytes=max_bytes)</code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code>    status = resp.status</code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>    if 300 &lt;= status &lt; 400:                     # 重定向:手动跟随(urljoin 补相对)</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>        loc = _header(resp, &quot;location&quot;)</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>        if not loc:</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>            raise_code(&quot;TLB-805&quot;, url=url, http_status=status,</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code>                       advice=&quot;重定向无 Location&quot;)</code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>        return await http_get(urljoin(url, loc), max_bytes=max_bytes,</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code>                              ctx=ctx, redirects=redirects - 1)</code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code>    if status &gt;= 400:                           # 4xx/5xx:明确原因,工具内不自动重试</code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>        raise_code(&quot;TLB-805&quot;, url=url, http_status=status,</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>                   advice=f&quot;HTTP {status},可稍后重试或换源&quot;)</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code>    return resp.raw, resp.final_url            # 2xx:原文 + 终址</code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code></code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code></code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code># ------------------------------------------------------------ 正文提取(F038)</code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code></code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code>    # 注释/声明/处理指令一律忽略(handle_comment/decl/pis 默认空实现)</code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code></code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code></code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code># ============================================================ 五要素注册入口</code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>PROVIDERS: dict[str, Any] = {</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code>    &quot;web.search&quot;: web_search,</code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code>    &quot;web.fetch&quot;: web_fetch,</code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>}</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>&quot;&quot;&quot;Provider handle 映射(裸 async handler,executor 关3 契约:handle(args, ctx))。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code></code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code></code></div>
+<div class="code-line" id="L507"><a class="line-number" href="#L507">507</a><code>def register(registry: Any) -&gt; list[str]:</code></div>
+<div class="code-line" id="L508"><a class="line-number" href="#L508">508</a><code>    &quot;&quot;&quot;五要素注册入口(F008/T-05):装配 web.search/web.fetch 两个 ToolDefinition。</code></div>
+<div class="code-line" id="L509"><a class="line-number" href="#L509">509</a><code></code></div>
+<div class="code-line" id="L510"><a class="line-number" href="#L510">510</a><code>    danger 均 none(白名单内只读,SECURITY §4.2),域名约束由 g5(g-net-outbound)</code></div>
+<div class="code-line" id="L511"><a class="line-number" href="#L511">511</a><code>    + 工具内 _domain_allowed 第二道承担,不依赖 danger 审批。偏离 4:ToolDefinition</code></div>
+<div class="code-line" id="L512"><a class="line-number" href="#L512">512</a><code>    无 handler 字段 → register_tool(d, provider=…) 绑定 Provider(tool_fs 同款)。</code></div>
+<div class="code-line" id="L513"><a class="line-number" href="#L513">513</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L514"><a class="line-number" href="#L514">514</a><code>    defs = [</code></div>
+<div class="code-line" id="L515"><a class="line-number" href="#L515">515</a><code>        ToolDefinition(</code></div>
+<div class="code-line" id="L516"><a class="line-number" href="#L516">516</a><code>            name=&quot;web.search&quot;, danger=&quot;none&quot;,</code></div>
+<div class="code-line" id="L517"><a class="line-number" href="#L517">517</a><code>            description=&quot;关键词搜索(默认 5 条:标题/URL/摘要),供判断是否值得&quot;</code></div>
+<div class="code-line" id="L518"><a class="line-number" href="#L518">518</a><code>                        &quot;抓取;受会话次数闸限制&quot;,</code></div>
+<div class="code-line" id="L519"><a class="line-number" href="#L519">519</a><code>            schema={&quot;type&quot;: &quot;object&quot;,</code></div>
+<div class="code-line" id="L520"><a class="line-number" href="#L520">520</a><code>                    &quot;properties&quot;: {</code></div>
+<div class="code-line" id="L521"><a class="line-number" href="#L521">521</a><code>                        &quot;query&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;minLength&quot;: 1,</code></div>
+<div class="code-line" id="L522"><a class="line-number" href="#L522">522</a><code>                                  &quot;maxLength&quot;: 500},</code></div>
+<div class="code-line" id="L523"><a class="line-number" href="#L523">523</a><code>                        &quot;top_k&quot;: {&quot;type&quot;: &quot;integer&quot;, &quot;minimum&quot;: 1,</code></div>
+<div class="code-line" id="L524"><a class="line-number" href="#L524">524</a><code>                                  &quot;maximum&quot;: 10}},</code></div>
+<div class="code-line" id="L525"><a class="line-number" href="#L525">525</a><code>                    &quot;required&quot;: [&quot;query&quot;], &quot;additionalProperties&quot;: False},</code></div>
+<div class="code-line" id="L526"><a class="line-number" href="#L526">526</a><code>            owner=&quot;builtin&quot;, timeout_s=30),</code></div>
+<div class="code-line" id="L527"><a class="line-number" href="#L527">527</a><code>        ToolDefinition(</code></div>
+<div class="code-line" id="L528"><a class="line-number" href="#L528">528</a><code>            name=&quot;web.fetch&quot;, danger=&quot;none&quot;,</code></div>
+<div class="code-line" id="L529"><a class="line-number" href="#L529">529</a><code>            description=&quot;抓取 URL 并提取正文 Markdown(去导航/脚本/广告);&quot;</code></div>
+<div class="code-line" id="L530"><a class="line-number" href="#L530">530</a><code>                        &quot;HTML 不入上下文;需域名已放行&quot;,</code></div>
+<div class="code-line" id="L531"><a class="line-number" href="#L531">531</a><code>            schema={&quot;type&quot;: &quot;object&quot;,</code></div>
+<div class="code-line" id="L532"><a class="line-number" href="#L532">532</a><code>                    &quot;properties&quot;: {</code></div>
+<div class="code-line" id="L533"><a class="line-number" href="#L533">533</a><code>                        &quot;url&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;format&quot;: &quot;uri&quot;,</code></div>
+<div class="code-line" id="L534"><a class="line-number" href="#L534">534</a><code>                                &quot;pattern&quot;: &quot;^https?://&quot;},</code></div>
+<div class="code-line" id="L535"><a class="line-number" href="#L535">535</a><code>                        &quot;max&quot;: {&quot;type&quot;: &quot;integer&quot;, &quot;minimum&quot;: 1024,</code></div>
+<div class="code-line" id="L536"><a class="line-number" href="#L536">536</a><code>                                &quot;maximum&quot;: 1048576}},</code></div>
+<div class="code-line" id="L537"><a class="line-number" href="#L537">537</a><code>                    &quot;required&quot;: [&quot;url&quot;], &quot;additionalProperties&quot;: False},</code></div>
+<div class="code-line" id="L538"><a class="line-number" href="#L538">538</a><code>            owner=&quot;builtin&quot;, timeout_s=60),</code></div>
+<div class="code-line" id="L539"><a class="line-number" href="#L539">539</a><code>    ]</code></div>
+<div class="code-line" id="L540"><a class="line-number" href="#L540">540</a><code>    for d in defs:                               # 逐个登记并绑定 Provider</code></div>
+<div class="code-line" id="L541"><a class="line-number" href="#L541">541</a><code>        registry.register_tool(d, provider=PROVIDERS.get(d.name))</code></div>
+<div class="code-line" id="L542"><a class="line-number" href="#L542">542</a><code>    return [d.name for d in defs]                # 注册名清单</code></div>
+<div class="code-line" id="L543"><a class="line-number" href="#L543">543</a><code></code></div>
+<div class="code-line" id="L544"><a class="line-number" href="#L544">544</a><code></code></div>
+<div class="code-line" id="L545"><a class="line-number" href="#L545">545</a><code>__all__ = [</code></div>
+<div class="code-line" id="L546"><a class="line-number" href="#L546">546</a><code>    &quot;web_search&quot;, &quot;web_fetch&quot;, &quot;BingRssBackend&quot;, &quot;DuckDuckGoBackend&quot;,</code></div>
+<div class="code-line" id="L547"><a class="line-number" href="#L547">547</a><code>    &quot;_domain_allowed&quot;,</code></div>
+<div class="code-line" id="L548"><a class="line-number" href="#L548">548</a><code>    &quot;http_get&quot;, &quot;html_to_markdown&quot;,</code></div>
+<div class="code-line" id="L549"><a class="line-number" href="#L549">549</a><code>    &quot;_summarize_search&quot;, &quot;register&quot;, &quot;PROVIDERS&quot;,</code></div>
+<div class="code-line" id="L550"><a class="line-number" href="#L550">550</a><code>    &quot;SEARCH_PER_SESSION&quot;, &quot;SEARCH_RESULT_CHARS&quot;, &quot;FETCH_MAX_CHARS&quot;,</code></div>
+<div class="code-line" id="L551"><a class="line-number" href="#L551">551</a><code>    &quot;RAW_HTML_MAX&quot;, &quot;HTTP_TIMEOUT&quot;, &quot;REDIRECT_MAX&quot;,</code></div>
+<div class="code-line" id="L552"><a class="line-number" href="#L552">552</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

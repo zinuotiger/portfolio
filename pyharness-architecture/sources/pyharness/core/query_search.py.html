@@ -1,0 +1,139 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/query_search.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/query_search.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 139 行</span></nav><main class="wrap source-page"><h1>pyharness/core/query_search.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：77ad21179815456c616519fc6df04adc412af8b8<br>SHA-256（内容校验）：50a39253b845a33066d59ad6b089dca06f30d2054d57607cdaa1c42a50b57969</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 7 个类、函数与方法</summary><ul><li><a href="#L9">QuerySearch（类） · L9–L138</a><ul><li><a href="#L12">QuerySearch.query（异步方法） · L12–L68</a></li><li><a href="#L70">QuerySearch._clamp_limit（方法） · L70–L76</a></li><li><a href="#L78">QuerySearch._execute_query（方法） · L78–L93</a></li><li><a href="#L95">QuerySearch._cjk_terms（方法） · L95–L105</a></li><li><a href="#L107">QuerySearch._latin_terms（方法） · L107–L109</a></li><li><a href="#L111">QuerySearch._match_expr（方法） · L111–L138</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;QuerySearch operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import asyncio</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import sqlite3</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.core.query_projection import _CONTENT_COL, _CJK_RUN, _WORD, _tokenize, _pretty_snippet, Hit, QueryResult, _log_warn</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>class QuerySearch:</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    &quot;&quot;&quot;QuerySearch responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    async def query(self, q: str, *, limit: int = 20,</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>                    session_id: Optional[str] = None,</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>                    session_ids: Optional[set[str]] = None,</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>                    actor: Optional[str] = None,</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>                    after_ts: Optional[str] = None) -&gt; QueryResult:</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        &quot;&quot;&quot;全文查询(spec 伪码,F057 验收直译)。</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        解析(中文 2-gram + 英文 ≥3 字符词)→ 拼 MATCH(词间 OR + 整串短语补偿)→</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        SQLite 查询带 snippet() → 按 rank 取 ≤min(limit, result_limit) 条 Hit;</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        词长低于下限 → EVT-100;5s 超时**软降级**返回 {hits: [], timed_out: True}</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        不抛不挂(WARNING 留痕);库通道故障(非超时)→ PERS-202。</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        if self._db is None:</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>            raise_code(&quot;PERS-202&quot;, op=&quot;fts_query&quot;,</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>                       hint=&quot;索引未装载(enter 未执行或已 detach)&quot;,</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>                       advice=&quot;先 enter/重新装载索引&quot;)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        if not isinstance(q, str) or not q.strip():</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>            raise_code(&quot;EVT-100&quot;, hint=f&quot;查询词非法: {q!r}&quot;,</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>                       advice=&quot;中文≥2 字、英文≥3 字符;或直接给整句短语&quot;)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        terms = self._cjk_terms(q) + self._latin_terms(q)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        if not terms:                                  # 中文&lt;2 且英文&lt;3 → 拒</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            raise_code(&quot;EVT-100&quot;, hint=f&quot;查询词过短: {q!r}&quot;,</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                       advice=&quot;中文≥2 字、英文≥3 字符;或直接给整句短语&quot;)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        expr = self._match_expr(q)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        sql = (&quot;SELECT session_id, seq, type, ts, &quot;</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>               f&quot;snippet(events_fts, {_CONTENT_COL}, &#x27;[&#x27;, &#x27;]&#x27;, &#x27;…&#x27;, 24), rank &quot;</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>               &quot;FROM events_fts WHERE events_fts MATCH ? AND seq&gt;0&quot;)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        args: list = [expr]</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        if session_id:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            sql += &quot; AND session_id=?&quot;</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            args.append(session_id)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        if session_ids is not None:</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>            # An explicit empty scope must never fall back to the whole index.</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            if not session_ids:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                return QueryResult(hits=[], timed_out=False)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            sql += &quot; AND session_id IN (&quot; + &quot;,&quot;.join(&quot;?&quot; for _ in session_ids) + &quot;)&quot;</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            args.extend(sorted(session_ids))</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        if actor:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            sql += &quot; AND actor=?&quot;</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            args.append(actor)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        if after_ts:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>            sql += &quot; AND ts&gt;=?&quot;                       # ISO8601 UTC 字典序可比</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            args.append(after_ts)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        cap = self._clamp_limit(limit)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        sql += f&quot; ORDER BY rank LIMIT {cap}&quot;</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        try:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            hits = await asyncio.wait_for(</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                asyncio.to_thread(self._execute_query, sql, args),</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>                timeout=self.query_timeout_s)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            return QueryResult(hits=hits, timed_out=False)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        except asyncio.TimeoutError:                   # 超时软降级:不抛不挂</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            _log_warn(&quot;fts query timeout q=%r(&gt;%ss,软降级返回空)&quot;, q,</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                      self.query_timeout_s)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            return QueryResult(hits=[], timed_out=True)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        except sqlite3.Error as e:                     # 库通道故障(非超时)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            raise_code(&quot;PERS-202&quot;, op=&quot;fts_query&quot;, hint=f&quot;FTS 查询失败: {e}&quot;,</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>                       advice=&quot;运行 repair(F060) 重建索引&quot;)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    def _clamp_limit(self, limit: Any) -&gt; int:</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        &quot;&quot;&quot;limit 钳制:1 ≤ limit ≤ result_limit(超限钳到 config result_limit)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        try:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            lim = int(limit)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            lim = self.result_limit</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        return max(1, min(lim, self.result_limit))</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    def _execute_query(self, sql: str, args: list) -&gt; list[Hit]:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        &quot;&quot;&quot;同步查询执行(线程内;锁内取尽结果防跨线程游标)。</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        MATCH 语法错(极端畸形串)→ 空集(检索场景降级优于报错);结果 snippet 做</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        中文相邻字空格回缩美化(偏离说明:索引侧每字成词的展示补偿)。</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        try:</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            with self._lock:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                rows = self._db.execute(sql, args).fetchall()</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            return [Hit(session_id=r[0], seq=r[1], type=r[2], ts=r[3],</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                        snippet=_pretty_snippet(r[4]), rank=float(r[5]))</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                    for r in rows]</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        except sqlite3.OperationalError:</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            return []                                  # MATCH 语法错 → 空集</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        except sqlite3.Error:</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            raise</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    def _cjk_terms(self, q: str) -&gt; list[str]:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        &quot;&quot;&quot;中文段 2-gram 滑窗(每段 ≥2 字才产词;单字段自然为空,上层 EVT-100)。</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        例:&quot;整理文件夹&quot; → [整理, 理文, 文件, 件夹](spec 伪码原样;含&quot;夹?&quot;整串</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        短语由 _match_expr 连续子串补偿兜住)。</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        out: list[str] = []</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        for seg in _CJK_RUN.findall(q):</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            for i in range(len(seg) - 1):</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                out.append(seg[i:i + 2])</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        return out</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code></code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    def _latin_terms(self, q: str) -&gt; list[str]:</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        &quot;&quot;&quot;拉丁/数字词抽取(≥3 字符才入词;英文下限 F057 边界)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        return _WORD.findall(q)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    def _match_expr(self, q: str) -&gt; str:</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        &quot;&quot;&quot;MATCH 表达式:2-gram 相邻单字短语 OR 拉丁词短语 + 整串连续子串补偿。</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        每个 2-gram 转 quoted phrase(&quot;备份&quot; → `&quot;备 份&quot;`,相邻 token 序列)——unicode61</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        把中文连续串当单 token,索引侧已逐字空格化,故短语即&quot;原文相邻字&quot;语义;</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        len(q) ≥ 4 时把整串按同一 tokenizer 切成短语 OR 上(补偿 2-gram 割裂,</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        spec &quot;连续子串补偿&quot;:补召回保精度)。token 只来自中文单字/ASCII 词,天然</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        无引号注入;去重保序。</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        parts: list[str] = []</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        seen: set[str] = set()</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        for g in self._cjk_terms(q):                   # &quot;备份&quot; → &quot;备 份&quot;</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            ph = f&#x27;&quot;{g[0]} {g[1]}&quot;&#x27;</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            if ph not in seen:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                seen.add(ph)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                parts.append(ph)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        for w in self._latin_terms(q):</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            ph = f&#x27;&quot;{w}&quot;&#x27;</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            if ph not in seen:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                seen.add(ph)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                parts.append(ph)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        if len(q) &gt;= 4:                                # 整串短语补偿(≥4 字符)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            toks = _tokenize(q)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            if toks:</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                ph = &#x27;&quot;&#x27; + &quot; &quot;.join(toks) + &#x27;&quot;&#x27;</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                if ph not in seen:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                    parts.append(ph)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        return &quot; OR &quot;.join(parts)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

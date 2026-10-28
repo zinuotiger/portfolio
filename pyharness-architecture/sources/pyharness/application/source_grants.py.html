@@ -1,0 +1,114 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/source_grants.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/source_grants.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 114 行</span></nav><main class="wrap source-page"><h1>pyharness/application/source_grants.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：6dd1d8b23fbb7f8cf32a154334d682ed19ce7454<br>SHA-256（内容校验）：b8473309bbd863291fea14989ce5c50c27433a3cbf11e2a0fc883f572ced5db8</p><p><a href="../../../architecture-detailed.html?node=source_grants">SourceGrant（来源读取授予）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 12 个类、函数与方法</summary><ul><li><a href="#L19">GrantModel（类） · L19–L28</a><ul><li><a href="#L23">GrantModel.version（方法） · L23–L28</a></li></ul></li><li><a href="#L31">IssueGrant（类） · L31–L42</a><ul><li><a href="#L38">IssueGrant.utc_expiry（方法） · L38–L42</a></li></ul></li><li><a href="#L45">RevokeGrant（类） · L45–L46</a></li><li><a href="#L49">SourceGrant（类） · L49–L72</a><ul><li><a href="#L62">SourceGrant.coherent_identity（方法） · L62–L66</a></li><li><a href="#L68">SourceGrant.utc_expiry（方法） · L68–L72</a></li></ul></li><li><a href="#L75">parse_expiry（函数） · L75–L82</a></li><li><a href="#L85">root_identity（函数） · L85–L87</a></li><li><a href="#L90">authorize_root（函数） · L90–L108</a></li><li><a href="#L111">grant_summary（函数） · L111–L114</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Read-only source authorization definitions. Never reads source contents.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code></code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import hashlib</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import json</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import os</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from typing import Annotated, Literal</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.application.workspace_contracts import Digest, ProjectId</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pyharness.core.sandbox import safe_path</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>GrantId = Annotated[str, Field(pattern=r&#x27;^sg-[0-9a-f]{16}$&#x27;)]</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>class GrantModel(BaseModel):</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    model_config = ConfigDict(extra=&#x27;forbid&#x27;, strict=True, frozen=True)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    schema_version: Literal[1] = 1</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    @field_validator(&#x27;schema_version&#x27;, mode=&#x27;before&#x27;)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    @classmethod</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    def version(cls, value):</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        if type(value) is not int or value != 1:</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>            raise ValueError(&#x27;unsupported grant version&#x27;)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        return value</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code></code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>class IssueGrant(GrantModel):</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    grant_id: GrantId</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    expected_revision: int = Field(ge=0, le=0)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    source_path: str = Field(min_length=1, max_length=1024)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    actions: list[Literal[&#x27;read&#x27;]] = Field(min_length=1, max_length=1)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    expires_at: str = Field(min_length=1, max_length=40)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    @field_validator(&#x27;expires_at&#x27;)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    @classmethod</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    def utc_expiry(cls, value):</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        parse_expiry(value)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        return value</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>class RevokeGrant(GrantModel):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    expected_revision: int = Field(ge=1)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>class SourceGrant(GrantModel):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    grant_id: GrantId</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    project_id: ProjectId</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    revision: int = Field(ge=1)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    root_identity: Digest</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    canonical_root: str = Field(min_length=1, max_length=1024)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    device: int = Field(ge=0)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    inode: int = Field(gt=0)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    actions: list[Literal[&#x27;read&#x27;]] = Field(min_length=1, max_length=1)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    expires_at: str = Field(min_length=1, max_length=40)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    revoked: bool = False</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    approved_by: str = Field(min_length=1, max_length=128)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    @model_validator(mode=&#x27;after&#x27;)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    def coherent_identity(self):</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        if self.root_identity != root_identity(self.canonical_root, self.device, self.inode):</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            raise ValueError(&#x27;incoherent root identity&#x27;)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        return self</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    @field_validator(&#x27;expires_at&#x27;)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    @classmethod</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    def utc_expiry(cls, value):</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        parse_expiry(value)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        return value</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>def parse_expiry(value: str) -&gt; datetime:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    try:</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        parsed = datetime.fromisoformat(value.replace(&#x27;Z&#x27;, &#x27;+00:00&#x27;))</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        if not value.endswith((&#x27;Z&#x27;, &#x27;+00:00&#x27;)) or parsed.utcoffset() != timezone.utc.utcoffset(parsed):</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            raise ValueError</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        return parsed</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    except (ValueError, TypeError):</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        raise ValueError(&#x27;expiry must be UTC ISO8601&#x27;) from None</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code></code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>def root_identity(path: str, device: int, inode: int) -&gt; str:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    data = {&#x27;normalized_root&#x27;: os.path.normcase(path), &#x27;device&#x27;: device, &#x27;inode&#x27;: inode}</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(&#x27;,&#x27;, &#x27;:&#x27;)).encode()).hexdigest()</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>def authorize_root(value: str) -&gt; dict:</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    &quot;&quot;&quot;One geometry boundary via safe_path, rooted at a local volume anchor.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    try:</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        text = value.replace(&#x27;\\&#x27;, &#x27;/&#x27;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        path = Path(text)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        if (text.startswith(&#x27;//&#x27;) or &#x27;\x00&#x27; in text or not path.is_absolute()</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                or not path.anchor or any(p in {&#x27;.&#x27;, &#x27;..&#x27;} for p in text.split(&#x27;/&#x27;))):</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            raise ValueError</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        relative = path.relative_to(path.anchor).as_posix()</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        checked = safe_path(Path(path.anchor), relative)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        resolved = checked.resolve(strict=True)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        info = resolved.stat()</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        if not resolved.is_dir() or not info.st_ino:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            raise ValueError</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        canonical_root = str(resolved)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        return {&#x27;canonical_root&#x27;: canonical_root, &#x27;device&#x27;: info.st_dev, &#x27;inode&#x27;: info.st_ino,</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                &#x27;root_identity&#x27;: root_identity(canonical_root, info.st_dev, info.st_ino)}</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    except (OSError, ValueError, PyHError):</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        raise_code(&#x27;EVT-100&#x27;, reason=&#x27;source_root_invalid&#x27;)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>def grant_summary(row):</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    grant = row[&#x27;grant&#x27;]</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    return {**{k: grant[k] for k in (&#x27;grant_id&#x27;, &#x27;revision&#x27;, &#x27;root_identity&#x27;, &#x27;actions&#x27;, &#x27;expires_at&#x27;, &#x27;revoked&#x27;)},</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            &#x27;digest&#x27;: row[&#x27;digest&#x27;], &#x27;source_seq&#x27;: row[&#x27;source_seq&#x27;]}</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

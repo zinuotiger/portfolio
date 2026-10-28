@@ -1,0 +1,553 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/scope.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/scope.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 553 行</span></nav><main class="wrap source-page"><h1>pyharness/core/scope.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：55874dac6138bd92debe2ae7bf1c9259117b1ef0<br>SHA-256（内容校验）：f2a9701223796787f019bff2987366f6a5120192f797f7eb02242007af9687ca</p><p><a href="../../../architecture-detailed.html?node=scope">Session Scope（会话权限与预算边界）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 26 个类、函数与方法</summary><ul><li><a href="#L139">_now_iso（函数） · L139–L141</a></li><li><a href="#L144">session_workspace（函数） · L144–L152</a></li><li><a href="#L155">_load_danger_marks（函数） · L155–L167</a></li><li><a href="#L171">Scope（类） · L171–L438</a><ul><li><a href="#L183">Scope.__init__（方法） · L183–L199</a></li><li><a href="#L202">Scope.can_use（方法） · L202–L220</a></li><li><a href="#L223">Scope.tighten（方法） · L223–L235</a></li><li><a href="#L237">Scope.note_tighten（方法） · L237–L249</a></li><li><a href="#L252">Scope.bind_task_usage（方法） · L252–L255</a></li><li><a href="#L257">Scope.budget_state（方法） · L257–L290</a></li><li><a href="#L292">Scope.check_budget（方法） · L292–L304</a></li><li><a href="#L307">Scope.within_window（方法） · L307–L313</a></li><li><a href="#L316">Scope.snapshot（方法） · L316–L328</a></li><li><a href="#L331">Scope.release（方法） · L331–L342</a></li><li><a href="#L345">Scope._ensure_bound（方法） · L345–L350</a></li><li><a href="#L352">Scope._usage（方法） · L352–L363</a></li><li><a href="#L365">Scope._used_dict（方法） · L365–L372</a></li><li><a href="#L374">Scope._inside_workspace_domain（方法） · L374–L382</a></li><li><a href="#L384">Scope._danger_mark（方法） · L384–L393</a></li><li><a href="#L395">Scope._record（方法） · L395–L420</a></li><li><a href="#L422">Scope._safe_append（异步方法） · L422–L427</a></li><li><a href="#L429">Scope._emit_bus（方法） · L429–L438</a></li></ul></li><li><a href="#L442">_validate_minimal（函数） · L442–L462</a></li><li><a href="#L465">build_scope（函数） · L465–L509</a></li><li><a href="#L512">from_snapshot（函数） · L512–L533</a></li><li><a href="#L536">active_scope（函数） · L536–L538</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/scope.py — 会话级策略作用域 (specs/scope.py.md 契约;阶段 1 模块)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F014(scope 前置)· F032(预算硬闸)· F021(配置)· F054/F055(沙箱/</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>workspace 联动)· F059(fork 快照继承)。</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>权威口径:specs/scope.py.md(编码契约)、DIS-CORE §6(can_use/budget_state/</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>build_scope 伪代码权威)、ERR.md §2.5(GRD-401)/§2.7(CFG-601)、</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>EVENT-SCHEMA(budget.paused/scope.updated)。</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>职责一句话:权限边界(deny/危险标记/域名 allowlist)、预算硬闸(F032)、上下文</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>窗口、workspace 根的策略唯一数据源——guard 单调拒绝链(原则 3)与 LLM 零信任</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>预算闸的前置读表;scope 创建/绑定/遮蔽层(fork)/预算联动/注册隔离单点实现,</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>策略只紧不松(单调:无 relax/un-tighten API)。</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>依赖方向:scope 无下游脊柱依赖(纯策略容器),只读消费 config/errors/计数器;</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>被 agent-loop(预算拦截:budget_state/check_budget/window_tokens)、agent</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>(ctx.scope 挂载)、llm_fallback.BudgetGuard(预算闸,同数据源口径)消费。</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>计数器对象由装配层经构造注入(scope 本模块只读,report_usage 唯一写入)。</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>偏离说明(相对 spec 伪码;契约=spec,偏离均列理由):</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>1. 配置键映射:spec 伪码读 cfg.scope.*(role/deny_tools/allowed_domains/</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>   workspace_root/sandbox_level),但 config.py(实际权威,9 域 schema)无</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>   scope.* 域 → build_scope 编译自真实键面:role 无源取默认 &quot;user&quot;;deny_tools</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   ← security.policy.deny_tools_extra(只增基集);allowed_domains ←</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   security.network.allowed_domains;sandbox_level ← security.sandbox.level;</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   workspace_root ← storage.workspaces_dir/&lt;session_id&gt;(F055 fresh workspace);</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>   危险分级 ← security.tool_danger_extra(前置优先)+ 内置默认表(见 7)。</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>2. 空 deny 越权判定口径:config 层 L1 默认 deny_extra=[] 且无法区分&quot;未配置&quot;</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   与&quot;显式空&quot;(pydantic extra=ignore)→ &quot;空 deny=越权&quot;落为 _validate_minimal</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   规则:deny 空 **且** 无任何 critical 级危险禁项 → CFG-601(此时 scope 无</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   任何防线=全放行,最小权限违约);域名通配过宽 = allowed_domains 含 &quot;*&quot; 一律</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>   CFG-601(最严最简,防 allow-all;字面域名不受限)。默认内置表含</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>   fs.delete_file=critical(tool_fs 规格&quot;注册即拒&quot;同源)→ 默认配置天然有防线。</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>3. 注入式装配:spec 伪码经闭包 ctx 访问 counters/session/bus;而 agent-loop</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>   同步调用 ctx.scope.check_budget()(无参)→ counters/session/bus 改为构造期</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   注入(全部可选;None 时预算按零读数=ok、事件降级日志)——与 llm_fallback</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>   &quot;注入式装配&quot;同款先例。</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>4. 事件出口 fire-and-forget:SessionLog.append 为 async,scope 判定面为同步</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   (agent-loop 三闸每轮同步调)→ budget.paused/scope.updated 在有运行中事件</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>   循环时 create_task 排程投递(失败只记日志),无循环/未接线 → 日志降级</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>   (尽力而为,llm_fallback._fire_emit 同款);budget.warn 走 bus 尽力出口。</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>   注意(2026-09-14 勘误):budget.paused/scope.updated **已入 events 词表**</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>   (现 74 型;随 S1/S2 阶段陆续注册),真实 SessionLog.append **正常落盘**——</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>   原注&quot;尚未入词表(57 锁定类型之外)、会 EVT-102 拒写&quot;的立论**已失效**(当时</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>   词表确未收录,属历史阶段门)。事件出口仍以注入日志对象为面(装配解耦),</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>   测试可用替身覆盖;为何要注入而非直取详见上文 3。</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>5. BudgetLimits 字段名对齐 config.py 权威键面(max_in_tokens/max_out_tokens/</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>   max_cost_yuan/warn_ratio),非 spec 伪码短名(in/out/cost);窗口与告警比例</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>   配置化:window_tokens ← cfg.loop.max_context_tokens(默认 65536,spec 伪码</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>   64_000 仅作兜底),window_ratio ← cfg.loop.compact.trigger_ratio(默认 0.75,</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>   与 F058 同源)。ScopeSnapshot 增 window_tokens/window_ratio 字段以支持</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>   F059 fork 完整继承(spec 快照伪码只列 window_tokens/taken_at,属补全)。</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>6. BUSY 未登记码直构 PyHError(&quot;BUSY&quot;)(agent_loop 偏离 5 同款先例:raise_code</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>   会把未登记码改写为 CYC-999,语义不符);已登记码(CFG-601/CYC-999)全走</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>   raise_code(全系统唯一抛出入口纪律)。</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>7. strict 沙箱域判定为&quot;工具名前缀域&quot;判定(can_use 只有工具名,无路径参数):</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>   fs./workspace. 视为 workspace 域内(g-fs-path 单点路径约束)→ strict 放行;</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>   web./net. 需 policy.allowed_domains 非空才可见(allowlist 网络;URL 级仍由</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>   g-net-outbound 复核);其余域(exec. 等)strict 下不可见——与 DIS §6.6.2</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>   &quot;strict 沙箱默认仅 workspace 文件 + allowlist 网络&quot;一致;域前缀表为模块</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>   常量(WORKSPACE_DOMAINS/ALLOWLIST_DOMAINS),工具注册表落地后同源。</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>8. check_budget 为 spec 函数清单之外的补充 API——agent-loop 消费契约(F032</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>   闸 2 每轮同步前置检查):超限抛 BudgetExhausted 循环信号异常。BudgetExhausted</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>   不继承 PyHError(agent_loop 本地定义注:scope.py 落地后改 import;不得被</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>   PyHError 域捕获逻辑吞掉 → 终态 reason=budget 而非 error);ERR 已登记 LLM-305</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>   (预算超限)语义=PyHError 域,用于其它路径,非本信号。</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>9. BudgetState 返回面为 ok/warn/exhausted(DIS §6.3.2 伪码权威):&quot;paused&quot; 是</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>   budget.paused **事件**名与审批续额预留字面量,本阶段无审批注入 → 状态机不</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>   产出 paused 返回;check_budget 对 paused/exhausted 一视同仁(防御)。</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>import asyncio</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>import inspect</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>import logging</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>from fnmatch import fnmatchcase</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>from typing import Any, Iterable, Optional</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>from pyharness.core.llm_fallback import BudgetState, TaskUsage  # noqa: F401 类型复用</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code></code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code># ------------------------------------------------------------------ 常量</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>&quot;&quot;&quot;上下文窗口兜底(spec 伪码 64k;实际默认取 cfg.loop.max_context_tokens,见偏离 5)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>&quot;&quot;&quot;窗口收紧阈值(与 F058 compaction.trigger_ratio 同源,可配)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>&quot;&quot;&quot;预算 warn 阈值 80%(F032 默认;实际取 cfg.budget.warn_ratio)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>&quot;&quot;&quot;会话角色兜底(config 无 scope.role 键,见偏离 1)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code># strict 沙箱下视作&quot;workspace 域内&quot;的工具名前缀(g3 g-fs-path 单点路径约束)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code># storage.*(spill 私有区/kv)与 fs.* 同为会话私有文件面,strict 下放行(F039)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code># 需域名 allowlist(非空)才在 strict 下可见的工具名前缀(g5 g-net-outbound URL 级复核)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code># 会话内部自管理域:无外部副作用(目标/待办/计划/实用),strict 下恒可见</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code># session.* = 只读检索自身会话日志(F057 session.fts_query),无外部副作用,与</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code># goal/todo 同族 → strict 下恒可见(2026-09-12 装配 FTS 工具时补,原缺此域导致</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code># 索引工具在默认 strict 档被域显隐静默隐藏)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code># schedule = 会话内定时任务管理(F048 工具面):调用本身只在会话内写一条 job 定义、</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code># 零外部副作用;到点后的真实执行仍走 task_queue → AgentLoop → tools 四关管道</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code># (含 high/critical 工具自身的审批与 guard),与 plan 同族 → 同列自管理域</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code># (2026-09-18 装配 schedule 工具时补;同 session 域先例:缺域即被静默隐藏)。</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code># subagent = 会话内子任务派发(F049 工具面,**N2-a 修复**):``subagent.spawn`` 本身</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code># 零外部副作用(只派生一个**独立会话**,其内部动作仍各自过四关管道、同权 guard);</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code># 缺此域 ⇒ 默认 strict 档下 ``can_use(&quot;subagent.spawn&quot;)=False`` ⇒ **整个子代理能力</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code># 从 LLM 视角不可达**(实测:strict 下 0 子会话,standard 下 1 子会话)。</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code># 这是同类缺陷的**第三次**发生(session / schedule 之后),故本轮同时引入</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code># ``RESTRICTED_DOMAINS`` 与之配套的&quot;注册即须归类&quot;不变量,把隐式收紧变为显式声明。</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code></code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code># 需**收紧**的域(默认 strict 下不可见,须 basic 档或 allowlist 放行)。</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code># **显式声明**的意义:修复前该集合是&quot;隐式&quot;的 —— 任何未被三张白名单覆盖的域都</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code># 自动落入收紧面,于是&quot;漏配&quot;与&quot;有意收紧&quot;无法区分(subagent 就是这样被静默隐藏的)。</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code># 现在:域分类必须**完备**(见 tests/invariants 的 Registered-Tool-Is-Classified)。</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code></code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code># 内置危险分级默认表(F023 同源示意;can_use 只消费 critical——不可审批直接不可用;</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code># high 级转审批由 guard 链 g-danger 按工具定义处理,scope 层不拦)。</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code># fs.delete_file=critical 与 tool_fs 规格&quot;danger=critical 注册即拒&quot;同源(审计锚点)。</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code># ---------------------------------------------------------------- 数据结构</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code></code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code># ------------------------------------------------------------ 循环信号异常</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code></code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code># ---------------------------------------------------------------- 会话注册表</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>from pyharness.core.scope_models import (log, DEFAULT_WINDOW_TOKENS, DEFAULT_WINDOW_RATIO, DEFAULT_WARN_RATIO, DEFAULT_ROLE, WORKSPACE_DOMAINS, ALLOWLIST_DOMAINS, SELF_DOMAINS, RESTRICTED_DOMAINS, DEFAULT_DANGER_MARKS, _DANGER_RANK, BudgetLimits, ScopePolicy, ScopeSnapshot, BudgetExhausted)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code></code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>_scopes: dict[str, &quot;Scope&quot;] = {}</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>&quot;&quot;&quot;session_id → Scope 一对一注册表(注册隔离:每会话恰一 scope,仅 release 解绑)。</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>脊柱八模块保留名(scope)的注册/卸载隔离归 bus/registry(BUS-002,已预留);</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>本表只保证&quot;会话级一对一&quot;与重复 create 拒绝(F021)。</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code></code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>def _now_iso() -&gt; str:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    &quot;&quot;&quot;UTC 审计时间戳(ISO 8601,秒精度)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    return datetime.now(timezone.utc).isoformat(timespec=&quot;seconds&quot;)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code></code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code></code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>def session_workspace(root: str, session_id: str) -&gt; str:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    &quot;&quot;&quot;F055 会话 workspace 根**唯一派生点**:{root}/{session_id}(仅算策略值,不落盘)。</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code></code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    权威:`PRD-Core §5.6 F055`/`CFG.md §3.6 storage.workspaces_dir`/`OPS.md`/`DEP.md`</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    一致要求每会话专属根;装配层(engine/subagent)一律引用本函数,不得各自拼接</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    ——&quot;多层各自实现必分裂&quot;(workspace 根已发生过一次 4 处分叉:engine 裸根、</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    tool_exec 再拼 /&lt;sid&gt;、subagent 取 .parent、build_scope 用本函数)。</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    return str(Path(root).expanduser() / session_id)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code></code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code></code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>def _load_danger_marks(cfg: Any) -&gt; list[dict[str, str]]:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    &quot;&quot;&quot;危险分级表编译:cfg extra(精确名,前置优先)∪ 内置默认表。</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code></code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    security.tool_danger_extra 只许上调(validate_rules 已按基线复核),前置保证</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    精确名规则覆盖同名前缀通配;can_use 只消费 critical(终局),high 属分级</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>    信息(审批由 guard 链按工具定义处理)。</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    extra = getattr(getattr(cfg, &quot;security&quot;, None), &quot;tool_danger_extra&quot;, None) or {}</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    marks = [{&quot;pattern&quot;: str(tool), &quot;level&quot;: str(lvl)}</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>             for tool, lvl in sorted(extra.items())]</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    marks.extend({&quot;pattern&quot;: str(m[&quot;pattern&quot;]), &quot;level&quot;: str(m[&quot;level&quot;])}</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                 for m in DEFAULT_DANGER_MARKS)</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    return marks</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code></code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code></code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code># ------------------------------------------------------------------ Scope</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>class Scope:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    &quot;&quot;&quot;会话级策略作用域实例(策略唯一数据源;单调收紧,无 relax)。</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code></code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>    状态机(§6.4):UNBOUND ─build_scope→ BOUND(默认最小权限)─guard 拒绝后</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    tighten→ HARDENED(只紧不松,至会话结束无回退)─release→ RELEASED;</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>    启动失败/配置越权 → CFG-601(拒绝启动会话)。预算为子状态:超任一硬闸 →</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    budget.paused 事件 + exhausted(agent-loop 强制终态 reason=budget)。</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code></code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    counters/session/bus 构造期注入(偏离 3):counters 只读(task_total),</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    session 为事件落点,None = 未接线(事件日志降级)。</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code></code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>    def __init__(self, policy: ScopePolicy, limits: BudgetLimits,</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                 session_id: str, *,</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                 window_tokens: Optional[int] = None,</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                 window_ratio: Optional[float] = None,</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                 counters: Any = None, session: Any = None,</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                 bus: Any = None, parent_snap: Optional[ScopeSnapshot] = None) -&gt; None:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        self.policy: Optional[ScopePolicy] = policy</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        self.limits: Optional[BudgetLimits] = limits</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        self.session_id: str = session_id</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        self.window_tokens: int = window_tokens or DEFAULT_WINDOW_TOKENS</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        self.window_ratio: float = window_ratio or DEFAULT_WINDOW_RATIO</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        self.parent_snap: Optional[ScopeSnapshot] = parent_snap  # 遮蔽层父快照(F059)</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>        self._counters: Any = counters              # 任务级用量聚合器(只读)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        self._session: Any = session                # 事件落点(可 None)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        self._bus: Any = bus                        # warn 告警尽力出口(可 None)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        self._budget_state: BudgetState = &quot;ok&quot;      # 事件去重水位(非状态真源)</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        self._tasks: set[asyncio.Task] = set()      # fire-and-forget 任务登记</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code></code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>    # ============================================================ 前置查权</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>    def can_use(self, tool_name: str) -&gt; bool:</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        &quot;&quot;&quot;guard 单调链 scope 前置(F014/DIS §6.3.1):deny/strict 域外/critical</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        任一命中 → False;调用方在 False 时写 guard.rejected(GRD-401,scope-hidden)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        强同步,Provider 零执行(INV-05)。high 危险此处放行,转审批(F015)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        self._ensure_bound()</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        p = self.policy</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        if p.allowed_tools is not None and tool_name not in p.allowed_tools:</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            return False</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        if tool_name in p.deny_tools:               # 显式禁止(只增,单调)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>            return False</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        domain = tool_name.split(&quot;.&quot;, 1)[0] if &quot;.&quot; in tool_name else tool_name</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        if domain in SELF_DOMAINS:                  # 会话内自管理(目标/待办等)</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            return True                             # 零外部副作用,不随沙箱收紧</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        if (p.sandbox_level == &quot;strict&quot;</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                and not self._inside_workspace_domain(tool_name)):</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            return False                            # strict:仅 workspace 域 + allowlist 网络</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        if self._danger_mark(tool_name) == &quot;critical&quot;:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>            return False                            # critical 不可审批,本层即终局</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        return True</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code></code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>    # ============================================================ 单调收紧</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>    def tighten(self, deny: set[str], *, reason: str) -&gt; None:</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        &quot;&quot;&quot;策略只紧不松:追加 deny,写 scope.updated 事件(留痕可审计)。</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code></code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        幂等:deny ⊆ 现有 → 直接返回不产生事件(防刷日志);只追加(单调),无</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        relax/un_tighten API——放宽在结构上不可能(GWT-S6-01:hasattr 断言</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        AttributeError)。reason 必填(sandbox strict/guard 拒绝等触发源)。</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        self._ensure_bound()</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        if not deny or deny &lt;= self.policy.deny_tools:</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            return                                  # 无新增:幂等返回,不落事件</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        self.policy.deny_tools |= deny              # 只追加(单调)</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        self._record(&quot;scope.updated&quot;, {&quot;op&quot;: &quot;tighten&quot;, &quot;added&quot;: sorted(deny),</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                                       &quot;reason&quot;: reason})</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code></code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>    def note_tighten(self, deny: Iterable[str], *, reason: str) -&gt; None:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        &quot;&quot;&quot;装配期收紧留痕(幂等落 scope.updated,不改策略读面)。</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code></code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        用于**同步装配段**(engine.build_runner_components 无法 await);策略本身</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        已由装配方直接写入 policy.deny_tools,本方法只补审计事件——不这样做时</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        预设档位切换(locked/readonly)在日志里无痕,违反&quot;动作以事件留痕&quot;。</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        deny 与现有集合无新增时静默返回(与 tighten 同幂等语义)。</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        added = set(deny)</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        if not added:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>            return</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        self._record(&quot;scope.updated&quot;, {&quot;op&quot;: &quot;tighten&quot;, &quot;added&quot;: sorted(added),</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                                       &quot;reason&quot;: reason})</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code></code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>    # ============================================================ 预算硬闸</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    def bind_task_usage(self, counters) -&gt; None:</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        &quot;&quot;&quot;Bind a task ledger without clearing any session accounting.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        self._counters = counters</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        self._budget_state = &#x27;ok&#x27;</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code></code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>    def budget_state(self) -&gt; BudgetState:</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        &quot;&quot;&quot;预算硬闸(F032/DIS §6.3.2):读计数器判 ok/warn/exhausted。</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code></code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        硬闸只用 token 数(out/in/cost 任一 ≥ 上限即 exhausted,F032 判定以</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        token 为主);warn=80%(只提醒不拦)。状态迁移事件化:首达 exhausted →</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        budget.paused 事件落日志;首达 warn → bus budget.warn(尽力而为)。</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        agent-loop._must_stop 对 paused/exhausted 强制终态(reason=budget)。</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        计数器 None(未注入)→ 按零读数返回 ok(事件降级,偏离 3)。</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        self._ensure_bound()</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        used = self._usage()</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        lim = self.limits</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        ancestors = getattr(self._counters, &#x27;ancestors&#x27;, lambda: ())()</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        parent_exhausted = any(</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            account._limits is not None and (</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>                account.task_total().out_tokens &gt;= account._limits.max_out_tokens or</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>                account.task_total().in_tokens &gt;= account._limits.max_in_tokens or</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>                account.task_total().cost_est &gt;= account._limits.max_cost_yuan)</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>            for account in ancestors)</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        if (parent_exhausted or used.out_tokens &gt;= lim.max_out_tokens</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>                or used.in_tokens &gt;= lim.max_in_tokens</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>                or used.cost_est &gt;= lim.max_cost_yuan):</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>            if self._budget_state != &quot;exhausted&quot;:   # 首达才落事件(防刷)</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>                self._record(&quot;budget.paused&quot;,</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                             {&quot;state&quot;: &quot;exhausted&quot;, &quot;used&quot;: self._used_dict(used)})</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>                self._budget_state = &quot;exhausted&quot;</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>            return &quot;exhausted&quot;</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        if used.out_tokens &gt;= lim.warn_ratio * lim.max_out_tokens:</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            if self._budget_state != &quot;warn&quot;:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                self._emit_bus(&quot;budget.warn&quot;, {&quot;used_out&quot;: used.out_tokens})</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>                self._budget_state = &quot;warn&quot;</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            return &quot;warn&quot;</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        self._budget_state = &quot;ok&quot;</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        return &quot;ok&quot;</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code></code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>    def check_budget(self) -&gt; BudgetState:</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>        &quot;&quot;&quot;agent-loop 每轮预算前置检查(F032 闸 2):超限抛 BudgetExhausted 信号。</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code></code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        同步签名(agent-loop 同步调用);exhausted → raise BudgetExhausted</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        (循环控制信号,非 PyHError——终态 reason=budget,见偏离 8);</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        paused 为防御性同判;ok/warn 原样返回不拦。</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>        st = self.budget_state()</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        if st in (&quot;paused&quot;, &quot;exhausted&quot;):</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>            raise BudgetExhausted(</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                f&quot;任务预算{st}:硬闸超限,详见 budget.paused 事件(agent-loop 终态 &quot;</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>                f&quot;reason=budget)&quot;)</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>        return st</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code></code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>    # ============================================================ 窗口判定</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>    def within_window(self, hist_tokens: int) -&gt; bool:</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        &quot;&quot;&quot;窗口余量判定(F058 压缩触发同源):历史仍在窗口内(余量≥25%)为 True。</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code></code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        纯只读判定,与 window_tokens/window_ratio 单一数据源联动;release 后</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        仍可用(窗口为纯配置标量,不随策略释放)。</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        return hist_tokens &lt; self.window_ratio * self.window_tokens</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code></code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>    # ============================================================ 只读快照</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>    def snapshot(self) -&gt; ScopeSnapshot:</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        &quot;&quot;&quot;全策略不可变只读快照(fork/审批复核/审计)。</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code></code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        值拷贝:快照不随原 scope 后续 tighten 变化;ScopeSnapshot frozen=True,</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        任何字段赋值 → FrozenInstanceError(结构不可变)。</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        self._ensure_bound()</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        return ScopeSnapshot(</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>            policy=ScopePolicy(**self.policy.model_dump()),   # 值拷贝(COW 起点)</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>            limits=BudgetLimits(**self.limits.model_dump()),</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>            window_tokens=self.window_tokens,</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>            window_ratio=self.window_ratio,</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>            taken_at=_now_iso())</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code></code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>    # ============================================================ 解绑释放</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>    def release(self) -&gt; None:</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>        &quot;&quot;&quot;会话关闭/异常时解绑:从会话作用域表摘除 + 清内存策略引用。</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code></code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        幂等:重复 release 无害;只摘除本 scope(防误释放他 scope)。</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>        凭据从未进入 ScopePolicy(读取走 F016 单口),此处无脱敏负担(INV-09);</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>        release 后查询(budget_state/can_use/tighten/snapshot)→ CYC-999 拒。</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>        sid = self.session_id</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>        if sid in _scopes and _scopes[sid] is self:</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>            del _scopes[sid]                        # 解绑(注册隔离收尾)</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>        self.policy = None                          # 引用清空(GC 可回收)</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        self.limits = None</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code></code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>    # ============================================================ 内部辅助</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>    def _ensure_bound(self) -&gt; None:</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>        &quot;&quot;&quot;RELEASED 后查询拒(CYC-999:会话已释放仍被使用=未预期调用路径)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>        if self.policy is None or self.limits is None:</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>            raise_code(&quot;CYC-999&quot;,</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>                       hint=f&quot;scope 已 release(session={self.session_id});&quot;</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>                            &quot;会话已关闭,查询被拒(重新 build_scope)&quot;)</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code></code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>    def _usage(self) -&gt; TaskUsage:</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        &quot;&quot;&quot;读注入计数器任务级聚合;未注入/返回空 → 零读数(事件降级,见偏离 3)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        c = self._counters</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>        if c is None:</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>            # 未注入计数器 → 零读数(ok)。fail-open 是装配缺线与&quot;预算失效&quot;的静默</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>            # 组合(历史上 ctx.budget 曾漏装配),故以 WARNING 可见告警而非 debug,</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>            # 装配错一眼可查(不 fail-closed:子 scope 等合法无计数器场景)。</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>            log.warning(&quot;scope=%s 未注入计数器,预算按零读数(ok)——若在真实装配&quot;</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>                        &quot;出现,查装配层是否漏接 counters&quot;, self.session_id)</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>            return TaskUsage()</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>        used = c.task_total()</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        return used if used is not None else TaskUsage()</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code></code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>    def _used_dict(used: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>        &quot;&quot;&quot;用量序列化:优先 TaskUsage.model_dump,缺省按字段兜底(鸭子类型)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>        if hasattr(used, &quot;model_dump&quot;):</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>            return used.model_dump()</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>        return {&quot;in_tokens&quot;: getattr(used, &quot;in_tokens&quot;, 0),</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>                &quot;out_tokens&quot;: getattr(used, &quot;out_tokens&quot;, 0),</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>                &quot;cost_est&quot;: getattr(used, &quot;cost_est&quot;, 0.0)}</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code></code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>    def _inside_workspace_domain(self, tool_name: str) -&gt; bool:</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>        &quot;&quot;&quot;strict 沙箱域判定(偏离 7):工具名前缀域 ∈ workspace 域 → True;</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>        ∈ allowlist 域且域名 allowlist 非空 → True(g5 再按 URL 复核);否则 False。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>        domain = tool_name.split(&quot;.&quot;, 1)[0] if &quot;.&quot; in tool_name else tool_name</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        if domain in WORKSPACE_DOMAINS:</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>            return True</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>        if domain in ALLOWLIST_DOMAINS and self.policy.allowed_domains:</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>            return True</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        return False</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code></code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>    def _danger_mark(self, tool_name: str) -&gt; str:</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>        &quot;&quot;&quot;危险分级查表(fnmatch 前缀规则,命中即返;表与 F023 guard 同源加载)。</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code></code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>        critical → can_use False(不可审批,§6.3.1);high → 放行转审批(F015);</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>        未命中 → &quot;none&quot;。cfg extra 精确名规则前置(先命中先返)保证覆盖默认通配。</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>        for rule in self.policy.danger_marks:</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>            if fnmatchcase(tool_name, str(rule[&quot;pattern&quot;])):</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>                return str(rule[&quot;level&quot;])</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>        return &quot;none&quot;</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code></code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>    def _record(self, type_: str, payload: dict) -&gt; None:</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>        &quot;&quot;&quot;策略/预算事件落日志(scope.updated/budget.paused 留痕,审计用)。</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code></code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>        SessionLog.append 为 async、scope 判定面为同步(偏离 4):append 返回</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>        awaitable 且有运行中事件循环 → create_task 排程投递(fire-and-forget,</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>        失败只记日志);append 同步(FakeSession)→ 直接记录;未接线 → 日志降级。</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>        sess = self._session</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>        if sess is None:</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>            log.debug(&quot;scope=%s 未接线事件出口,%s 未记录&quot;, self.session_id, type_)</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>            return</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>        try:</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>            r = sess.append(type_, payload, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>        except Exception as exc:                    # noqa: BLE001 事件失败不阻断策略主路径</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>            log.warning(&quot;scope append %s 失败: %s&quot;, type_, exc)</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>            return</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>        if inspect.isawaitable(r):</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>            try:</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>                asyncio.get_running_loop()</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>            except RuntimeError:                    # 无运行中事件循环:同步/未装配上下文</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>                log.warning(&quot;scope=%s 无运行中事件循环,%s 未投递&quot;,</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>                            self.session_id, type_)</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>                return</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>            task = asyncio.create_task(self._safe_append(r, type_))</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>            self._tasks.add(task)</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>            task.add_done_callback(self._tasks.discard)</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code></code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>    async def _safe_append(self, coro: Any, type_: str) -&gt; None:</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>        &quot;&quot;&quot;异步落点包装:append 失败只记日志,不向调用方传播(尽力而为)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>        try:</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>            await coro</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>        except Exception as exc:                     # noqa: BLE001 EVT-102(词表外)等</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>            log.warning(&quot;scope append %s 异步失败: %s&quot;, type_, exc)</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code></code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>    def _emit_bus(self, type_: str, payload: dict) -&gt; None:</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>        &quot;&quot;&quot;bus 尽力而为出口(budget.warn 告警;未接线/失败 → 日志降级,不阻断)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>        bus = self._bus</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>        if bus is None:</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>            return</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>        from pyharness.bus import schedule_emit</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>        try:</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>            schedule_emit(bus, type_, payload)</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>        except Exception as exc:                     # noqa: BLE001 未注册类型等</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>            log.warning(&quot;scope emit %s 失败: %s&quot;, type_, exc)</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code></code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code></code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code># ------------------------------------------------------------------ 工厂</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>def _validate_minimal(p: ScopePolicy) -&gt; None:</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>    &quot;&quot;&quot;最小权限编译校验(F021;越权配置 → CFG-601 列字段,拒启动会话)。</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code></code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>    两种越权(见偏离 2):</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>    1) 空 deny 且无任何 critical 禁项 = scope 无防线(全放行)→ 拒;</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>    2) allowed_domains 含通配 &quot;*&quot; = allow-all/过宽(域名 allowlist 只收字面</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>       域名,URL 级匹配由 g5 做)→ 拒。</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>    if not p.deny_tools and not any(</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code>            _DANGER_RANK.get(str(m.get(&quot;level&quot;)), 0) &gt;= _DANGER_RANK[&quot;critical&quot;]</code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>            for m in p.danger_marks):</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>        raise_code(&quot;CFG-601&quot;, reason=&quot;越权&quot;,</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>                   fields=[&quot;security.policy.deny_tools_extra&quot;],</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>                   detail=&quot;deny 空且无 critical 禁项=scope 无防线(最小权限须留&quot;</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>                          &quot;至少一道拒绝面;默认禁高危组)&quot;)</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>    for d in sorted(p.allowed_domains):</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>        if &quot;*&quot; in d:</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>            raise_code(&quot;CFG-601&quot;, reason=&quot;越权&quot;,</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>                       fields=[&quot;security.network.allowed_domains&quot;],</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>                       detail=f&quot;域名通配过宽:{d}(allowlist 只收字面域名,禁 &quot;</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>                              &quot;allow-all/通配)&quot;)</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code></code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code></code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>def build_scope(cfg: Any, session_id: str, *,</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>                session: Any = None, counters: Any = None,</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>                bus: Any = None) -&gt; Scope:</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code>    &quot;&quot;&quot;作用域创建与绑定(F021/DIS §6.3.3):编译默认最小权限策略并注册到会话。</code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code></code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>    cfg = Settings(或含 security/budget/loop/storage 域的分层配置对象);</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>    每会话恰一 scope:session_id 已在册 → BUSY 拒(注册隔离;仅 release 解绑)。</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>    越权配置(空 deny 无防线/域名通配过宽)→ CFG-601 列非法字段,拒绝启动。</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>    session/counters/bus 为注入式装配可选接线(偏离 3)。</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code></code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code>    异常:PyHError(BUSY,重复 build)/ConfigError(CFG-601,配置越权)。</code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>    if session_id in _scopes:</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code>        raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code>            &quot;session_id&quot;: session_id,</code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code>            &quot;advice&quot;: &quot;该会话已有活动 scope;重复 create active scope 被拒&quot;</code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>                      &quot;(注册隔离,每会话恰一 scope)&quot;})</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>    sandbox = getattr(getattr(cfg, &quot;security&quot;, None), &quot;sandbox&quot;, None)</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>    p = ScopePolicy(</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>        role=DEFAULT_ROLE,                           # config 无 scope.role 键(偏离 1)</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code>        deny_tools=set(getattr(</code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>            getattr(getattr(cfg, &quot;security&quot;, None), &quot;policy&quot;, None),</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code>            &quot;deny_tools_extra&quot;, None) or []),        # 基集外只增(安全默认)</code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code>        danger_marks=_load_danger_marks(cfg),        # 内置分级表 + extra 上调</code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>        allowed_domains=set(getattr(</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>            getattr(getattr(cfg, &quot;security&quot;, None), &quot;network&quot;, None),</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code>            &quot;allowed_domains&quot;, None) or []),</code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code>        workspace_root=session_workspace(</code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code>            getattr(getattr(cfg, &quot;storage&quot;, None), &quot;workspaces_dir&quot;,</code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code>                    &quot;~/.pyharness/workspaces&quot;),</code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code>            session_id),                             # F055 fresh workspace</code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code>        sandbox_level=getattr(sandbox, &quot;level&quot;, &quot;strict&quot;) or &quot;strict&quot;,  # 默认 strict</code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code>        read_extra_dirs=[str(d) for d in (getattr(</code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code>            getattr(getattr(cfg, &quot;security&quot;, None), &quot;policy&quot;, None),</code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code>            &quot;read_extra_dirs&quot;, None) or [])])          # A2:workspace 外只读例外</code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>    _validate_minimal(p)                             # 越权拒绝(CFG-601)</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code>    window = getattr(getattr(cfg, &quot;loop&quot;, None), &quot;max_context_tokens&quot;, None)</code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code>    ratio = getattr(getattr(getattr(cfg, &quot;loop&quot;, None), &quot;compact&quot;, None),</code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>                    &quot;trigger_ratio&quot;, None)</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>    s = Scope(p, BudgetLimits.from_cfg(cfg), session_id,</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code>              window_tokens=int(window or DEFAULT_WINDOW_TOKENS),</code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code>              window_ratio=float(ratio or DEFAULT_WINDOW_RATIO),</code></div>
+<div class="code-line" id="L507"><a class="line-number" href="#L507">507</a><code>              session=session, counters=counters, bus=bus)</code></div>
+<div class="code-line" id="L508"><a class="line-number" href="#L508">508</a><code>    _scopes[session_id] = s                          # 注册(绑定;scope.updated 留痕)</code></div>
+<div class="code-line" id="L509"><a class="line-number" href="#L509">509</a><code>    return s</code></div>
+<div class="code-line" id="L510"><a class="line-number" href="#L510">510</a><code></code></div>
+<div class="code-line" id="L511"><a class="line-number" href="#L511">511</a><code></code></div>
+<div class="code-line" id="L512"><a class="line-number" href="#L512">512</a><code>def from_snapshot(snap: ScopeSnapshot, session_id: str, *,</code></div>
+<div class="code-line" id="L513"><a class="line-number" href="#L513">513</a><code>                  session: Any = None, counters: Any = None,</code></div>
+<div class="code-line" id="L514"><a class="line-number" href="#L514">514</a><code>                  bus: Any = None) -&gt; Scope:</code></div>
+<div class="code-line" id="L515"><a class="line-number" href="#L515">515</a><code>    &quot;&quot;&quot;遮蔽层创建(F059 fork 继承):从父快照拷贝策略独立演进。</code></div>
+<div class="code-line" id="L516"><a class="line-number" href="#L516">516</a><code></code></div>
+<div class="code-line" id="L517"><a class="line-number" href="#L517">517</a><code>    子层 = 父策略快照 + 独立注册;子层 tighten 只追加本层 deny,不透写父层;</code></div>
+<div class="code-line" id="L518"><a class="line-number" href="#L518">518</a><code>    父会话后续 tighten 不影响子会话(遮蔽,无透写,COW 起点)。</code></div>
+<div class="code-line" id="L519"><a class="line-number" href="#L519">519</a><code>    重复创建 → BUSY(与 build_scope 同注册隔离)。</code></div>
+<div class="code-line" id="L520"><a class="line-number" href="#L520">520</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L521"><a class="line-number" href="#L521">521</a><code>    if session_id in _scopes:</code></div>
+<div class="code-line" id="L522"><a class="line-number" href="#L522">522</a><code>        raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L523"><a class="line-number" href="#L523">523</a><code>            &quot;session_id&quot;: session_id,</code></div>
+<div class="code-line" id="L524"><a class="line-number" href="#L524">524</a><code>            &quot;advice&quot;: &quot;子会话已有活动 scope;重复 fork 被拒(查重复 fork 路径)&quot;})</code></div>
+<div class="code-line" id="L525"><a class="line-number" href="#L525">525</a><code>    p = ScopePolicy(**snap.policy.model_dump())      # 深拷贝策略(COW 起点)</code></div>
+<div class="code-line" id="L526"><a class="line-number" href="#L526">526</a><code>    s = Scope(p, BudgetLimits(**snap.limits.model_dump()),</code></div>
+<div class="code-line" id="L527"><a class="line-number" href="#L527">527</a><code>              session_id,</code></div>
+<div class="code-line" id="L528"><a class="line-number" href="#L528">528</a><code>              window_tokens=snap.window_tokens,</code></div>
+<div class="code-line" id="L529"><a class="line-number" href="#L529">529</a><code>              window_ratio=snap.window_ratio,</code></div>
+<div class="code-line" id="L530"><a class="line-number" href="#L530">530</a><code>              counters=counters, session=session, bus=bus,</code></div>
+<div class="code-line" id="L531"><a class="line-number" href="#L531">531</a><code>              parent_snap=snap)                     # 遮蔽层记父快照(F059)</code></div>
+<div class="code-line" id="L532"><a class="line-number" href="#L532">532</a><code>    _scopes[session_id] = s                          # 独立注册(隔离于父表)</code></div>
+<div class="code-line" id="L533"><a class="line-number" href="#L533">533</a><code>    return s</code></div>
+<div class="code-line" id="L534"><a class="line-number" href="#L534">534</a><code></code></div>
+<div class="code-line" id="L535"><a class="line-number" href="#L535">535</a><code></code></div>
+<div class="code-line" id="L536"><a class="line-number" href="#L536">536</a><code>def active_scope(session_id: str) -&gt; Optional[Scope]:</code></div>
+<div class="code-line" id="L537"><a class="line-number" href="#L537">537</a><code>    &quot;&quot;&quot;只读查询:会话当前绑定 scope;未绑定/已释放返回 None(审计/外壳用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L538"><a class="line-number" href="#L538">538</a><code>    return _scopes.get(session_id)</code></div>
+<div class="code-line" id="L539"><a class="line-number" href="#L539">539</a><code></code></div>
+<div class="code-line" id="L540"><a class="line-number" href="#L540">540</a><code></code></div>
+<div class="code-line" id="L541"><a class="line-number" href="#L541">541</a><code>__all__ = [</code></div>
+<div class="code-line" id="L542"><a class="line-number" href="#L542">542</a><code>    # 数据</code></div>
+<div class="code-line" id="L543"><a class="line-number" href="#L543">543</a><code>    &quot;BudgetLimits&quot;, &quot;ScopePolicy&quot;, &quot;ScopeSnapshot&quot;,</code></div>
+<div class="code-line" id="L544"><a class="line-number" href="#L544">544</a><code>    # 预算类型/信号(llm_fallback 同源复用;BudgetExhausted 由 agent-loop 反向 import)</code></div>
+<div class="code-line" id="L545"><a class="line-number" href="#L545">545</a><code>    &quot;BudgetState&quot;, &quot;TaskUsage&quot;, &quot;BudgetExhausted&quot;,</code></div>
+<div class="code-line" id="L546"><a class="line-number" href="#L546">546</a><code>    # 核心</code></div>
+<div class="code-line" id="L547"><a class="line-number" href="#L547">547</a><code>    &quot;Scope&quot;, &quot;build_scope&quot;, &quot;from_snapshot&quot;, &quot;active_scope&quot;,</code></div>
+<div class="code-line" id="L548"><a class="line-number" href="#L548">548</a><code>    # workspace 根唯一派生点(F055;engine/subagent 装配层同源引用)</code></div>
+<div class="code-line" id="L549"><a class="line-number" href="#L549">549</a><code>    &quot;session_workspace&quot;,</code></div>
+<div class="code-line" id="L550"><a class="line-number" href="#L550">550</a><code>    # 常量(域前缀表,工具注册表落地后同源)</code></div>
+<div class="code-line" id="L551"><a class="line-number" href="#L551">551</a><code>    &quot;WORKSPACE_DOMAINS&quot;, &quot;ALLOWLIST_DOMAINS&quot;, &quot;DEFAULT_DANGER_MARKS&quot;,</code></div>
+<div class="code-line" id="L552"><a class="line-number" href="#L552">552</a><code>    &quot;DEFAULT_WINDOW_TOKENS&quot;, &quot;DEFAULT_WINDOW_RATIO&quot;,</code></div>
+<div class="code-line" id="L553"><a class="line-number" href="#L553">553</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

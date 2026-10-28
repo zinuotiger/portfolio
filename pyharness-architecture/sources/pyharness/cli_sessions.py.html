@@ -1,0 +1,128 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/cli_sessions.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/cli_sessions.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 128 行</span></nav><main class="wrap source-page"><h1>pyharness/cli_sessions.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：4ec1005f899208b2acffc0337acceee8d8105a8c<br>SHA-256（内容校验）：da43f56e7080b2dfe656b6a60a30a2a0c1a4964257b6f49358e431fb306152d5</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 9 个类、函数与方法</summary><ul><li><a href="#L10">_ExitFlag（类） · L10–L18</a><ul><li><a href="#L14">_ExitFlag.__init__（方法） · L14–L15</a></li><li><a href="#L17">_ExitFlag.request_exit（方法） · L17–L18</a></li></ul></li><li><a href="#L20">_sessions_path（函数） · L20–L21</a></li><li><a href="#L26">_flush_session（异步函数） · L26–L55</a><ul><li><a href="#L38">_flush_session.attempt（异步方法） · L38–L43</a></li></ul></li><li><a href="#L57">_scan_unhealthy（异步函数） · L57–L84</a></li><li><a href="#L86">_repairable_unhealthy（函数） · L86–L109</a></li><li><a href="#L111">_ensure_repair（异步函数） · L111–L125</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Cli sessions: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import uuid</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.cli_output import ShellCtx, log</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>class _ExitFlag:</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    &quot;&quot;&quot;外壳退出旗标(commands.cmd_exit 经 ctx.shell.request_exit(0) 副作用表达退出;</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    interactive_loop 消费 .exit_code,见 commands.py.md 偏离 6)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    def __init__(self) -&gt; None:</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        self.exit_code: Optional[int] = None</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    def request_exit(self, code: int = 0) -&gt; None:</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        self.exit_code = int(code)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>def _sessions_path(cfg: Any) -&gt; Path:</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    return Path(cfg.storage.sessions_dir).expanduser()</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>async def _flush_session(sh: ShellCtx) -&gt; None:</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    &quot;&quot;&quot;收尾落盘 + 资源回收:会话存储攒批全量 flush、引擎外部资源 close、会话门面</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    ``shutdown_all``(F011 双速写——真源不可丢;INV-07 会话锁随句柄释放)。</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    2026-09-21 R14-13:两步**相互独立**,不得用一个的前置条件短路另一个。此前在</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    &quot;``ctx.session`` 不是会话日志(无 ``_persistence``)&quot;时**直接 return**,而 ACP 外壳</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    的 ``ctx.session`` 是 ``DesktopSessionManager``(其真源在各 store 里)⇒ **spine.close()</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    与 ``shutdown_all()`` 全被跳过**:ACP 退出时既不 flush 也不关 store(61 个非强同步</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    事件类型如 ``agent.message``/``tool.result``/``llm.response`` 仍在攒批缓冲里,</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    进程退出即丢),与 chat/run 形态(``ctx.session`` 是 SessionLog)行为不一致。</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    errors = []</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    async def attempt(fn):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        if not callable(fn): return</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        try:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            result = fn()</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            if hasattr(result, &#x27;__await__&#x27;): await result</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    if getattr(sh.ctx, &#x27;_acp_runtimes&#x27;, None) or getattr(sh.ctx, &#x27;_acp_owns_llm&#x27;, False):</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        from pyharness.acp import close_owned_runtimes</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        await attempt(lambda: close_owned_runtimes(sh.ctx))</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    await attempt(getattr(getattr(sh.ctx, &#x27;engine_spine&#x27;, None), &#x27;close&#x27;, None))</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    log_ = getattr(sh.ctx, &#x27;session&#x27;, None)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    persist = getattr(log_, &#x27;_persistence&#x27;, None)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    if not getattr(getattr(persist, &#x27;_fh&#x27;, None), &#x27;closed&#x27;, False):</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        await attempt(getattr(persist, &#x27;flush&#x27;, None))</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    await attempt(getattr(persist, &#x27;close&#x27;, None))</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    await attempt(getattr(log_, &#x27;shutdown_all&#x27;, None))</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    await attempt(getattr(getattr(sh.ctx, &#x27;llm_runtime&#x27;, None), &#x27;aclose&#x27;, None))</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    if errors: raise BaseExceptionGroup(&#x27;CLI cleanup failed&#x27;, errors)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>async def _scan_unhealthy(sessions_dir: Path, *,</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                          cfg: Any = None) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    &quot;&quot;&quot;启动自检(F060):pyharness.repair.auto_scan 装配后取首个不健康会话;模块未</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    装配 → 降级跳过(记日志),不阻断启动(见偏离 7)。</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    ``cfg``(2026-09-21 R11-2):带上即可启用**索引落后对账**(``auto_scan(db_path=…)``)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    —— 此前该对账因&quot;无人提供 fts_last_seq&quot;而从未生效。</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    ``2026-09-21 R14-2``:跳过**正被其他进程持有**的会话。索引是 200ms **攒批**落的</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    派生视图,活会话在攒批窗口内必然 `view_last &lt; last` ⇒ 被判 `index_stale`;此前自检</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    会把它当&quot;待修&quot;交给 ``_ensure_repair`` ⇒ ``repair_session`` 取锁撞 PERS-202 ⇒</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    **上抛** ⇒ 第二个 CLI 启动直接失败(两进程实测复现)。活会话本就不该是候选:它既不是</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    损坏,本进程也修不动。</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    try:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        from pyharness.repair import auto_scan</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    except Exception as exc:                   # noqa: BLE001 repair 模块未装配</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        log.info(&quot;repair.auto_scan 未装配,跳过启动自检 (%s)&quot;, exc)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        return None</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    db_path = str(getattr(getattr(cfg, &quot;storage&quot;, None), &quot;db_path&quot;, &quot;&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    try:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        hits = await auto_scan(sessions_dir, db_path=db_path or None)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    except PyHError:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        raise</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    except Exception:                          # noqa: BLE001 自检失败不阻断启动</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        log.warning(&quot;启动自检异常,跳过&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        return None</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    return _repairable_unhealthy(hits, sessions_dir)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>def _repairable_unhealthy(hits: list, sessions_dir: Path) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    &quot;&quot;&quot;从 auto_scan 结果取首个**可修**的损坏会话;**跳过被其他进程持有的活会话**。</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    R14-2 / R14-7:索引是 200ms **攒批**落的派生视图 ⇒ 活会话在攒批窗口内必然</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    ``view_last != last`` 而被判 ``index_stale``。这类会话**既不是损坏**、本进程也</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    **修不动**(``repair_session`` 取锁即 PERS-202)⇒ 必须跳过;否则调用方要么</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    启动中止(启动自检,R14-2),要么整条命令以 PERS-202 失败、**永远够不到真正损坏</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    的会话**(``repair``,R14-7 —— 修复前的实测:只有活会话时不报&quot;无损坏会话&quot;而直接</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    抛 PERS-202)。</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code></code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    **唯一候选筛选点**:自检与 repair 子命令都必须走这里。</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    from pyharness.persistence import session_lock_held, session_lock_path</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    for h in hits:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        if getattr(h, &quot;healthy&quot;, False):</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            continue</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        sid = getattr(h, &quot;sid&quot;, None)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        if not sid:</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            continue</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        if session_lock_held(session_lock_path(sessions_dir / f&quot;{sid}.jsonl&quot;)):</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            log.info(&quot;repair 候选:会话正被其他进程持有,跳过 sid=%s&quot;, sid)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            continue</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        return sid</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    return None</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>async def _ensure_repair(ctx: Any, sid: str) -&gt; None:</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    &quot;&quot;&quot;repair 前置(幂等):损坏则先 repair 再 open;模块未装配 → 跳过,坏行由回放</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    PERS-201 记跳(见偏离 7)。不可修复 → PERS-201 上抛(原文件已备份留存)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    try:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        from pyharness.repair import repair_session</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    except Exception as exc:                   # noqa: BLE001 未装配降级</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        log.info(&quot;repair_session 未装配,跳过会话前置修复 (%s)&quot;, exc)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        return</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    try:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        await repair_session(ctx, sid, interactive=False)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    except PyHError as e:</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        if e.code.startswith(&quot;PERS-201&quot;):</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            raise                                  # 不可修复:明确报错+备份留存</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        log.warning(&quot;repair_session sid=%s 异常:%s&quot;, sid, e.code)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        raise</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>_ExitFlag.__module__ = &#x27;pyharness.cli&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

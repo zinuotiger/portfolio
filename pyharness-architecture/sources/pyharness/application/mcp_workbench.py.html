@@ -1,0 +1,253 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/mcp_workbench.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/mcp_workbench.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 253 行</span></nav><main class="wrap source-page"><h1>pyharness/application/mcp_workbench.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：837db865d945c0883317b5a20411af46d0219cb2<br>SHA-256（内容校验）：9ea3ea6589c3aa6833234c05a2328d650bd152aad1781f3e7aa799d0d1c86e38</p><p><a href="../../../architecture-detailed.html?node=extension_workbench">ExtensionWorkbench（扩展与诊断工作台）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 19 个类、函数与方法</summary><ul><li><a href="#L29">_encoded（函数） · L29–L31</a></li><li><a href="#L34">_digest（函数） · L34–L35</a></li><li><a href="#L38">_key（函数） · L38–L41</a></li><li><a href="#L44">_safe_schema（函数） · L44–L63</a></li><li><a href="#L66">_ObservedTransport（类） · L66–L73</a><ul><li><a href="#L67">_ObservedTransport.__init__（方法） · L67–L69</a></li><li><a href="#L71">_ObservedTransport._ensure（异步方法） · L71–L73</a></li></ul></li><li><a href="#L76">McpWorkbench（类） · L76–L253</a><ul><li><a href="#L77">McpWorkbench.__init__（方法） · L77–L78</a></li><li><a href="#L80">McpWorkbench._config（方法） · L80–L97</a></li><li><a href="#L99">McpWorkbench._identity（方法） · L99–L101</a></li><li><a href="#L103">McpWorkbench.preview（方法） · L103–L112</a></li><li><a href="#L114">McpWorkbench._current（方法） · L114–L119</a></li><li><a href="#L121">McpWorkbench._record（方法） · L121–L125</a></li><li><a href="#L127">McpWorkbench.result（方法） · L127–L137</a></li><li><a href="#L139">McpWorkbench._compile（方法） · L139–L145</a></li><li><a href="#L147">McpWorkbench.arguments（方法） · L147–L159</a></li><li><a href="#L161">McpWorkbench.discover（异步方法） · L161–L199</a></li><li><a href="#L201">McpWorkbench._probe（异步方法） · L201–L253</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Bounded extension observations; never an execution/approval authority.</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Only discover owns a process. Previews register schema on an isolated original</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>registry, never access a Provider and never send tools/call. Requested records</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>are durable no-replay markers, including after cancellation/cold restart.</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import asyncio</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import copy</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>import hashlib</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>import json</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>import re</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from pyharness.config import McpServerCfg</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>from pyharness.core.context_observation import _PublicCapture, _PRIVATE_TEXT</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from pyharness.core.mcp import McpClient, StdioTransport</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from pyharness.core.sandbox import fail</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>from pyharness.core.tools_registry import ToolRegistry</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>_KEY = re.compile(r&#x27;[A-Za-z0-9_-]{1,80}&#x27;)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>_NAME = re.compile(r&#x27;[a-z][a-z0-9_]{1,40}&#x27;)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>_MAX_BYTES = 65536</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>_MAX_RECORDS = 128</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>def _encoded(value):</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    return json.dumps(value, ensure_ascii=False, sort_keys=True,</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>                      separators=(&#x27;,&#x27;, &#x27;:&#x27;), allow_nan=False).encode(&#x27;utf-8&#x27;)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>def _digest(value):</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    return hashlib.sha256(_encoded(value)).hexdigest()</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>def _key(value):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    if type(value) is not str or not _KEY.fullmatch(value):</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        fail(&#x27;invalid_diagnostic_key&#x27;)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    return value</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code></code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>def _safe_schema(value):</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    &quot;&quot;&quot;Finite private-content refusal, without rewriting schema property names.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    raw = _encoded(value)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    if len(raw) &gt; _MAX_BYTES:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        fail(&#x27;diagnostic_schema_limit&#x27;)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    pending = [value]</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    count = 0</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    while pending:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        item = pending.pop()</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        count += 1</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        if count &gt; 2048:</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>            fail(&#x27;diagnostic_schema_limit&#x27;)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        if type(item) is str and _PRIVATE_TEXT.search(item):</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            fail(&#x27;diagnostic_private_content&#x27;)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        if type(item) is dict:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            pending.extend(item.keys())</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            pending.extend(item.values())</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        elif type(item) is list:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            pending.extend(item)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    return value</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code></code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>class _ObservedTransport(StdioTransport):</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    def __init__(self, argv, *, timeout_s):</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        super().__init__(argv, timeout_s=timeout_s)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        self.owned_process = None</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    async def _ensure(self):</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        await super()._ensure()</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        self.owned_process = self._proc</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>class McpWorkbench:</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    def __init__(self, platform):</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        self.platform = platform</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    def _config(self, source, name):</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        if type(name) is not str or not _NAME.fullmatch(name):</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            fail(&#x27;invalid_connection_name&#x27;)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        if source == &#x27;managed&#x27;:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            row = self.platform.store.read()[&#x27;connections&#x27;].get(&#x27;mcp:&#x27; + name)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            cfg = row[&#x27;config&#x27;] if row and row.get(&#x27;type&#x27;) == &#x27;mcp&#x27; else None</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        elif source == &#x27;runtime&#x27;:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            rows = [m.model_dump() for m in</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                    self.platform.service.effective_settings().plugins.mcp_servers</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                    if m.name == name]</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            if len(rows) &gt; 1:</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                fail(&#x27;diagnostic_configuration_ambiguous&#x27;)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            cfg = rows[0] if rows else None</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        else:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            fail(&#x27;invalid_connection_source&#x27;)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        if cfg is None:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            fail(&#x27;connection_not_found&#x27;)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        return McpServerCfg.model_validate(cfg).model_dump()</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    def _identity(self, source, name, cfg):</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        return _digest({&#x27;tenant&#x27;: self.platform.service.tenant_id,</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                        &#x27;source&#x27;: source, &#x27;name&#x27;: name, &#x27;config&#x27;: cfg})</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code></code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    def preview(self, source, name, *, authorize):</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        authorize()</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        cfg = self._config(source, name)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        return {&#x27;source&#x27;: source, &#x27;name&#x27;: name, &#x27;status&#x27;: &#x27;configuration_only&#x27;,</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                &#x27;config_sha256&#x27;: self._identity(source, name, cfg),</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                &#x27;enabled&#x27;: cfg[&#x27;enabled&#x27;], &#x27;timeout_s&#x27;: min(30, cfg[&#x27;timeout_s&#x27;]),</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                &#x27;allowed_tools&#x27;: copy.deepcopy(cfg[&#x27;allowed_tools&#x27;]),</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                &#x27;host_process_confirmation_required&#x27;: True,</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                &#x27;execution_authorized&#x27;: False,</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                &#x27;warning&#x27;: &#x27;发现会启动配置的宿主进程；不执行 tools/call，不代表任务审批。&#x27;}</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    def _current(self, record):</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        try:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            cfg = self._config(record[&#x27;source&#x27;], record[&#x27;name&#x27;])</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            return record[&#x27;config_sha256&#x27;] == self._identity(record[&#x27;source&#x27;], record[&#x27;name&#x27;], cfg)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        except (PyHError, ValueError, TypeError, KeyError):</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            return False</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    def _record(self, key):</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        row = self.platform.store.read()[&#x27;preferences&#x27;].get(&#x27;mcp_diagnostics&#x27;, {}).get(_key(key))</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        if not row:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            fail(&#x27;diagnostic_not_found&#x27;)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        return row</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    def result(self, key, *, authorize):</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        authorize()</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        row = self._record(key)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        public = {k: copy.deepcopy(v) for k, v in row.items() if k != &#x27;_definitions&#x27;}</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        # Persisted intent alone proves neither liveness nor success.</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        if public[&#x27;status&#x27;] == &#x27;requested&#x27;:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            public[&#x27;status&#x27;] = &#x27;unconfirmed&#x27;</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        public[&#x27;stale&#x27;] = not self._current(row)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        public[&#x27;connected_now&#x27;] = False</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        public[&#x27;execution_authorized&#x27;] = False</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        return public</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code></code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    def _compile(name, definitions, allowed):</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        client = McpClient(name, None)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        client._tools = copy.deepcopy(definitions)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        registry = ToolRegistry()</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        client.register_into(registry, allowed_tools=allowed)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        return registry</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code></code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    def arguments(self, key, tool, arguments, *, authorize):</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        authorize()</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        row = self._record(key)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        if row[&#x27;status&#x27;] != &#x27;completed&#x27; or not self._current(row):</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>            fail(&#x27;diagnostic_not_active&#x27;)</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        if type(arguments) is not dict or len(_encoded(arguments)) &gt; _MAX_BYTES:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            fail(&#x27;invalid_diagnostic_arguments&#x27;)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        registry = self._compile(row[&#x27;name&#x27;], row[&#x27;_definitions&#x27;], row[&#x27;allowed_tools&#x27;])</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        registry.validate_args(tool, arguments)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        return {&#x27;valid&#x27;: True, &#x27;tool&#x27;: tool, &#x27;schema_sha256&#x27;: row[&#x27;schema_sha256&#x27;],</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                &#x27;arguments_retained&#x27;: False, &#x27;execution_authorized&#x27;: False,</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                &#x27;danger&#x27;: registry.lookup(tool).danger,</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                &#x27;required_path&#x27;: &#x27;original task → scope/guard → approval → effect receipt&#x27;}</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code></code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    async def discover(self, source, name, body, *, authorize):</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        authorize()</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        if type(body) is not dict or len(_encoded(body)) &gt; 2048:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>            fail(&#x27;invalid_diagnostic_request&#x27;)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        if set(body) != {&#x27;command_key&#x27;, &#x27;confirm_host_process&#x27;, &#x27;config_sha256&#x27;}:</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>            fail(&#x27;invalid_diagnostic_request&#x27;)</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        key = _key(body[&#x27;command_key&#x27;])</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        if body[&#x27;confirm_host_process&#x27;] is not True:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            fail(&#x27;host_process_confirmation_required&#x27;)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        cfg = self._config(source, name)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        identity = self._identity(source, name, cfg)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        existing = self.platform.store.read()[&#x27;preferences&#x27;].get(&#x27;mcp_diagnostics&#x27;, {}).get(key)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        if existing:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            if any(existing.get(k) != v for k, v in</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                   {&#x27;source&#x27;: source, &#x27;name&#x27;: name, &#x27;config_sha256&#x27;: body[&#x27;config_sha256&#x27;]}.items()):</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                fail(&#x27;diagnostic_key_conflict&#x27;)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>            return self.result(key, authorize=authorize)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        if body[&#x27;config_sha256&#x27;] != identity:</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>            fail(&#x27;diagnostic_configuration_stale&#x27;)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        if not cfg[&#x27;enabled&#x27;]:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>            fail(&#x27;diagnostic_connection_not_active&#x27;)</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        lock = self.platform.locks.setdefault(&#x27;mcp-diagnostic&#x27;, asyncio.Lock())</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        if lock.locked():</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>            fail(&#x27;diagnostic_busy&#x27;)</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        async with lock:</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>            # No await between current authorization/config checks and intent.</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>            authorize()</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            if self._identity(source, name, self._config(source, name)) != identity:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                fail(&#x27;diagnostic_configuration_stale&#x27;)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>            with self.platform.store.transaction() as data:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                rows = data[&#x27;preferences&#x27;].setdefault(&#x27;mcp_diagnostics&#x27;, {})</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                if key in rows:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                    fail(&#x27;diagnostic_key_conflict&#x27;)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                if len(rows) &gt;= _MAX_RECORDS:</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                    fail(&#x27;diagnostic_history_limit&#x27;)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                rows[key] = {&#x27;command_key&#x27;: key, &#x27;source&#x27;: source, &#x27;name&#x27;: name,</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>                             &#x27;config_sha256&#x27;: identity, &#x27;status&#x27;: &#x27;requested&#x27;,</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>                             &#x27;requested_at&#x27;: datetime.now(timezone.utc).isoformat()}</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            return await self._probe(key, cfg, authorize)</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code></code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>    async def _probe(self, key, cfg, authorize):</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        transport = _ObservedTransport(cfg[&#x27;command&#x27;], timeout_s=min(30, cfg[&#x27;timeout_s&#x27;]))</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        client = McpClient(cfg[&#x27;name&#x27;], transport)</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        result = {&#x27;status&#x27;: &#x27;failed&#x27;}</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        task = asyncio.current_task()</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        action = &#x27;mcp-diagnostic:&#x27; + key</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        self.platform.actions[action] = task</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        try:</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            async with asyncio.timeout(min(35, cfg[&#x27;timeout_s&#x27;] * 2 + 2)):</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                await client.connect()</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>                if client.tools_listing.get(&#x27;nextCursor&#x27;):</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                    fail(&#x27;diagnostic_partial_listing&#x27;)</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>                definitions = _safe_schema(client._tools)</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>                if len(definitions) &gt; 64 or any(type(t) is not dict for t in definitions):</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>                    fail(&#x27;diagnostic_schema_limit&#x27;)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                registry = self._compile(cfg[&#x27;name&#x27;], definitions, cfg[&#x27;allowed_tools&#x27;])</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>                public = _PublicCapture(())</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>                server = client.initialization.get(&#x27;serverInfo&#x27;) or {}</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>                if type(server) is not dict:</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>                    fail(&#x27;diagnostic_invalid_server&#x27;)</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>                result = {&#x27;status&#x27;: &#x27;completed&#x27;,</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>                          &#x27;protocol_status&#x27;: &#x27;verified&#x27; if client.initialization.get(&#x27;protocolVersion&#x27;) else &#x27;legacy_unverified&#x27;,</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>                          &#x27;protocol_version&#x27;: client.initialization.get(&#x27;protocolVersion&#x27;),</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>                          &#x27;server&#x27;: {k: public.text(server[k]) for k in (&#x27;name&#x27;, &#x27;version&#x27;) if k in server},</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>                          &#x27;schema_sha256&#x27;: _digest(definitions),</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                          &#x27;tools&#x27;: [{&#x27;name&#x27;: d.name, &#x27;danger&#x27;: d.danger,</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                                     &#x27;schema&#x27;: copy.deepcopy(d.schema)} for d in registry.iter_definitions()],</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                          &#x27;_definitions&#x27;: copy.deepcopy(definitions),</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                          &#x27;allowed_tools&#x27;: copy.deepcopy(cfg[&#x27;allowed_tools&#x27;])}</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>            result = {&#x27;status&#x27;: &#x27;unconfirmed&#x27;, &#x27;error_code&#x27;: &#x27;diagnostic_cancelled&#x27;}</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            raise</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        except Exception as exc:</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            result = {&#x27;status&#x27;: &#x27;failed&#x27;, &#x27;error_code&#x27;: exc.code if isinstance(exc, PyHError) else &#x27;diagnostic_failed&#x27;}</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        finally:</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>            try:</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>                await client.close()</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>            finally:</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                owned = transport.owned_process</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                result[&#x27;carrier_closed&#x27;] = owned is None or owned.returncode is not None</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                if not result[&#x27;carrier_closed&#x27;]:</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>                    result = {&#x27;status&#x27;: &#x27;unconfirmed&#x27;, &#x27;error_code&#x27;: &#x27;diagnostic_cleanup_unconfirmed&#x27;,</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>                              &#x27;carrier_closed&#x27;: False}</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>                result[&#x27;finished_at&#x27;] = datetime.now(timezone.utc).isoformat()</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>                # Cleanup metadata is allowed after revocation; no private result</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                # is returned until current identity is checked below.</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                try:</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>                    with self.platform.store.transaction() as data:</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                        data[&#x27;preferences&#x27;][&#x27;mcp_diagnostics&#x27;][key].update(result)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>                finally:</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>                    self.platform.actions.pop(action, None)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        authorize()</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        return self.result(key, authorize=authorize)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

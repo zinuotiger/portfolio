@@ -1,0 +1,55 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/automatic_review.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/automatic_review.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 55 行</span></nav><main class="wrap source-page"><h1>pyharness/application/automatic_review.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：2c863eefbc6c9afaddd3e8091aa3980723cbb921<br>SHA-256（内容校验）：990eacbfea13d5295e3de19f7ca467e43b77838cec485d7f20a6dc33d11c6e92</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 3 个类、函数与方法</summary><ul><li><a href="#L13">AutomaticReviewer（类） · L13–L55</a><ul><li><a href="#L17">AutomaticReviewer.evaluate（异步方法） · L17–L18</a></li><li><a href="#L20">AutomaticReviewer.check（方法） · L20–L55</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Independent deterministic reviewer. It has no tools or execution authority.</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Policy v1 intentionally approves a narrow language, not arbitrary Python.</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>Unknown operations and failures remain pending for the human channel.</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import ast</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>import asyncio</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import re</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pathlib import PurePosixPath</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>class AutomaticReviewer:</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    identity = &#x27;reviewer:bounded-policy-v1&#x27;</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    timeout = 2</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    async def evaluate(self, request):</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        return await asyncio.to_thread(self.check, request)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    def check(self, request):</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        scope, args, tool = request[&#x27;scope&#x27;], request[&#x27;args&#x27;], request[&#x27;tool&#x27;]</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        if scope[&#x27;mode&#x27;] not in (&#x27;isolated&#x27;, &#x27;remote&#x27;) or tool not in scope[&#x27;allowed_tools&#x27;]:</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>            return {&#x27;decision&#x27;: &#x27;manual&#x27;, &#x27;reason&#x27;: &#x27;宿主执行或超出助手权限，必须人工确认&#x27;}</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        context=request.get(&#x27;context&#x27;,[])</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        intent=context[-1] if isinstance(context,list) and context and isinstance(context[-1],str) else &#x27;&#x27;</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        if not intent.strip() or scope.get(&#x27;network&#x27;,&#x27;none&#x27;)!=&#x27;none&#x27;:</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>            return {&#x27;decision&#x27;:&#x27;manual&#x27;,&#x27;reason&#x27;:&#x27;任务上下文缺失或执行范围不是无网络隔离环境，需要人工确认&#x27;}</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        if tool in (&#x27;fs.write_file&#x27;, &#x27;file.write&#x27;):</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>            path = args.get(&#x27;path&#x27;, &#x27;&#x27;)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>            parts = path.split(&#x27;/&#x27;)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            if (not path or PurePosixPath(path).is_absolute() or &#x27;\\&#x27; in path or &#x27;:&#x27; in path or</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>                    any(p in (&#x27;&#x27;, &#x27;.&#x27;, &#x27;..&#x27;) or p.startswith(&#x27;.&#x27;) or p.lower().startswith(&#x27;credentials&#x27;) for p in parts)):</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>                return {&#x27;decision&#x27;: &#x27;deny&#x27;, &#x27;reason&#x27;: &#x27;文件路径超出可自动审核的私有工作区范围&#x27;}</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            if args.get(&#x27;mode&#x27;) == &#x27;append&#x27; or len(str(args.get(&#x27;content&#x27;, &#x27;&#x27;)).encode()) &gt; 65536:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                return {&#x27;decision&#x27;: &#x27;manual&#x27;, &#x27;reason&#x27;: &#x27;追加或大文件写入需人工核对&#x27;}</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            if path not in intent or not re.search(r&#x27;写|创建|生成|保存|\b(write|create|generate|save)\b&#x27;,intent,re.I):</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                return {&#x27;decision&#x27;:&#x27;manual&#x27;,&#x27;reason&#x27;:&#x27;任务未明确要求写入此文件，需要人工核对调用与任务是否一致&#x27;}</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            return {&#x27;decision&#x27;: &#x27;approve&#x27;, &#x27;reason&#x27;: &#x27;任务明确要求写入此相对路径的小文件，范围为无网络隔离工作区；执行前仍重入权限检查&#x27;}</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        if tool == &#x27;exec.python_run&#x27;:</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>            if not re.search(r&#x27;打印|输出|计算|算一下|\b(print|calculate|compute)\b&#x27;,intent,re.I):</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>                return {&#x27;decision&#x27;:&#x27;manual&#x27;,&#x27;reason&#x27;:&#x27;任务未明确要求打印或计算，需要人工确认代码用途&#x27;}</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            try:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>                tree = ast.parse(args.get(&#x27;code&#x27;, &#x27;&#x27;))</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>                # Only print literals/arithmetic. No names except print, imports,</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>                # attributes, subscripts, comprehensions, mutation or loops.</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                allowed = (ast.Module, ast.Expr, ast.Call, ast.Name, ast.Load, ast.Constant,</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>                    ast.BinOp, ast.UnaryOp, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.USub, ast.UAdd)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>                nodes = list(ast.walk(tree))</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>                if len(nodes) &lt;= 100 and nodes and all(isinstance(n, allowed) for n in nodes) and all(</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>                    (not isinstance(n, ast.Name) or n.id == &#x27;print&#x27;) and</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                    (not isinstance(n, ast.Call) or isinstance(n.func, ast.Name) and n.func.id == &#x27;print&#x27; and not n.keywords)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                    for n in nodes):</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                    return {&#x27;decision&#x27;: &#x27;approve&#x27;, &#x27;reason&#x27;: &#x27;隔离环境中仅打印常量或简单算术，无文件、网络或进程访问&#x27;}</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            except (ValueError, SyntaxError): pass</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        return {&#x27;decision&#x27;: &#x27;manual&#x27;, &#x27;reason&#x27;: &#x27;此操作不在自动审核白名单，需要人工批准&#x27;}</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

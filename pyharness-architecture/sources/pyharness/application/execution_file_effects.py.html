@@ -1,0 +1,82 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/execution_file_effects.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/execution_file_effects.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 82 行</span></nav><main class="wrap source-page"><h1>pyharness/application/execution_file_effects.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：842e01d783bca4ee641a4a48ac0c36603bdefb6c<br>SHA-256（内容校验）：4cdf367581022911a23479b29431d797cef9a76f41811f1775f9884bf15222b7</p><p><a href="../../../architecture-detailed.html?node=execution_effects">ExecutionEffects（工具影响回执）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 7 个类、函数与方法</summary><ul><li><a href="#L11">validate_file_observation（函数） · L11–L21</a></li><li><a href="#L24">file_observer（函数） · L24–L29</a></li><li><a href="#L32">FileObservation（类） · L32–L82</a><ul><li><a href="#L33">FileObservation.__init__（方法） · L33–L36</a></li><li><a href="#L38">FileObservation.capture（异步方法） · L38–L65</a></li><li><a href="#L67">FileObservation.before（异步方法） · L67–L67</a></li><li><a href="#L69">FileObservation.after（异步方法） · L69–L82</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Bounded physical observations, never predicted writes or transactional attribution.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import hashlib</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pathlib import PurePosixPath</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.core.sandbox import safe_path,read_regular,fail</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code></code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>ALIASES={&#x27;file.write&#x27;:&#x27;fs.write_file&#x27;,&#x27;file.patch&#x27;:&#x27;fs.patch&#x27;}</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>TARGET_TOOLS={&#x27;fs.write_file&#x27;,&#x27;fs.patch&#x27;}</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>WORKSPACE_TOOLS={&#x27;exec.shell_run&#x27;,&#x27;exec.python_run&#x27;,&#x27;proc.start&#x27;,&#x27;proc.kill&#x27;}</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>def validate_file_observation(payload,events):</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    if payload.get(&#x27;file_observation&#x27;) is None:return</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    name=ALIASES.get(payload[&#x27;tool&#x27;],payload[&#x27;tool&#x27;])</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    scope=&#x27;target&#x27; if name in TARGET_TOOLS else &#x27;workspace&#x27; if name in WORKSPACE_TOOLS else None</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    if scope is None or payload[&#x27;observation_scope&#x27;]!=scope:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;file_observation_tool_mismatch&#x27;)</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    if scope==&#x27;target&#x27; and payload[&#x27;file_changes&#x27;] is not None:</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        call=next((e for e in events if e.seq==payload[&#x27;tool_call_seq&#x27;]),None)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        if call is None:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;file_observation_call_missing&#x27;)</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        path=PurePosixPath(call.payload[&#x27;args&#x27;][&#x27;path&#x27;]).as_posix()</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        if any(c[&#x27;path&#x27;]!=path for c in payload[&#x27;file_changes&#x27;]):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;file_observation_path_mismatch&#x27;)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>def file_observer(runtime,name,args,ctx):</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    normalized=ALIASES.get(name,name)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    if (getattr(runtime,&#x27;product_execution&#x27;,None) is None or name not in runtime.definition.allowed_tools or</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>            runtime.definition.sandbox_profile.mode==&#x27;disabled&#x27; or</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>            normalized not in TARGET_TOOLS|WORKSPACE_TOOLS):return None</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    return FileObservation(runtime,normalized,args,ctx)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code></code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code></code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>class FileObservation:</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    def __init__(self,runtime,name,args,ctx):</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        self.runtime=runtime;self.name=name;self.args=args;self.ctx=ctx</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        self.boundary=runtime.product_execution;self.ident=None;self.initial=None</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        self.scope=&#x27;target&#x27; if name in TARGET_TOOLS else &#x27;workspace&#x27;</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    async def capture(self):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        self.boundary.authorize()</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        if self.ident is None:self.ident=await self.runtime.sandbox(self.ctx)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        task=str(self.ctx.task_id)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        import asyncio</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        async with self.runtime.locks.setdefault(task,asyncio.Lock()):</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>            async with self.runtime.platform.sandboxes.observe(self.ident) as root:</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>                self.boundary.authorize()</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                if self.scope==&#x27;target&#x27;:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>                    path=safe_path(root,self.args[&#x27;path&#x27;]);name=path.relative_to(root).as_posix()</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>                    if path.exists() and not path.is_file():fail(&#x27;file_not_regular&#x27;)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>                    raw=read_regular(path,10*1048576) if path.exists() else None</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>                    result={} if raw is None else {name:hashlib.sha256(raw).hexdigest()}</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                else:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                    from pyharness.application.execution_file_runtime import visible_output</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                    result={};total=0</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                    for index,entry in enumerate(root.rglob(&#x27;*&#x27;),1):</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                        if index&gt;8192:fail(&#x27;artifact_limit&#x27;)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                        name=entry.relative_to(root).as_posix()</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                        if not visible_output(self.boundary,name):continue</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                        path=safe_path(root,name)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                        if not path.is_file():continue</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>                        if len(result)&gt;=250:fail(&#x27;artifact_limit&#x27;)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                        raw=read_regular(path,10*1048576);total+=len(raw)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                        if total&gt;20*1048576:fail(&#x27;artifact_limit&#x27;)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                        result[name]=hashlib.sha256(raw).hexdigest()</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                self.boundary.authorize()</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                return result</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    async def before(self):self.initial=await self.capture()</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code></code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    async def after(self,result):</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        if self.name==&#x27;proc.start&#x27;:return dict(file_observation=&#x27;unavailable&#x27;,observation_scope=self.scope,</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            observation_reason=&#x27;process_running&#x27;,file_changes=None)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        try:final=await self.capture()</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        except Exception as exc:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            return dict(file_observation=&#x27;unavailable&#x27;,observation_scope=self.scope,file_changes=None,</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                observation_reason=&#x27;authorization_changed&#x27; if getattr(exc,&#x27;code&#x27;,None)==&#x27;GRD-403&#x27; else &#x27;snapshot_failed&#x27;)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        changes=[]</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        for name in sorted(set(self.initial)|set(final)):</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            before=self.initial.get(name);after=final.get(name)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            if before==after:continue</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            changes.append(dict(path=name,kind=&#x27;created&#x27; if before is None else &#x27;deleted&#x27; if after is None else &#x27;modified&#x27;,</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                before_sha256=before,after_sha256=after))</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        return dict(file_observation=&#x27;observed&#x27;,observation_scope=self.scope,observation_reason=None,file_changes=changes)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

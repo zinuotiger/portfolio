@@ -1,0 +1,318 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/subagent_lifecycle.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/subagent_lifecycle.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 318 行</span></nav><main class="wrap source-page"><h1>pyharness/core/subagent_lifecycle.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：95f5d9581dd1f01bb3ca1deb153d4c2730aa4931<br>SHA-256（内容校验）：f278dbf04e4c02e61715b8335694859e27860b2740199cd3d892cd1035c64e95</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 13 个类、函数与方法</summary><ul><li><a href="#L9">SubagentLifecycle（类） · L9–L317</a><ul><li><a href="#L12">SubagentLifecycle.enter（异步方法） · L12–L28</a></li><li><a href="#L30">SubagentLifecycle._register_bus_types（方法） · L30–L42</a></li><li><a href="#L44">SubagentLifecycle.definition（方法） · L44–L71</a></li><li><a href="#L73">SubagentLifecycle.announce（异步方法） · L73–L125</a></li><li><a href="#L127">SubagentLifecycle._rollback（方法） · L127–L147</a></li><li><a href="#L149">SubagentLifecycle.detach（异步方法） · L149–L210</a></li><li><a href="#L212">SubagentLifecycle._mount（方法） · L212–L234</a></li><li><a href="#L236">SubagentLifecycle._unmount（方法） · L236–L256</a></li><li><a href="#L258">SubagentLifecycle._parent_anchor（方法） · L258–L277</a></li><li><a href="#L279">SubagentLifecycle._validate_spec（方法） · L279–L304</a></li><li><a href="#L306">SubagentLifecycle._acquire_slot（异步方法） · L306–L312</a></li><li><a href="#L314">SubagentLifecycle._release_slot（方法） · L314–L317</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;SubagentLifecycle operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.core.lifecycle import stop_admissions</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from typing import Any</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.core.subagent_models import log, TOOL_NAME, EVENT_TYPES, SubagentSpec</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.core.subagent_provider import SubagentSpawnProvider</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>class SubagentLifecycle:</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    &quot;&quot;&quot;SubagentLifecycle responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    async def enter(self, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>        &quot;&quot;&quot;能力装载(DIS-SEAM §2.4 第①动作):登记 subagent.* 事件类型 schema。</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        幂等:已 enter 直接返回(重复 enter 静默通过)。事件类型按 EventBus 实例</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        弱引用去重——同 bus 二次 enter(含 detach 后重入)不撞 register_type 的</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        EVT-102(偏离 9);登记失败(真冲突/总线异常)→ 回 detached 不 announce。</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        if self._entered:</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>            return</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        bus = self._bus if ctx is None else (getattr(ctx, &quot;bus&quot;, None)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>                                             or self._bus)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        self._closing = False</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        if bus is not None:</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>            self._register_bus_types(bus)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        self._entered = True</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        log.info(&quot;subagent capability entered session=%s&quot;,</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>                 getattr(self._session, &quot;sid&quot;, None))</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    def _register_bus_types(self, bus: Any) -&gt; None:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        &quot;&quot;&quot;EventBus 事件类型登记(弱引用去重;失败上抛 → enter 失败回 detached)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        try:</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            if bus in self._typed_buses:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                return                          # 该总线已登记(重入/多 manager 共享)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        except TypeError:                       # 不可弱引用对象:退化为逐次尝试</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            pass</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        for t in EVENT_TYPES:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            bus.register_type(t, None)          # 二次注册 EVT-102 → 上抛</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        try:</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>            self._typed_buses[bus] = None</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        except TypeError:                       # 同上:仅本次登记失败,不阻断</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            pass</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    def definition(self) -&gt; Any:</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        &quot;&quot;&quot;subagent.spawn 工具 Definition(announce 第③步注册给 LLM)。</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        danger=none:派发本身不越权,子任务内动作仍过各自 guard(F014/F015 同权,</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        无父级担保);approval=never 与 none 级一致(ToolDefinition 契约)。schema 为</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        JSON-Schema dict(注册时编译 F026);depth 不进 LLM 参数(递归层级由装配层</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        依 ctx 推 depth=self.depth+1,防 LLM 谎报层级绕过递归闸)。</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        from pyharness.core.tools_registry import ToolDefinition</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        return ToolDefinition(</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            name=TOOL_NAME,</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>            description=&quot;派生子 agent 并行处理可隔离子任务(独立 session,预算=父×1/4,&quot;</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                        &quot;深度≤3),完成返回 ≤2KB 摘要&quot;,</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            schema={&quot;type&quot;: &quot;object&quot;,</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                    &quot;properties&quot;: {</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                        &quot;task&quot;: {&quot;type&quot;: &quot;string&quot;,</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>                                 &quot;description&quot;: &quot;委派意图(可隔离子任务描述)&quot;},</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                        &quot;tools_subset&quot;: {&quot;type&quot;: &quot;array&quot;, &quot;items&quot;: {&quot;type&quot;: &quot;string&quot;},</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                                         &quot;description&quot;: &quot;只收窄子任务可用工具(可选)&quot;},</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                        &quot;deny_extra&quot;: {&quot;type&quot;: &quot;array&quot;, &quot;items&quot;: {&quot;type&quot;: &quot;string&quot;},</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                                       &quot;description&quot;: &quot;追加收紧工具名(可选)&quot;},</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                        &quot;creds_allowed&quot;: {&quot;type&quot;: &quot;array&quot;, &quot;items&quot;: {&quot;type&quot;: &quot;string&quot;},</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                                          &quot;description&quot;: &quot;子任务所需凭据名子集(可选)&quot;},</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                        &quot;notify&quot;: {&quot;type&quot;: &quot;boolean&quot;,</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>                                   &quot;description&quot;: &quot;完成是否回写 joined 事件(默认 true)&quot;}},</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                    &quot;required&quot;: [&quot;task&quot;]},</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            danger=&quot;none&quot;, approval=&quot;never&quot;, owner=self._owner,</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            ctx_path=&quot;ctx.agent.subagent&quot;, version=&quot;1.0.0&quot;)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    async def announce(self, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        &quot;&quot;&quot;对外宣布(DIS-SEAM §2.4 第②动作,五步):注册工具 → 挂订阅 → mount →</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        registry.updated 留痕;任一步失败回滚已做步骤并回 detached(半装必回滚)。</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        已 announce 幂等返回。mount 目标 = ctx.agent 命名空间(装配层未来 locator</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        宿主;未挂 agent 命名空间时日志降级不阻断——工具已注册,主循环仍可经</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        tools.execute 触达)。</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        if self._announced:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            return</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        done: list[str] = []</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        try:</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            ctx = ctx or self._announce_ctx</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            bus = self._bus if ctx is None else (getattr(ctx, &quot;bus&quot;, None)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                                                 or self._bus)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            tools = self._tools if ctx is None else (getattr(ctx, &quot;tools&quot;, None)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                                                     or self._tools)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            if tools is not None:</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                # ① ③ LLM 可见:register_tool 绑 Provider(spawn+join 适配器,偏离 8)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                register = getattr(tools, &quot;register_tool&quot;, None) or \</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                    getattr(tools, &quot;register_definition&quot;, None)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                if callable(register):</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                    try:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                        register(self.definition(), provider=SubagentSpawnProvider(self))</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                    except TypeError:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                        register(self.definition())     # 无 provider 面的注册表别名</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                    done.append(&quot;tool&quot;)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            if bus is not None:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                # ② 挂订阅:session.closing 预关钩子(规范预留,偏离 11)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                bus.subscribe(&quot;session.closing&quot;, self._on_session_closing,</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                              owner=self._owner)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                done.append(&quot;sub&quot;)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>            # ④ mount ctx.agent.subagent(定位器;可缺省降级)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            mounted = self._mount(ctx, &quot;subagent&quot;)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            if mounted:</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                done.append(&quot;mount&quot;)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            if bus is not None:</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                # ⑤ registry.updated 留痕(瞬时事件,仅总线)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                await bus.emit(&quot;registry.updated&quot;,</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                               {&quot;op&quot;: &quot;attach&quot;, &quot;kind&quot;: &quot;capability&quot;,</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                                &quot;key&quot;: &quot;ctx.agent.subagent&quot;})</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            self._announce_ctx = ctx</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>            self._announced = True</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            log.info(&quot;subagent capability announced session=%s&quot;,</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                     getattr(self._session, &quot;sid&quot;, None))</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        except BaseException:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            for step in reversed(done):         # 半装必回滚(逆序)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                try:</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                    self._rollback(step, ctx)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                except Exception:               # noqa: BLE001 回滚自身失败不吞原错</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                    log.exception(&quot;announce 回滚失败 step=%s&quot;, step)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            self._entered = False               # 回 detached(可重入重试)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            raise</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    def _rollback(self, step: str, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        &quot;&quot;&quot;announce 单步回滚(逆序摘除已做步骤;TLB-802 = 已摘,幂等静默)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        if step == &quot;tool&quot;:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            tools = self._tools if ctx is None else (getattr(ctx, &quot;tools&quot;, None)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                                                     or self._tools)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            if tools is not None:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                unreg = getattr(tools, &quot;unregister_definition&quot;, None) or \</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                    getattr(tools, &quot;unregister&quot;, None)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                if callable(unreg):</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                    try:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                        unreg(TOOL_NAME)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                    except PyHError as e:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                        if e.code != &quot;TLB-802&quot;:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                            log.warning(&quot;announce rollback 注销失败 code=%s&quot;, e.code)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        elif step == &quot;sub&quot;:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            bus = self._bus if ctx is None else (getattr(ctx, &quot;bus&quot;, None)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                                                 or self._bus)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            if bus is not None:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                bus.unsubscribe_all(owner=self._owner)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        elif step == &quot;mount&quot;:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            self._unmount(ctx)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code></code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    async def detach(self, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        &quot;&quot;&quot;能力摘除,child-first(DIS-SEAM §2.4 第③动作):先杀光在途子任务并落</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        终态事件,再摘订阅/注销工具/unmount;单步失败记 broken 告警仍继续摘除</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        (半卸 &gt; 僵尸);幂等(重复调用安全)。</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        if not self._entered and not self._announced and not self._children:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>            return                             # 幂等:无装载无在途 → 无事可做</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        await stop_admissions(self)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        cleanup_errors = []</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        # ① child-first:先杀孩子(取消传播 F025 + 终态事件 + 等全部真正退出)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        try:</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            await self._cancel_all_children(reason=&quot;parent-detach&quot;)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        except BaseException as exc:</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>            cleanup_errors.append(exc)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        ctx = ctx or self._announce_ctx</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        bus = self._bus if ctx is None else (getattr(ctx, &quot;bus&quot;, None)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                                             or self._bus)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        tools = self._tools if ctx is None else (getattr(ctx, &quot;tools&quot;, None)</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>                                                 or self._tools)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        broken: list[str] = []</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        # ② 摘订阅(owner 精确摘除;幂等)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        if bus is not None:</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>            try:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                bus.unsubscribe_all(owner=self._owner)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>            except Exception as exc:           # noqa: BLE001 半卸 &gt; 僵尸</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                log.warning(&quot;detach 摘订阅失败: %s&quot;, exc)</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                broken.append(&quot;sub&quot;)</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        # ③ 注销工具(TLB-802 = 已摘,幂等静默)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        if tools is not None:</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            unreg = getattr(tools, &quot;unregister_definition&quot;, None) or \</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                getattr(tools, &quot;unregister&quot;, None)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>            if callable(unreg):</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                try:</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                    unreg(TOOL_NAME)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                except PyHError as e:</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                    if e.code != &quot;TLB-802&quot;:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                        log.warning(&quot;detach 注销工具失败 code=%s&quot;, e.code)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                        broken.append(&quot;tool&quot;)</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                except Exception as exc:       # noqa: BLE001</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                    log.warning(&quot;detach 注销工具异常: %s&quot;, exc)</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                    broken.append(&quot;tool&quot;)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        # ④ unmount(ctx.agent.subagent)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        try:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            self._unmount(ctx)</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        except Exception as exc:               # noqa: BLE001</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            log.warning(&quot;detach unmount 失败: %s&quot;, exc)</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            broken.append(&quot;mount&quot;)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        # ⑤ registry.updated op=del 留痕(尽力而为)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        if bus is not None and not broken:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            try:</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>                await bus.emit(&quot;registry.updated&quot;,</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>                               {&quot;op&quot;: &quot;del&quot;, &quot;kind&quot;: &quot;capability&quot;,</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                                &quot;key&quot;: &quot;ctx.agent.subagent&quot;})</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            except Exception:                  # noqa: BLE001</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>                log.warning(&quot;detach registry.updated 留痕失败&quot;)</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        self._announced = False</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        self._entered = False</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        self._children.clear()</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        if broken:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>            cleanup_errors.append(RuntimeError(&quot;subagent detach incomplete: &quot; + &quot;,&quot;.join(broken)))</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        if cleanup_errors:</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>            raise BaseExceptionGroup(&quot;subagent detach failed&quot;, cleanup_errors)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code></code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>    def _mount(self, ctx: Any, key: str) -&gt; bool:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        &quot;&quot;&quot;locator.mount:把本 manager 挂到 ctx.agent 命名空间的 subagent 键。</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code></code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        挂载前记录旧值(detach 恢复);ctx.agent 命名空间未建(装配层 locator 未</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        接线)→ 日志降级返回 False(工具面仍可用,不阻断 announce)。</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        if ctx is None:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>            return False</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        ns = getattr(ctx, &quot;agent&quot;, None)</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        if ns is None:</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>            log.warning(&quot;ctx.agent 命名空间未挂载,ctx.agent.subagent 未 mount&quot;</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>                        &quot; (tools.execute 面仍可用)&quot;)</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            return False</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        self._mount_ns = ns</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        self._mount_prev = getattr(ns, key, None)</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        try:</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>            setattr(ns, key, self)</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>            return True</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        except Exception as exc:               # noqa: BLE001 只读/受限目标</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>            log.warning(&quot;mount ctx.agent.%s 失败: %s&quot;, key, exc)</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            self._mount_ns = None</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            self._mount_prev = None</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            return False</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code></code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    def _unmount(self, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        &quot;&quot;&quot;locator.unmount 逆操作:仅当现值仍为本 manager 时摘除并恢复旧值。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        ns = self._mount_ns</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        if ns is None and ctx is not None:</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>            ns = getattr(ctx, &quot;agent&quot;, None)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        if ns is None:</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>            return</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        key = &quot;subagent&quot;</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        if getattr(ns, key, None) is self:</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            if self._mount_prev is None:</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                try:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                    delattr(ns, key)</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>                except Exception:              # noqa: BLE001</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                    log.debug(&quot;subagent namespace unmount failed&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>            else:</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>                try:</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>                    setattr(ns, key, self._mount_prev)</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>                except Exception:              # noqa: BLE001</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                    log.debug(&quot;subagent namespace restore failed&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        self._mount_ns = None</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        self._mount_prev = None</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code></code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>    def _parent_anchor(self, ctx: Any) -&gt; int:</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        &quot;&quot;&quot;发起轮锚(spawned payload.parent_seq):ctx.round_seq(spec 命名)→ 主循环</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        run.input_seq → 父会话当前 seq;均无 → EVT-100(父会话未引导,EVT-106 语义)。</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        if ctx is not None:</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            rs = getattr(ctx, &quot;round_seq&quot;, None)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            if isinstance(rs, int) and rs &gt;= 1:</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>                return rs</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>            loop = getattr(ctx, &quot;loop&quot;, None)</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>            cur = getattr(loop, &quot;current&quot;, None) if loop is not None else None</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>            iq = getattr(cur, &quot;input_seq&quot;, None) if cur is not None else None</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>            if isinstance(iq, int) and iq &gt;= 1:</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>                return iq</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        sess = self._session</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        if sess is not None and hasattr(sess, &quot;stats&quot;):</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>            last = sess.stats().get(&quot;seq&quot;, 0)</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>            if last &gt;= 1:</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>                return last</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        raise_code(&quot;EVT-100&quot;, hint=&quot;父会话未引导或无发起轮锚(parent_seq 需 ≥1)&quot;,</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>                   advice=&quot;子派发须在父会话 created 后、运行轮内发起&quot;)</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code></code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>    def _validate_spec(self, spec: SubagentSpec) -&gt; None:</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        &quot;&quot;&quot;派发前 spec 校验(异常表:非法 → EVT-100):空 task/非正值或超上限</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        budget_ratio/tools_subset 与 deny_extra、creds_allowed 类型/层级非 int。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        if not isinstance(spec, SubagentSpec):</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;spec 须为 SubagentSpec 实例&quot;)</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        if not spec.task or not str(spec.task).strip():</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;task&quot;, hint=&quot;委派任务为空,spawn 拒绝&quot;)</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        if not isinstance(spec.budget_ratio, (int, float)) \</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>                or not (0 &lt; float(spec.budget_ratio) &lt;= self._budget_ratio):</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;budget_ratio&quot;,</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                       ratio=spec.budget_ratio, cap=self._budget_ratio,</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                       hint=f&quot;预算比例须 ∈ (0, {self._budget_ratio}](≤config &quot;</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                            f&quot;budget.subagent_ratio;默认父×1/4)&quot;)</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>        if spec.tools_subset is not None and not isinstance(spec.tools_subset, list):</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;tools_subset&quot;,</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                       hint=&quot;tools_subset 须为 list[str] 或 None&quot;)</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        for t in spec.tools_subset or []:</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>            if not isinstance(t, str):</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>                raise_code(&quot;EVT-100&quot;, field=&quot;tools_subset&quot;, tool=t,</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                           hint=&quot;tools_subset 元素须为工具名字符串&quot;)</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>        if not isinstance(spec.deny_extra, list) \</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                or not isinstance(spec.creds_allowed, list):</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;deny_extra/creds_allowed 须为 list&quot;)</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        if not isinstance(spec.depth, int):</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;depth&quot;, depth=spec.depth,</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>                       hint=&quot;depth 须为 int(递归层级)&quot;)</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code></code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>    async def _acquire_slot(self) -&gt; None:</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        &quot;&quot;&quot;并发闸(BUSY 拒新,不排队;偏离 4):满 → BUSY,语义同 JOB-001 族。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        if self._active &gt;= self._max_concurrent:</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>                &quot;hint&quot;: f&quot;子 agent 并发已达上限 {self._max_concurrent}&quot;,</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>                &quot;advice&quot;: &quot;先 join/取消若干在途子任务再派发(F049 并发边界 ≤8)&quot;})</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        self._active += 1                       # 计数增减间无 await → 原子</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code></code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>    def _release_slot(self) -&gt; None:</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        &quot;&quot;&quot;并发闸释放(子任务终态调用;防双放由调用方 slot 标记兜底)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        if self._active &gt; 0:</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>            self._active -= 1</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

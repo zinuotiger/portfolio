@@ -1,0 +1,63 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/experiment_plan.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/experiment_plan.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 63 行</span></nav><main class="wrap source-page"><h1>pyharness/application/experiment_plan.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：ff39c2013eb7796ef1ad68c890544547685c975e<br>SHA-256（内容校验）：4e677b4b71e1b961e54c9e3be369a446154341cc0555dc4b54179adc643bd63f</p><p><a href="../../../architecture-detailed.html?node=experiment">PairedExperiment（配对实验与报告）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 6 个类、函数与方法</summary><ul><li><a href="#L8">experiment_id_for（函数） · L8–L11</a></li><li><a href="#L14">preparation_identity（函数） · L14–L16</a></li><li><a href="#L19">preparation_plan（函数） · L19–L46</a></li><li><a href="#L49">experiment_request（函数） · L49–L51</a></li><li><a href="#L54">experiment_ref（函数） · L54–L57</a></li><li><a href="#L60">experiment_summary（函数） · L60–L63</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Deterministic paired tasks over exact already-captured source data, never tools.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from pyharness.application.experiment_contracts import PrepareExperiment</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.product_task_contracts import ProductTaskCommand</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.run_attempt_contracts import AttemptContext</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>def experiment_id_for(prefix,tenant,actor,project,selection,part):</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    return prefix+digest_of(canonical(dict(tenant=tenant,actor=actor,project=project,</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>        experiment_id=selection.experiment_id,revision=selection.expected_revision+1,part=part)))[:16]</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>def preparation_identity(tenant,actor,project,key):</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    return &#x27;prp-&#x27;+digest_of(canonical(dict(tenant=tenant,actor=actor,project=project,key=key)))[:16]</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>def preparation_plan(store,project,command,dataset,cases,attempts,actor):</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    selected=PrepareExperiment.model_validate(command.model_dump(include=set(PrepareExperiment.model_fields)))</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    raw=selected.model_dump();available=dataset[&#x27;regression_dataset&#x27;][&#x27;selection&#x27;][&#x27;case_refs&#x27;]</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    if any(ref not in available for ref in raw[&#x27;case_refs&#x27;]):raise_code(&#x27;EVT-101&#x27;,reason=&#x27;experiment_case_not_in_dataset&#x27;)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    tasks=[];drafts=[]</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    for index,(case,attempt) in enumerate(zip(cases,attempts,strict=True)):</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        value=case[&#x27;regression_case&#x27;];source=attempt[&#x27;run_attempt&#x27;];ref=raw[&#x27;case_refs&#x27;][index]</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        ident=experiment_id_for(&#x27;pt-&#x27;,store.tenant_id,actor,project,selected,dict(case_ref=ref))</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        task=ProductTaskCommand(schema_version=2,product_task_id=ident,expected_revision=0,</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>            project_revision=selected.project_revision,title=value[&#x27;selection&#x27;][&#x27;title&#x27;],</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>            objective=value[&#x27;selection&#x27;][&#x27;input_text&#x27;],input_binding=source[&#x27;prerequisites&#x27;][&#x27;input_binding&#x27;],</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            acceptance_criteria=[&#x27;Satisfy fixed regression assertions; independent business acceptance remains separate.&#x27;],retired=False)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        context=AttemptContext(**dict(source[&#x27;context&#x27;],delivery_ref=None)).model_dump()</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        tasks.append(dict(case_ref=ref,command=task.model_dump()))</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        for side in (&#x27;left&#x27;,&#x27;right&#x27;):</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            drafts.append(dict(context,node_id=&#x27;c&#x27;+str(index)+&#x27;_&#x27;+side,depends_on=[],side=side,</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>                task_id=ident,case_ref=ref,agent_ref=raw[side+&#x27;_agent_ref&#x27;],label=value[&#x27;selection&#x27;][&#x27;title&#x27;][:85]+&#x27; / &#x27;+side))</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    result=dict(schema_version=1,project_id=project,experiment_id=selected.experiment_id,</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        revision=selected.expected_revision+1,title=selected.title,dataset_ref=raw[&#x27;dataset_ref&#x27;],case_refs=raw[&#x27;case_refs&#x27;],</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        dataset_total=len(available),selected_count=len(cases),excluded_count=len(available)-len(cases),</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        graph_id=experiment_id_for(&#x27;tg-&#x27;,store.tenant_id,actor,project,selected,&#x27;paired-graph&#x27;),</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        concurrency=selected.concurrency,limits=raw[&#x27;limits&#x27;],tasks=tasks,node_drafts=drafts,</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        status=&#x27;confirmation_required&#x27;,persisted=False,execution_authorized=False,</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        input_policy=&#x27;explicit-manual-case-with-original-captured-input-v1&#x27;)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    confirmation=digest_of(canonical(dict(operation=&#x27;experiment.prepare&#x27;,tenant_id=store.tenant_id,</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        subject_ref=actor,project_id=project,selection=raw,plan=result)))</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    return dict(result,confirmation_digest=confirmation)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>def experiment_request(project,selection):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    return digest_of(canonical(dict(operation=&#x27;experiment.prepare&#x27;,project_id=project,selection=selection.model_dump())))</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code></code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>def experiment_ref(row,kind):</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    from pyharness.application.experiment_records import EXPERIMENT_MODELS</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    key=EXPERIMENT_MODELS[kind][1];v=row[kind]</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    return {key:v[key],&#x27;revision&#x27;:v[&#x27;revision&#x27;],&#x27;digest&#x27;:row[&#x27;digest&#x27;],&#x27;source_seq&#x27;:row[&#x27;source_seq&#x27;]}</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>def experiment_summary(row):</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    from pyharness.application.workspace_store import canonical</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    return dict(row[&#x27;experiment_definition&#x27;],digest=row[&#x27;digest&#x27;],source_seq=row[&#x27;source_seq&#x27;],created_at=row[&#x27;created_at&#x27;],</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        record_canonical=canonical(row[&#x27;experiment_definition&#x27;]).decode(&#x27;utf-8&#x27;),persisted=True,status=&#x27;prepared&#x27;,execution_authorized=False)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

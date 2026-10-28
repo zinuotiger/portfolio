@@ -1,0 +1,227 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/integrations/codex_transport.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/integrations/codex_transport.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 227 行</span></nav><main class="wrap source-page"><h1>pyharness/integrations/codex_transport.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：700d739dd6407d169831f8f3f0f0f9b80e89e6b1<br>SHA-256（内容校验）：d68d1a4261c1d987533db504044c6a1beaed340fba264313fc4b8dcc3d999469</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 16 个类、函数与方法</summary><ul><li><a href="#L14">CodexDisconnected（类） · L14–L17</a><ul><li><a href="#L15">CodexDisconnected.__init__（方法） · L15–L17</a></li></ul></li><li><a href="#L20">CodexRpcError（类） · L20–L25</a><ul><li><a href="#L21">CodexRpcError.__init__（方法） · L21–L25</a></li></ul></li><li><a href="#L28">codex_command（函数） · L28–L51</a></li><li><a href="#L54">CodexTransport（类） · L54–L227</a><ul><li><a href="#L55">CodexTransport.__init__（方法） · L55–L66</a></li><li><a href="#L68">CodexTransport.connect（异步方法） · L68–L133</a></li><li><a href="#L135">CodexTransport._drain_stderr（异步方法） · L135–L138</a></li><li><a href="#L140">CodexTransport.send（异步方法） · L140–L145</a></li><li><a href="#L147">CodexTransport.request（异步方法） · L147–L156</a></li><li><a href="#L158">CodexTransport._read（异步方法） · L158–L188</a></li><li><a href="#L190">CodexTransport.next_event（异步方法） · L190–L194</a></li><li><a href="#L196">CodexTransport.close（异步方法） · L196–L220</a></li><li><a href="#L222">CodexTransport.__aenter__（异步方法） · L222–L224</a></li><li><a href="#L226">CodexTransport.__aexit__（异步方法） · L226–L227</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Owned, bounded stdio transport for the supported Codex app-server protocol.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code></code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import asyncio</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import json</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import os</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>import shutil</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import sys</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import re</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from typing import Any</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>class CodexDisconnected(RuntimeError):</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    def __init__(self, message):</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        self.public_message = str(message)[:2000]</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        super().__init__(self.public_message)</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>class CodexRpcError(CodexDisconnected):</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    def __init__(self, code, message):</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        from pyharness.config import redact</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        self.code = code</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        self.public_message = redact(str(message))[:2000]</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        super().__init__(&#x27;Codex RPC rejected &#x27;+str(code)+&#x27;: &#x27;+self.public_message)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>def codex_command(executable: str | None = None) -&gt; list[str]:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    selected = executable or os.environ.get(&#x27;PYHARNESS_CODEX_BIN&#x27;)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    if not selected:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        local = Path(__file__).resolve().parents[2]/&#x27;tooling&#x27;/&#x27;codex&#x27;/&#x27;runtime.json&#x27;</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        if local.is_file():</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            selected = json.loads(local.read_text(encoding=&#x27;utf-8-sig&#x27;)).get(&#x27;executable&#x27;)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    if selected:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        path = Path(selected).expanduser()</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        if not path.is_absolute() or not path.is_file() or (os.name==&#x27;nt&#x27; and path.suffix.lower() not in {&#x27;.exe&#x27;,&#x27;.js&#x27;}):</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>            raise FileNotFoundError(&#x27;Codex executable must be an existing absolute executable or CLI entrypoint&#x27;)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        if path.suffix.lower()==&#x27;.js&#x27;:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            node = shutil.which(&#x27;node&#x27;)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>            if not node:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>                raise FileNotFoundError(&#x27;Node.js is required for the official npm Codex entrypoint&#x27;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            return [node,str(path),&#x27;app-server&#x27;]</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        executable = str(path)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    else:</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        executable = shutil.which(&#x27;codex&#x27;)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    if not executable:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        raise FileNotFoundError(&#x27;Codex CLI is not installed&#x27;)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    # npm shims cannot be launched directly by CreateProcess on Windows.</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    if os.name == &#x27;nt&#x27; and Path(executable).suffix.lower() in {&#x27;.cmd&#x27;, &#x27;.bat&#x27;}:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        return [os.environ.get(&#x27;COMSPEC&#x27;, &#x27;cmd.exe&#x27;), &#x27;/d&#x27;, &#x27;/c&#x27;, executable, &#x27;app-server&#x27;]</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    return [executable, &#x27;app-server&#x27;]</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code></code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>class CodexTransport:</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    def __init__(self, command: list[str] | None = None, *, timeout: float = 30, executable: str | None = None):</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        self.command = command</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        self.executable = executable</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        self.timeout = timeout</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        self.process: asyncio.subprocess.Process | None = None</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        self.events: asyncio.Queue[dict[str, Any] | BaseException] = asyncio.Queue(512)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        self._pending: dict[int, asyncio.Future] = {}</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        self._next_id = 0</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        self._reader: asyncio.Task | None = None</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        self._stderr: asyncio.Task | None = None</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        self._write_lock = asyncio.Lock()</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        self._closed = False</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    async def connect(self):</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        if self.process or self._closed:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            raise CodexDisconnected(&#x27;transport cannot be reused&#x27;)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        command = self.command or codex_command(self.executable)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        if self.command is None:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            version_process = await asyncio.create_subprocess_exec(*command[:-1],&#x27;--version&#x27;,</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            try:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                version_output,_ = await asyncio.wait_for(version_process.communicate(),5)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            except BaseException:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                version_process.kill()</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                await version_process.communicate()</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                raise</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            matched = re.search(r&#x27;(\d+)\.(\d+)\.(\d+)&#x27;,version_output.decode(errors=&#x27;replace&#x27;))</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            if not matched or tuple(map(int,matched.groups())) &lt; (0,162,1):</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                raise CodexDisconnected(&#x27;Codex CLI 0.162.1 or newer is required; configure the project-local client&#x27;)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            self.client_version = version_output.decode(errors=&#x27;replace&#x27;).strip()[:100]</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            # Supported read-only CLI inventory does not start MCP providers.</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            # Explicit per-server overrides are necessary: an empty table merges</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            # with inherited configuration instead of deleting its entries.</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            inventory = await asyncio.create_subprocess_exec(*command[:-1],&#x27;mcp&#x27;,&#x27;list&#x27;,&#x27;--json&#x27;,</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            try:</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                raw,_ = await asyncio.wait_for(inventory.communicate(),10)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            except BaseException:</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                inventory.kill()</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                await inventory.communicate()</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                raise</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            if inventory.returncode:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                raise CodexDisconnected(&#x27;Cannot inspect inherited Codex capabilities&#x27;)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            names = [entry[&#x27;name&#x27;] for entry in json.loads(raw) if entry.get(&#x27;enabled&#x27;,True)]</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            overrides = []</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            for name in names:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                if not re.fullmatch(r&#x27;[a-zA-Z0-9_-]{1,100}&#x27;,name):</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                    raise CodexDisconnected(&#x27;Unsupported inherited MCP server name&#x27;)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                # Plugin-supplied entries may not exist in the base TOML layer.</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                # Supply a valid, disabled definition instead of creating an</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                # incomplete transport with a dotted enabled-only override.</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                overrides.extend([&#x27;-c&#x27;,&#x27;mcp_servers.&#x27;+name+&#x27;={enabled=false,command=&#x27;+json.dumps(sys.executable)+&#x27;}&#x27;])</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            command = [*command[:-1],*overrides,&#x27;-c&#x27;,&#x27;features.apps=false&#x27;,&#x27;-c&#x27;,&#x27;web_search=&quot;disabled&quot;&#x27;,command[-1]]</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            checked = await asyncio.create_subprocess_exec(*command[:-1],&#x27;mcp&#x27;,&#x27;list&#x27;,&#x27;--json&#x27;,</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            try:</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                effective_raw,_ = await asyncio.wait_for(checked.communicate(),10)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>            except BaseException:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                checked.kill()</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                await checked.communicate()</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                raise</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            if checked.returncode or any(s.get(&#x27;enabled&#x27;,True) for s in json.loads(effective_raw)):</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                raise CodexDisconnected(&#x27;Inherited MCP capabilities could not be disabled&#x27;)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            self.disabled_mcp_servers = tuple(s[&#x27;name&#x27;] for s in json.loads(effective_raw))</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        self.process = await asyncio.create_subprocess_exec(</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            *command, stdin=asyncio.subprocess.PIPE,</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=4*1024*1024,</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            env={**os.environ,&#x27;PATH&#x27;:str(Path(sys.executable).parent)+os.pathsep+os.environ.get(&#x27;PATH&#x27;,&#x27;&#x27;)})</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        self._reader = asyncio.create_task(self._read())</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        self._stderr = asyncio.create_task(self._drain_stderr())</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        try:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>            result = await self.request(&#x27;initialize&#x27;, {&#x27;clientInfo&#x27;: {</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                &#x27;name&#x27;: &#x27;pyharness&#x27;, &#x27;title&#x27;: &#x27;PyHarness&#x27;, &#x27;version&#x27;: &#x27;0.1.0&#x27;},</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>                &#x27;capabilities&#x27;:{&#x27;experimentalApi&#x27;:True}})</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            await self.send({&#x27;method&#x27;: &#x27;initialized&#x27;, &#x27;params&#x27;: {}})</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            return result</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        except BaseException:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            await self.close()</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            raise</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code></code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    async def _drain_stderr(self):</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        # Drain without leaking account/config secrets into logs or blocking the child.</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        while await self.process.stderr.read(8192):</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            pass</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code></code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    async def send(self, message: dict):</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        async with self._write_lock:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            if self._closed or not self.process or self.process.returncode is not None:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                raise CodexDisconnected(&#x27;Codex process is closed&#x27;)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            self.process.stdin.write(json.dumps(message, ensure_ascii=False).encode() + b&#x27;\n&#x27;)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            await self.process.stdin.drain()</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code></code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    async def request(self, method: str, params: dict):</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        self._next_id += 1</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        ident = self._next_id</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        future = asyncio.get_running_loop().create_future()</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        self._pending[ident] = future</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        try:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            await self.send({&#x27;id&#x27;: ident, &#x27;method&#x27;: method, &#x27;params&#x27;: params})</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>            return await asyncio.wait_for(future, self.timeout)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        finally:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            self._pending.pop(ident, None)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code></code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    async def _read(self):</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        failure = CodexDisconnected(&#x27;Codex stream ended before completion&#x27;)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        try:</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            while raw := await self.process.stdout.readline():</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                message = json.loads(raw)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                if not isinstance(message, dict):</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                    raise ValueError(&#x27;invalid protocol message&#x27;)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                ident = message.get(&#x27;id&#x27;)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                if &#x27;method&#x27; not in message and ident in self._pending:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>                    waiter = self._pending[ident]</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                    if not waiter.done():</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                        if &#x27;error&#x27; in message:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                            waiter.set_exception(CodexRpcError(message[&#x27;error&#x27;].get(&#x27;code&#x27;),message[&#x27;error&#x27;].get(&#x27;message&#x27;,&#x27;&#x27;)))</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                        else:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                            waiter.set_result(message.get(&#x27;result&#x27;, {}))</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>                elif &#x27;method&#x27; in message:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                    # Overflow is a connection failure, never silent loss of a terminal.</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                    self.events.put_nowait(message)</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>            raise</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        except Exception as exc:</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>            failure = CodexDisconnected(&#x27;Codex protocol failure: &#x27; + type(exc).__name__)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        finally:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>            for waiter in self._pending.values():</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                if not waiter.done():</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                    waiter.set_exception(failure)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>            if self.events.full():</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                # Discarding buffered progress is safe only when the entire turn fails.</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                while not self.events.empty():</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                    self.events.get_nowait()</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            self.events.put_nowait(failure)</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code></code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    async def next_event(self) -&gt; dict:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        value = await self.events.get()</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        if isinstance(value, BaseException):</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            raise value</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        return value</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code></code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>    async def close(self):</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        if self._closed:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            return</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        self._closed = True</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        proc = self.process</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        if proc:</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            if proc.stdin:</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>                proc.stdin.close()</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>            try:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                await asyncio.wait_for(proc.wait(), 3)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>            except asyncio.TimeoutError:</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                if os.name == &#x27;nt&#x27;:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                    # Fixed integer child PID; terminate the owned npm shim and descendants.</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                    killer = await asyncio.create_subprocess_exec(&#x27;taskkill&#x27;, &#x27;/PID&#x27;, str(proc.pid), &#x27;/T&#x27;, &#x27;/F&#x27;,</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>                    await killer.wait()</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                else:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>                    proc.kill()</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>                await proc.wait()</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        for task in (self._reader, self._stderr):</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>            if task:</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>                task.cancel()</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        await asyncio.gather(*(t for t in (self._reader, self._stderr) if t), return_exceptions=True)</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        if proc:</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>            await proc.communicate()  # Reap and close all Windows pipe handles too.</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code></code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>    async def __aenter__(self):</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        await self.connect()</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        return self</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code></code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    async def __aexit__(self, *_):</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        await self.close()</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

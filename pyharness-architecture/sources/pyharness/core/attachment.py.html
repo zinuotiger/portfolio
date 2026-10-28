@@ -1,0 +1,204 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/attachment.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/attachment.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 204 行</span></nav><main class="wrap source-page"><h1>pyharness/core/attachment.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：e810a25b1f20088129c887521e5483b9077be15a<br>SHA-256（内容校验）：81879585c333f217b2db4285190e2e26be9d3176ac23c40b35aa98d1dd311f55</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 10 个类、函数与方法</summary><ul><li><a href="#L37">_att_reject（函数） · L37–L39</a></li><li><a href="#L42">reject_attachment（函数） · L42–L44</a></li><li><a href="#L47">detect_image（函数） · L47–L54</a></li><li><a href="#L57">_dims_png（函数） · L57–L62</a></li><li><a href="#L65">_dims_gif（函数） · L65–L70</a></li><li><a href="#L73">_dims_jpeg（函数） · L73–L94</a></li><li><a href="#L97">_dims_webp（函数） · L97–L114</a></li><li><a href="#L121">validate_image（函数） · L121–L148</a></li><li><a href="#L151">store_content_addressed（函数） · L151–L179</a></li><li><a href="#L182">ingest_image_path（函数） · L182–L198</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/attachment.py — 图片附件校验与内容寻址落盘(F061 唯一实现)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>**为什么单独成模块**:F061 的校验面(magic bytes / 大小 / 数量 / 内容寻址)此前</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>**只到事件 schema 层**(mime 白名单由 payload 模型强制,但 mime 由客户端自报、</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>缺省回落 `image/png`,且无魔数/大小/数量校验、`sha256` 可省略回落全零占位)。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>规格(PRD-Core §F061 验收伪代码)要求:魔数校验(&quot;不信扩展名&quot;)→ 单张 ≤10MB →</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>单消息 ≤5 张 → `sha256(raw)[:16]` 内容寻址去重。本模块是该规格的**单点实现**,</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>装配层(ApplicationService)与外壳一律经此,不得各自实现(同 core/channel.py 先例)。</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>安全口径:入参 `path` 来自**客户端自报**,但读到的字节一律按**不可信内容**处理</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>——先按魔数定类型(不看扩展名)、再按配置上限定大小,最后内容寻址落盘到会话工作区;</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>任一环节不满足即 `ATT-001` 拒绝(ERR.md §2.11 功能特性码,零写盘)。</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>import hashlib</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>import os</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code># 默认上限(CFG `security.attachment.*` 的 L1 锚点;装配层应注入配置值)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>DEFAULT_MAX_BYTES = 10_485_760          # 单张 ≤10MB(PRD F061 边界条件)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>DEFAULT_MAX_PER_MESSAGE = 5             # 单消息 ≤5 张(同上)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>DEFAULT_MIME_WHITELIST = (&quot;image/jpeg&quot;, &quot;image/png&quot;, &quot;image/webp&quot;, &quot;image/gif&quot;)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code># 魔数 → (mime, 扩展名);顺序即判定序(前缀互斥)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>_MAGIC: tuple[tuple[bytes, str, str], ...] = (</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    (b&quot;\x89PNG\r\n\x1a\n&quot;, &quot;image/png&quot;, &quot;.png&quot;),</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    (b&quot;\xff\xd8\xff&quot;, &quot;image/jpeg&quot;, &quot;.jpg&quot;),</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    (b&quot;GIF87a&quot;, &quot;image/gif&quot;, &quot;.gif&quot;),</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    (b&quot;GIF89a&quot;, &quot;image/gif&quot;, &quot;.gif&quot;),</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>def _att_reject(reason: str, **ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    &quot;&quot;&quot;统一拒绝出口:ATT-001(功能特性码,errors.py 未登记 → 直接构造,同 QUE-001 先例)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    raise PyHError(&quot;ATT-001&quot;, ctx={&quot;reason&quot;: reason, **ctx})</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>def reject_attachment(reason: str, **ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    &quot;&quot;&quot;对外统一拒绝出口(ATT-001);供装配层做数量/上下文类校验时复用。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    _att_reject(reason, **ctx)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>def detect_image(raw: bytes) -&gt; Optional[tuple[str, str]]:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    &quot;&quot;&quot;按**魔数**判类型(不看扩展名);未命中 → None。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    for magic, mime, ext in _MAGIC:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        if raw.startswith(magic):</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            return mime, ext</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    if len(raw) &gt;= 12 and raw[:4] == b&quot;RIFF&quot; and raw[8:12] == b&quot;WEBP&quot;:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        return &quot;image/webp&quot;, &quot;.webp&quot;</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    return None</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>def _dims_png(raw: bytes) -&gt; Optional[tuple[int, int]]:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    if len(raw) &lt; 24 or raw[12:16] != b&quot;IHDR&quot;:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        return None</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    w = int.from_bytes(raw[16:20], &quot;big&quot;)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    h = int.from_bytes(raw[20:24], &quot;big&quot;)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    return (w, h) if w &gt; 0 and h &gt; 0 else None</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>def _dims_gif(raw: bytes) -&gt; Optional[tuple[int, int]]:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    if len(raw) &lt; 10:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        return None</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    w = int.from_bytes(raw[6:8], &quot;little&quot;)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    h = int.from_bytes(raw[8:10], &quot;little&quot;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    return (w, h) if w &gt; 0 and h &gt; 0 else None</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>def _dims_jpeg(raw: bytes) -&gt; Optional[tuple[int, int]]:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    &quot;&quot;&quot;扫 SOFn 标记取尺寸(SOF0/1/2/3/5/6/7/9/10/11/13/14/15)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    i = 2</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    n = len(raw)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    while i + 9 &lt; n:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        if raw[i] != 0xFF:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            i += 1</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            continue</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        marker = raw[i + 1]</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        if marker in (0xD8, 0x01) or 0xD0 &lt;= marker &lt;= 0xD7:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            i += 2</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            continue</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        seg_len = int.from_bytes(raw[i + 2:i + 4], &quot;big&quot;)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                      0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            h = int.from_bytes(raw[i + 5:i + 7], &quot;big&quot;)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            w = int.from_bytes(raw[i + 7:i + 9], &quot;big&quot;)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            return (w, h) if w &gt; 0 and h &gt; 0 else None</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        if seg_len &lt;= 0:</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            return None</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        i += 2 + seg_len</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    return None</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code></code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>def _dims_webp(raw: bytes) -&gt; Optional[tuple[int, int]]:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    if len(raw) &lt; 30:</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        return None</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    fourcc = raw[12:16]</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    if fourcc == b&quot;VP8X&quot;:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        w = int.from_bytes(raw[24:27], &quot;little&quot;) + 1</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        h = int.from_bytes(raw[27:30], &quot;little&quot;) + 1</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        return (w, h) if w &gt; 0 and h &gt; 0 else None</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    if fourcc == b&quot;VP8L&quot; and len(raw) &gt;= 25 and raw[20] == 0x2F:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        bits = int.from_bytes(raw[21:25], &quot;little&quot;)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        w = (bits &amp; 0x3FFF) + 1</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        h = ((bits &gt;&gt; 14) &amp; 0x3FFF) + 1</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        return (w, h) if w &gt; 0 and h &gt; 0 else None</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    if fourcc == b&quot;VP8 &quot; and len(raw) &gt;= 30:</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        w = int.from_bytes(raw[26:28], &quot;little&quot;) &amp; 0x3FFF</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        h = int.from_bytes(raw[28:30], &quot;little&quot;) &amp; 0x3FFF</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        return (w, h) if w &gt; 0 and h &gt; 0 else None</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    return None</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code></code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code></code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>_DIMS = {&quot;image/png&quot;: _dims_png, &quot;image/gif&quot;: _dims_gif,</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>         &quot;image/jpeg&quot;: _dims_jpeg, &quot;image/webp&quot;: _dims_webp}</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code></code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>def validate_image(raw: bytes, *,</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                   mime_whitelist: Any = None,</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                   max_bytes: Optional[int] = None) -&gt; dict:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    &quot;&quot;&quot;**魔数校验 + 尺寸解析 + 大小/白名单**校验(不信扩展名/自报 mime)。</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code></code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    返回 ``{&quot;mime&quot;,&quot;ext&quot;,&quot;w&quot;,&quot;h&quot;,&quot;size_bytes&quot;,&quot;sha256&quot;}``;任一不满足 → ``ATT-001``。</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    limit = int(max_bytes or DEFAULT_MAX_BYTES)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    if not raw:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        _att_reject(&quot;empty&quot;, size_bytes=0)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    if len(raw) &gt; limit:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        _att_reject(&quot;too-big&quot;, size_bytes=len(raw), limit=limit)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>    hit = detect_image(raw)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    if hit is None:</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        _att_reject(&quot;magic-mismatch&quot;, size_bytes=len(raw),</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                    advice=&quot;仅接受 jpeg/png/webp/gif(按魔数判定,不看扩展名)&quot;)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    mime, ext = hit</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    allow = tuple(mime_whitelist or DEFAULT_MIME_WHITELIST)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    if mime not in allow:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        _att_reject(&quot;mime-not-allowed&quot;, mime=mime, allowlist=list(allow))</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    dims = _DIMS[mime](raw)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    if dims is None:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        _att_reject(&quot;dims-unreadable&quot;, mime=mime,</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                    advice=&quot;无法解析图像尺寸:文件可能截断或伪装&quot;)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    w, h = dims</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    return {&quot;mime&quot;: mime, &quot;ext&quot;: ext, &quot;w&quot;: int(w), &quot;h&quot;: int(h),</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            &quot;size_bytes&quot;: len(raw),</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            &quot;sha256&quot;: hashlib.sha256(raw).hexdigest()}</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code></code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code></code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>def store_content_addressed(raw: bytes, info: dict, *,</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                            workspace: Any) -&gt; str:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    &quot;&quot;&quot;内容寻址落盘:`{workspace}/attachments/{sha256[:16]}{ext}`(已存在即去重)。</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code></code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    返回落盘绝对路径(即事件 ``file_path``)。工作区缺位 → ``ATT-001``(装配错误,</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    fail-closed:附件必须落在**会话可见边界内**,不接受任意宿主路径)。</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    if not workspace:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        _att_reject(&quot;no-workspace&quot;,</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>                    advice=&quot;会话工作区未装配:附件必须落在工作区内(拒绝宿主任意路径)&quot;)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    d = Path(str(workspace)).expanduser() / &quot;attachments&quot;</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    d.mkdir(parents=True, exist_ok=True)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    target = d / f&quot;{info[&#x27;sha256&#x27;][:16]}{info[&#x27;ext&#x27;]}&quot;</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    if not target.exists():                    # 内容寻址 ⇒ 同内容天然去重</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        tmp = target.with_name(target.name + f&quot;.tmp-{os.getpid()}&quot;)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        try:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            tmp.write_bytes(raw)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>            os.replace(tmp, target)</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        except OSError as exc:                 # noqa: BLE001</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>            try:</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                tmp.unlink(missing_ok=True)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            except OSError:</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>                pass</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            # 走**本模块统一拒绝出口**:ATT-001 是 ERR.md §2.11 功能特性码、`errors.py`</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>            # **故意不登记**(同 QUE-001/BUSY 先例),须**直接构造**保住字面码 ——</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            # 用 `raise_code(&quot;ATT-001&quot;)` 会被静默改写为 CYC-999(R19)。</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>            _att_reject(&quot;store-failed&quot;, path=str(target),</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                        why=f&quot;{type(exc).__name__}&quot;)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    return str(target)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code></code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code></code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>def ingest_image_path(path: Any, *, workspace: Any,</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                      mime_whitelist: Any = None,</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                      max_bytes: Optional[int] = None) -&gt; dict:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    &quot;&quot;&quot;从**客户端自报路径**读字节 → 校验 → 内容寻址落盘;返回事件载荷 dict。</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code></code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    路径不可读 → ``ATT-001``(不静默跳过:调用方需知道附件没进来)。</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    p = Path(str(path or &quot;&quot;)).expanduser()</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    try:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        raw = p.read_bytes()</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    except OSError as exc:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        _att_reject(&quot;unreadable&quot;, path=str(p), why=f&quot;{type(exc).__name__}&quot;)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>    info = validate_image(raw, mime_whitelist=mime_whitelist,</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                          max_bytes=max_bytes)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>    stored = store_content_addressed(raw, info, workspace=workspace)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    return {&quot;file_path&quot;: stored, &quot;mime&quot;: info[&quot;mime&quot;], &quot;sha256&quot;: info[&quot;sha256&quot;],</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            &quot;w&quot;: info[&quot;w&quot;], &quot;h&quot;: info[&quot;h&quot;], &quot;size_bytes&quot;: info[&quot;size_bytes&quot;]}</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code></code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code></code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>__all__ = [&quot;DEFAULT_MAX_BYTES&quot;, &quot;DEFAULT_MAX_PER_MESSAGE&quot;,</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>           &quot;DEFAULT_MIME_WHITELIST&quot;, &quot;detect_image&quot;, &quot;validate_image&quot;,</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>           &quot;store_content_addressed&quot;, &quot;ingest_image_path&quot;,</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>           &quot;reject_attachment&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

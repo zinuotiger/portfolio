@@ -1,0 +1,157 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/ui/host-adapters/model-editor.js · GitHub 源码预览</title><link rel="stylesheet" href="../../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/ui/host-adapters/model-editor.js">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 157 行</span></nav><main class="wrap source-page"><h1>pyharness/ui/host-adapters/model-editor.js</h1><p class="muted">完整文件预览。Git blob（文件对象）：3be5c58556315cf86554fc1d297d86ce584c56ea<br>SHA-256（内容校验）：ceea47962648823b599fa80079754eca811efc287e4285e7d06fc00f8d67b7f8</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 0 个类、函数与方法</summary><p>此文件没有 Python 定义目录；下方完整内容与行号均可直接阅读。</p></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>/* Shared model form. Credentials live only in the input and the save request. */</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>(() =&gt; {</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>  const probes = window.PyharnessModelProbes ??= new Set();</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>  const escape = value =&gt; String(value ?? &#x27;&#x27;).replace(/[&amp;&lt;&gt;&quot;&#x27;]/g, c =&gt; ({&#x27;&amp;&#x27;:&#x27;&amp;amp;&#x27;,&#x27;&lt;&#x27;:&#x27;&amp;lt;&#x27;,&#x27;&gt;&#x27;:&#x27;&amp;gt;&#x27;,&#x27;&quot;&#x27;:&#x27;&amp;quot;&#x27;,&quot;&#x27;&quot;:&#x27;&amp;#39;&#x27;}[c]));</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>  const normalizeEndpoint = value =&gt; value.trim().replace(/\/+$/, &#x27;&#x27;);</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>  const defaults = {label:&#x27;&#x27;, model:&#x27;&#x27;, base_url:&#x27;&#x27;, temperature:0.7, max_tokens:4096};</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>  const unknownResults = new Set([&#x27;request_timeout&#x27;, &#x27;network_unavailable&#x27;, &#x27;invalid_response&#x27;, &#x27;model_connection_timeout&#x27;, &#x27;LLM-301&#x27;]);</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>  const reasons = {</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    &#x27;LLM-302&#x27;:&#x27;模型服务认证失败，请检查该接口的 API Key。&#x27;,</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    &#x27;CRED-701&#x27;:&#x27;模型密钥未配置或不可用，请检查密钥配置。&#x27;,</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    &#x27;LLM-301&#x27;:&#x27;模型服务超时。&#x27;, &#x27;LLM-303&#x27;:&#x27;模型服务暂时限流，请稍后再试。&#x27;,</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    &#x27;LLM-304&#x27;:&#x27;模型服务拒绝请求或返回内容不符合协议，请检查模型名和接口地址。&#x27;,</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    model_probe_contract_failed:&#x27;模型回复不符合连接测试要求。&#x27;,</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    model_probe_budget_exceeded:&#x27;模型返回的用量超过测试限制。&#x27;,</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    model_probe_busy:&#x27;该连接已有测试正在进行，请稍后查看结果。&#x27;,</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    model_connection_failed:&#x27;连接测试失败，请检查接口地址、网络和模型配置。&#x27;</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>  };</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>  function open({row=null, modal, close, refresh, api, post}) {</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    let saved = row ? {...row} : null;</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    let snapshot = saved ? JSON.stringify(values(saved)) : null;</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    let busy = false;</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    const initial = {...defaults, ...row};</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    const formId = row ? &#x27;modelEditForm&#x27; : &#x27;modelForm&#x27;;</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    const field = (name, label, type=&#x27;text&#x27;, attrs=&#x27;&#x27;) =&gt; `&lt;label class=&quot;model-field ${[&#x27;base_url&#x27;,&#x27;api_key&#x27;].includes(name)?&#x27;model-field-wide&#x27;:&#x27;&#x27;}&quot; data-section=&quot;${[&#x27;temperature&#x27;,&#x27;max_tokens&#x27;].includes(name)?&#x27;parameters&#x27;:&#x27;connection&#x27;}&quot; for=&quot;model_${name}&quot;&gt;&lt;span&gt;${label}&lt;/span&gt;&lt;input id=&quot;model_${name}&quot; name=&quot;${name}&quot; type=&quot;${type}&quot; ${attrs} value=&quot;${escape(initial[name])}&quot;&gt;&lt;/label&gt;`;</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    modal(row?&#x27;修改模型&#x27;:&#x27;添加模型&#x27;, `&lt;form id=&quot;${formId}&quot; class=&quot;model-editor-form&quot; novalidate data-page=&quot;connection&quot;&gt;</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>      &lt;div class=&quot;model-editor-fields&quot; id=&quot;modelEditorFields&quot;&gt;</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        ${field(&#x27;label&#x27;,&#x27;名称&#x27;,&#x27;text&#x27;,&#x27;required autocomplete=&quot;off&quot;&#x27;)}</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        ${field(&#x27;model&#x27;,&#x27;模型名&#x27;,&#x27;text&#x27;,&#x27;required autocomplete=&quot;off&quot;&#x27;)}</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        ${field(&#x27;base_url&#x27;,&#x27;API endpoint&#x27;,&#x27;url&#x27;,&#x27;required autocomplete=&quot;off&quot;&#x27;)}</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        ${field(&#x27;temperature&#x27;,&#x27;温度&#x27;,&#x27;number&#x27;,&#x27;min=&quot;0&quot; max=&quot;1.5&quot; step=&quot;any&quot; required&#x27;)}</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        ${field(&#x27;max_tokens&#x27;,&#x27;最大输出 Token&#x27;,&#x27;number&#x27;,&#x27;min=&quot;1&quot; max=&quot;32768&quot; step=&quot;1&quot; required&#x27;)}</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        &lt;label class=&quot;model-field model-field-wide&quot; data-section=&quot;connection&quot; for=&quot;model_api_key&quot;&gt;&lt;span class=&quot;model-key-label&quot;&gt;&lt;span data-key-label&gt;${row?&#x27;新 API Key&#x27;:&#x27;API Key&#x27;}&lt;/span&gt;&lt;small data-key-hint&gt;${row?&#x27;选填 · 留空保留原密钥&#x27;:&#x27;必填 · 密钥仅写入服务端&#x27;}&lt;/small&gt;&lt;/span&gt;&lt;input id=&quot;model_api_key&quot; name=&quot;api_key&quot; type=&quot;password&quot; autocomplete=&quot;new-password&quot; placeholder=&quot;${row?&#x27;需要替换密钥时填写&#x27;:&#x27;请输入 API Key&#x27;}&quot; ${row?&#x27;&#x27;:&#x27;required&#x27;}&gt;&lt;/label&gt;</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>      &lt;/div&gt;</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>      &lt;div class=&quot;model-editor-feedback&quot;&gt;</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        &lt;div id=&quot;modelEndpointNotice&quot; hidden&gt;&lt;p&gt;接口地址已变更，请填写新 API Key 或清除原密钥。&lt;/p&gt;&lt;label class=&quot;model-clear-key&quot;&gt;&lt;input name=&quot;clear_api_key&quot; type=&quot;checkbox&quot;&gt;清除原密钥，稍后填写&lt;/label&gt;&lt;/div&gt;</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        &lt;p class=&quot;model-editor-status&quot; role=&quot;status&quot; aria-live=&quot;polite&quot; hidden&gt;&lt;/p&gt;</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        &lt;p class=&quot;model-editor-error&quot; role=&quot;alert&quot; hidden&gt;&lt;/p&gt;</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        &lt;div class=&quot;model-test-confirm&quot; hidden&gt;&lt;span&gt;连接测试可能产生少量模型用量，最多 64 输出 Token、60 秒。&lt;/span&gt;&lt;div&gt;&lt;button type=&quot;button&quot; class=&quot;primary&quot; id=&quot;confirmProceed&quot;&gt;开始测试&lt;/button&gt;&lt;button type=&quot;button&quot; id=&quot;confirmCancel&quot;&gt;暂不测试&lt;/button&gt;&lt;/div&gt;&lt;/div&gt;</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        &lt;div class=&quot;model-test-followup&quot; hidden&gt;&lt;button type=&quot;button&quot; data-retest&gt;再次测试&lt;/button&gt;&lt;button type=&quot;button&quot; data-editor-back&gt;返回模型配置&lt;/button&gt;&lt;/div&gt;</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>      &lt;/div&gt;</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>      &lt;footer class=&quot;model-editor-footer&quot;&gt;&lt;p&gt;单独保存不发送模型请求&lt;br&gt;&lt;span&gt;新配置用于新会话&lt;/span&gt;&lt;/p&gt;&lt;div class=&quot;model-editor-actions&quot;&gt;&lt;button type=&quot;button&quot; data-editor-back&gt;取消&lt;/button&gt;&lt;button class=&quot;primary&quot; type=&quot;submit&quot; value=&quot;save&quot; data-save&gt;${row?&#x27;保存修改&#x27;:&#x27;保存&#x27;}&lt;/button&gt;&lt;button class=&quot;model-test-button&quot; type=&quot;submit&quot; value=&quot;test&quot; data-save-test&gt;保存并测试连接&lt;/button&gt;&lt;/div&gt;&lt;/footer&gt;</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    &lt;/form&gt;`, {variant:&#x27;model&#x27;});</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    const form = document.getElementById(formId);</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    const fields = form.elements;</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    const find = selector =&gt; form.querySelector(selector);</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    const status = find(&#x27;[role=status]&#x27;), error = find(&#x27;[role=alert]&#x27;);</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    const confirm = find(&#x27;.model-test-confirm&#x27;), followup = find(&#x27;.model-test-followup&#x27;);</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    const endpointChanged = () =&gt; saved &amp;&amp; normalizeEndpoint(fields.base_url.value) !== normalizeEndpoint(saved.base_url);</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    function values(source) {</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>      return {label:source.label.trim(), model:source.model.trim(), base_url:normalizeEndpoint(source.base_url),</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        temperature:Number(source.temperature), max_tokens:Number(source.max_tokens)};</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    }</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    const current = () =&gt; values(Object.fromEntries([&#x27;label&#x27;,&#x27;model&#x27;,&#x27;base_url&#x27;,&#x27;temperature&#x27;,&#x27;max_tokens&#x27;].map(name=&gt;[name, fields[name].value])));</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    const dirty = () =&gt; !saved || JSON.stringify(current()) !== snapshot || !!fields.api_key.value.trim() || fields.clear_api_key.checked;</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    function showStatus(text, tone=&#x27;&#x27;) {status.textContent=text;status.hidden=!text;status.dataset.tone=tone;}</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    function showError(text) {error.textContent=text;error.hidden=!text;}</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    function locked(value, phase=&#x27;&#x27;) {</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>      busy=value;</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>      form.setAttribute(&#x27;aria-busy&#x27;, String(value));</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>      form.querySelectorAll(&#x27;input, button:not([data-editor-back]):not([role=tab])&#x27;).forEach(control=&gt;control.disabled=value);</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>      find(&#x27;[data-save-test]&#x27;).textContent=phase===&#x27;saving&#x27;?&#x27;正在保存…&#x27;:phase===&#x27;testing&#x27;?&#x27;正在测试…&#x27;:&#x27;保存并测试连接&#x27;;</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    }</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    function changed() {</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>      find(&#x27;#modelEndpointNotice&#x27;).hidden=!endpointChanged();</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>      fields.api_key.required=!saved;</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>      if(!confirm.hidden) {confirm.hidden=true;locked(false);}</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>      followup.hidden=true;showStatus(&#x27;&#x27;);showError(&#x27;&#x27;);</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    }</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    async function back() {</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>      close();</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>      if(saved) await refresh();</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    }</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    function askToTest() {</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>      if(!form.isConnected)return;</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>      showError(&#x27;&#x27;);showStatus(&#x27;配置已保存。连接测试可能产生少量模型用量。&#x27;);</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>      followup.hidden=true;confirm.hidden=false;</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>      locked(true);</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>      find(&#x27;#confirmProceed&#x27;).disabled=false;find(&#x27;#confirmCancel&#x27;).disabled=false;</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>      find(&#x27;#confirmProceed&#x27;).focus({preventScroll:true});</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    }</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    async function test() {</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>      if(!saved||confirm.hidden||probes.has(saved.id))return;</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>      probes.add(saved.id);</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>      confirm.hidden=true;locked(true,&#x27;testing&#x27;);showStatus(&#x27;配置已保存，正在测试…&#x27;);</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>      try {</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        const result=await post(&#x27;connections/model:&#x27;+encodeURIComponent(saved.id)+&#x27;/test&#x27;);</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        if(!form.isConnected)return;</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        if(result.status===&#x27;available&#x27;) showStatus(&#x27;配置已保存，连接测试通过。&#x27;+(Number.isFinite(result.latency_ms)?` 耗时 ${Math.round(result.latency_ms)} ms。`:&#x27;&#x27;),&#x27;success&#x27;);</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        else if(unknownResults.has(result.code)) showStatus(&#x27;配置已保存，测试结果未确认：请求超时。未自动重试。&#x27;,&#x27;warning&#x27;);</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        else showStatus(&#x27;配置已保存，连接测试失败：&#x27;+(reasons[result.code]||&#x27;请检查接口地址、网络和模型配置。&#x27;),&#x27;failure&#x27;);</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>      } catch(cause) {</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        if(!form.isConnected)return;</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        if(unknownResults.has(cause.code))showStatus(&#x27;配置已保存，测试结果未确认：&#x27;+cause.message+&#x27;。未自动重试。&#x27;,&#x27;warning&#x27;);</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        else if(cause.status===401)showStatus(&#x27;配置已保存，测试请求的应用登录校验失败。请重新进入管理员页面或重新登录。&#x27;,&#x27;failure&#x27;);</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        else showStatus(&#x27;配置已保存，连接测试失败：&#x27;+(reasons[cause.code]||cause.message),&#x27;failure&#x27;);</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>      } finally {</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        probes.delete(saved.id);</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        locked(false);if(form.isConnected)followup.hidden=false;</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>      }</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    }</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    async function submit(event) {</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>      event.preventDefault();if(busy)return;</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>      showError(&#x27;&#x27;);followup.hidden=true;</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>      if(!form.checkValidity()) {</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        const invalid=form.querySelector(&#x27;:invalid&#x27;);</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        showError(invalid.validationMessage);invalid.focus();return;</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>      }</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>      const body=current(), key=fields.api_key.value.trim(), changedEndpoint=endpointChanged();</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>      if(!body.label||!body.model){showError(&#x27;名称和模型名不能为空。&#x27;);return;}</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>      if(!saved&amp;&amp;!key){showError(&#x27;请输入 API Key。&#x27;);fields.api_key.focus();return;}</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>      if(changedEndpoint&amp;&amp;!key&amp;&amp;!fields.clear_api_key.checked){showError(&#x27;修改接口地址时，请填写新 API Key 或勾选清除原密钥。&#x27;);fields.api_key.focus();return;}</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>      if(key&amp;&amp;fields.clear_api_key.checked){showError(&#x27;填写新 API Key 与清除原密钥只能选择一项。&#x27;);return;}</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>      const wantsTest=event.submitter?.value===&#x27;test&#x27;;</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>      if(wantsTest&amp;&amp;!dirty()){askToTest();return;}</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>      if(saved)body.id=saved.id;</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>      if(key)body.api_key=key;</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>      else if(changedEndpoint&amp;&amp;fields.clear_api_key.checked)body.clear_api_key=true;</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>      locked(true,&#x27;saving&#x27;);showStatus(&#x27;正在保存配置…&#x27;);</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>      try {</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        const response=await api(&#x27;/api/settings/models&#x27;,{method:&#x27;POST&#x27;,body:JSON.stringify(body)});</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        saved=response.profile;snapshot=JSON.stringify(values(saved));</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        fields.api_key.value=&#x27;&#x27;;fields.api_key.required=false;fields.clear_api_key.checked=false;</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        if(!form.isConnected)return;</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        find(&#x27;#modelEndpointNotice&#x27;).hidden=true;</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        find(&#x27;[data-key-label]&#x27;).textContent=&#x27;新 API Key&#x27;;</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        find(&#x27;[data-key-hint]&#x27;).textContent=saved.has_api_key?&#x27;密钥已保存 · 选填 · 留空保留原密钥&#x27;:&#x27;密钥已清除或未配置 · 可填写新密钥&#x27;;</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        fields.api_key.placeholder=&#x27;需要替换密钥时填写&#x27;;</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        const heading=form.closest(&#x27;.settings-content&#x27;)?.querySelector(&#x27;h1&#x27;);</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        if(heading)heading.textContent=&#x27;修改模型&#x27;;</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        form.closest(&#x27;.settings-content&#x27;)?.setAttribute(&#x27;aria-label&#x27;,&#x27;修改模型&#x27;);</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        find(&#x27;[data-save]&#x27;).textContent=&#x27;保存修改&#x27;;</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        if(wantsTest){locked(false);askToTest();}</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        else await back();</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>      } catch(cause) {</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        if(form.isConnected){showStatus(&#x27;&#x27;);showError(&#x27;保存失败：&#x27;+cause.message);}</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>      } finally {</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        delete body.api_key;</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        if(confirm.hidden)locked(false);</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>      }</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    }</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    form.addEventListener(&#x27;submit&#x27;,submit);</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    form.addEventListener(&#x27;input&#x27;,event=&gt;{if(event.target.name===&#x27;base_url&#x27;)fields.clear_api_key.checked=false;changed();});</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>    form.addEventListener(&#x27;change&#x27;,changed);</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    find(&#x27;#confirmProceed&#x27;).onclick=test;</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    find(&#x27;#confirmCancel&#x27;).onclick=()=&gt;{confirm.hidden=true;locked(false);showStatus(&#x27;配置已保存，尚未进行连接测试。&#x27;);followup.hidden=false;};</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    find(&#x27;[data-retest]&#x27;).onclick=()=&gt;{if(!busy)submit({preventDefault(){},submitter:{value:&#x27;test&#x27;}});};</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    form.querySelectorAll(&#x27;[data-editor-back]&#x27;).forEach(button=&gt;button.onclick=back);</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    const pane=form.closest(&#x27;.settings-content&#x27;);</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    if(pane)pane.querySelector(&#x27;[data-action=&quot;panel-back&quot;]&#x27;).onclick=event=&gt;{event.stopPropagation();back();};</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    const lifecycle=new MutationObserver(()=&gt;{</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>      if(!form.isConnected){fields.api_key.value=&#x27;&#x27;;lifecycle.disconnect();}</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    });</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    lifecycle.observe(document.body,{childList:true,subtree:true});</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>  }</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>  window.PyharnessModelEditor={open};</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>})();</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../../assets/views/source-return.js"></script></body></html>

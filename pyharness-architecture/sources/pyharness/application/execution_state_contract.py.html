@@ -1,0 +1,69 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/execution_state_contract.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/execution_state_contract.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 69 行</span></nav><main class="wrap source-page"><h1>pyharness/application/execution_state_contract.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：51bd97ad0a4bde334a7c65784827bd133037ba99<br>SHA-256（内容校验）：3652f334150fde4b766f0c333756e1843703729518e6ec67c8dfbc2fe32485e6</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 5 个类、函数与方法</summary><ul><li><a href="#L10">runtime_contract_digest（函数） · L10–L23</a></li><li><a href="#L26">wire_tools（函数） · L26–L28</a></li><li><a href="#L31">tool_definitions_digest（函数） · L31–L32</a></li><li><a href="#L35">continuation_contract（函数） · L35–L52</a></li><li><a href="#L55">verify_state_contract（函数） · L55–L69</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Fixed runtime/tools and conservative per-attempt bounds; never billing data.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import asyncio,json,os,sys</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.execution_state_capture import StateUnavailable</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.core.sandbox import safe_path,read_regular</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>def runtime_contract_digest(service):</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    cached=getattr(service,&#x27;_execution_runtime_contract_digest&#x27;,None)</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    if cached is not None:return cached</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    root=Path(__file__).resolve().parents[1];files={};total=0</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    for path in sorted(root.rglob(&#x27;*.py&#x27;)):</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        if len(files)&gt;=2048:raise StateUnavailable(&#x27;snapshot_limit&#x27;)</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        # Installed source may legitimately share a package-cache hardlink.</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        # This inventory only reads code; workspace/KV restoration stays nlink=1.</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        relative=path.relative_to(root).as_posix();raw=read_regular(safe_path(root,relative),2*1048576);total+=len(raw)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        if total&gt;64*1048576:raise StateUnavailable(&#x27;snapshot_limit&#x27;)</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        files[relative]=digest_of(raw)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    if not files:raise StateUnavailable(&#x27;snapshot_state_invalid&#x27;)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    value=digest_of(canonical(dict(files=files,python=list(sys.version_info[:3]),platform=sys.platform,os_name=os.name)));service._execution_runtime_contract_digest=value</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    return value</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>def wire_tools(messages,ctx):</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    vision=any(isinstance(m.get(&#x27;content&#x27;),list) and any(isinstance(p,dict) and p.get(&#x27;type&#x27;)==&#x27;image_url&#x27; for p in m[&#x27;content&#x27;]) for m in messages)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    return [] if vision else ctx.tools.schemas_for(ctx.scope)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code></code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>def tool_definitions_digest(ctx):</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    return digest_of(canonical([d.model_dump(mode=&#x27;json&#x27;,by_alias=True) for d in ctx.tools._r.iter_definitions()]))</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code></code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>def continuation_contract(boundary,ctx,messages):</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    from pyharness.core.llm_usage import _price_table</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    cfg=ctx.config;tools=wire_tools(messages,ctx);runtime=ctx.platform_runtime;task=str(ctx.task_id)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    models=list(dict.fromkeys([cfg.llm.model,*(cfg.llm.fallback_models or [])]));prices=_price_table(cfg.llm.usage.unit_price)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    known=all(model in prices for model in models)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    used=ctx.scope._usage().out_tokens</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    remaining=min(cfg.llm.max_tokens,max(0,runtime.definition.budget.output_tokens-used),max(0,ctx.scope.limits.max_out_tokens-used))</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    deadline=boundary.deadline</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    if deadline is None:raise StateUnavailable(&#x27;snapshot_state_invalid&#x27;)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    return dict(schema_version=1,config_fingerprint=digest_of(canonical(cfg.model_dump(mode=&#x27;json&#x27;))),</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        runtime_digest=runtime_contract_digest(boundary.projects.service),tools_digest=digest_of(canonical(tools)),</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        tool_definitions_digest=tool_definitions_digest(ctx),models=models,</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        input_upper_bound=len(json.dumps([messages,tools],ensure_ascii=False).encode(&#x27;utf-8&#x27;)),output_upper_bound=remaining,</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        pricing_known=known,input_rate=max(prices[m][&#x27;in_per_million&#x27;] for m in models)/1e6 if known else None,</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        output_rate=max(prices[m][&#x27;out_per_million&#x27;] for m in models)/1e6 if known else None,</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        remaining_timeout_seconds=min(float(runtime.definition.timeout),deadline-asyncio.get_running_loop().time()),</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        completed_rounds=getattr(boundary,&#x27;inherited_rounds&#x27;,0)+sum(e.type==&#x27;execution.checkpoint&#x27; and e.task_id==task for e in ctx.session.events_after(0)),</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        tool_calls_used=runtime.calls.get(task,0))</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>def verify_state_contract(boundary,ctx,events):</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    from pyharness.application.execution_state_reader import read_state_snapshot</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    fact=next((e for e in reversed(events) if e.type==&#x27;execution.state_checkpoint&#x27;),None)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    if fact is None or fact.payload[&#x27;status&#x27;]!=&#x27;captured&#x27;:return</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    cp=next((e for e in events if e.seq==fact.payload[&#x27;checkpoint_seq&#x27;]),None)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    try:body=read_state_snapshot(ctx.platform_runtime.platform,fact,cp)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    except (OSError,ValueError,StateUnavailable,PyHError):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;execution_model_state_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    contract=body.continuation_contract</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    if contract is None:return  # Legacy observation retains its original execution behavior.</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    if (contract.config_fingerprint!=digest_of(canonical(ctx.config.model_dump(mode=&#x27;json&#x27;))) or</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            contract.runtime_digest!=runtime_contract_digest(boundary.projects.service) or</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            contract.tools_digest!=digest_of(canonical(wire_tools(body.messages,ctx))) or</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            contract.tool_definitions_digest!=tool_definitions_digest(ctx)):</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        raise_code(&#x27;GRD-403&#x27;,reason=&#x27;execution_state_contract_changed&#x27;)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

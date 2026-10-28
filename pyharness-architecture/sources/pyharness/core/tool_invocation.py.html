@@ -1,0 +1,169 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/tool_invocation.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/tool_invocation.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 169 行</span></nav><main class="wrap source-page"><h1>pyharness/core/tool_invocation.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：f8d1e6ace37c90c27dcfb268c021265fdda99cfb<br>SHA-256（内容校验）：3113b3b2a397e1d8009a8a005e14797919f7ca5d1ccbf072e1676e2735464882</p><p><a href="../../../architecture-detailed.html?node=tools_executor">Tool Executor（工具执行管道）</a> · <a href="../../../architecture-detailed.html?node=process_backend">Process and Terminal Tools（进程与终端工具后端）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 9 个类、函数与方法</summary><ul><li><a href="#L15">ToolInvocation（类） · L15–L168</a><ul><li><a href="#L19">ToolInvocation._run_provider（异步方法） · L19–L36</a></li><li><a href="#L38">ToolInvocation._run_original_provider（异步方法） · L38–L54</a></li><li><a href="#L56">ToolInvocation._prune_zombies（方法） · L56–L71</a></li><li><a href="#L73">ToolInvocation._invoke（方法） · L73–L80</a></li><li><a href="#L82">ToolInvocation.cancel_current（异步方法） · L82–L93</a></li><li><a href="#L95">ToolInvocation._validate_output（方法） · L95–L111</a></li><li><a href="#L113">ToolInvocation._spill_put（异步方法） · L113–L124</a></li><li><a href="#L126">ToolInvocation._finalize（异步方法） · L126–L168</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;ToolInvocation operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import asyncio</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import inspect</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from concurrent.futures import ThreadPoolExecutor</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from typing import Any</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pydantic import ValidationError</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.core.tools_guard import ToolCall</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.core.tools_registry import _compile_model as _registry_compile_model</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.events.vocab import summarize_validation</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.core.result_text import render_result_text</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pyharness.core.execution_result import SPILL_THRESHOLD, _ZOMBIE_POOL_LIMIT, ExecResult, summarize_text</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>class ToolInvocation:</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    &quot;&quot;&quot;ToolInvocation responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    async def _run_provider(self, defn: Any, args: dict, ctx: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        &quot;&quot;&quot;Provider 执行(runner):async handle 直接协程;同步 handle 经独立单工线程池。</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        同步函数用**每次调用独立**的 ``ThreadPoolExecutor(max_workers=1)`` 承载</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        (不阻塞事件循环,spec 关3);async handler 走事件循环协作(不占线程池,偏离 7)。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        超时(外层 wait_for 掐断)/取消掐断 → 内部 await 抛 CancelledError → 本函数</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        以 ``shutdown(wait=False)`` **驱逐**该池(线程把副作用在后台跑完),并保留引用</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        防 GC 半途杀线程——该池绝不被复用于后续调用,消除&quot;超时线程回池 + mark_idle</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        后并发重入 → 重叠副作用&quot;(Python 无法安全 kill 运行中线程,只能不复用)。</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        正常完成则 ``shutdown(wait=True)`` 立即收口(线程已结束)。见偏离说明 13。</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        runtime = getattr(ctx, &#x27;platform_runtime&#x27;, None)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        if runtime is not None:</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            async def original():</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                return await self._run_original_provider(defn, args, ctx)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            return await runtime.execute(defn.name, args, ctx, original)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        return await self._run_original_provider(defn, args, ctx)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    async def _run_original_provider(self, defn: Any, args: dict, ctx: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        handle = self._provider_handle(defn.name)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        if inspect.iscoroutinefunction(handle):</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            return await handle(args, ctx)              # wait_for 在外层掐断</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        loop = asyncio.get_running_loop()</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        pool = self._new_provider_pool(defn.name)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        try:</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            result = await loop.run_in_executor(pool, handle, args, ctx)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        except BaseException:                           # 超时/取消/异常:驱逐不复用</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            pool.shutdown(wait=False, cancel_futures=True)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            self._zombie_pools.add(pool)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            self._prune_zombies()</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            raise</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        else:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            pool.shutdown(wait=True)                    # 正常完成:线程已结束</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>            self._zombie_pools.discard(pool)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            return result</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    def _prune_zombies(self) -&gt; None:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        &quot;&quot;&quot;僵尸池裁剪:超时产生的池,线程跑完后自会空转结束;仅当僵尸池累积超过</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        上限时,丢弃其中线程已全部结束的池(仍在跑的保留引用,防 GC 半途回收)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        if len(self._zombie_pools) &lt; _ZOMBIE_POOL_LIMIT:</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            return</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        keep: set[ThreadPoolExecutor] = set()</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        for pool in self._zombie_pools:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            try:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                threads = getattr(pool, &quot;_threads&quot;, ())</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                alive = any(getattr(t, &quot;is_alive&quot;, lambda: False)()</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                            for t in threads)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            except Exception:                           # noqa: BLE001 线程查询异常:保守保留</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>                alive = True</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            if alive:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                keep.add(pool)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        self._zombie_pools = keep</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    def _invoke(self, defn: Any, args: dict, ctx: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        &quot;&quot;&quot;spec 速览 _invoke:Provider 实际调用同步入口(to_thread 承载面)。</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        保留为可整体替换的薄层:替换 _run_provider 即可换执行策略;同步调用</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        经本函数时按 handle(args, ctx) 契约执行。</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        handle = self._provider_handle(defn.name)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        return handle(args, ctx)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    async def cancel_current(self) -&gt; bool:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        &quot;&quot;&quot;取消在途 Provider 任务(协作式,F025):掐断 wait_for → execute 内</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        CancelledError 分支写 partial + re-raise(已发生副作用不假装回滚)。</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        无在途任务 → 返回 False(幂等)。partial 事件由 execute 的取消处理分支</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        落盘,本函数只负责触发取消(单事件循环单在途,阶段 1 agent-loop 串行)。</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        fut = self._active</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        if fut is None or fut.done() or fut.cancelling():</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            return False</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        fut.cancel()</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        return True</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    def _validate_output(self, defn: Any, raw: Any) -&gt; None:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        &quot;&quot;&quot;输出契约单点校验(spec 速览表):output_schema 缺失 = 跳过;声明则</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        编译(缓存)+ model_validate。失败抛 ValidationError/ValueError,</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        _finalize 收口转 tool.error(TLB-803,&quot;输出校验失败:&quot;)。</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        schema = getattr(defn, &quot;output_schema&quot;, None)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        if not schema:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            return</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        model = self._out_models.get(id(defn))</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        if model is None:</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>            try:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                model = _registry_compile_model(</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                    f&quot;{defn.name}__out&quot;, schema)        # 编译器同源(偏离 8)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            except Exception as e:                      # noqa: BLE001 坏契约</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                raise ValueError(f&quot;输出契约不可编译:{e}&quot;) from e</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            self._out_models[id(defn)] = model</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        model.model_validate(raw)                       # ValidationError 上抛</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    async def _spill_put(self, ctx: Any, text: str, kind: str) -&gt; dict:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        &quot;&quot;&quot;ctx.storage.spill.put 封装:未接线 → PERS-221(结构化);异常收敛。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        spill = getattr(getattr(ctx, &quot;storage&quot;, None), &quot;spill&quot;, None)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        if spill is None:</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            raise_code(&quot;PERS-221&quot;,</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                       hint=&quot;storage.spill 未接线(能力未激活),超长输出无法归档&quot;)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        r = spill.put(text, kind=kind)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        if inspect.isawaitable(r):</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            r = await r</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        if not isinstance(r, dict):</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            raise_code(&quot;PERS-221&quot;, hint=&quot;storage.spill.put 返回非 dict(契约违约)&quot;)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        return r</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code></code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    async def _finalize(self, ctx: Any, call: ToolCall, defn: Any, raw: Any, *,</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                        elapsed_ms: float = 0.0) -&gt; ExecResult:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        &quot;&quot;&quot;关4 结果检查与落盘(spec 伪代码权威;偏离 4:spill_ref 全 dict)。</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code></code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        输出 schema 校验(声明才做;失败 → tool.error TLB-803)→ 超长转 spill</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        (F039,原文落私有区,上下文只留 ≤2KB 摘要)→ tool.result(ok/summary/</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        truncated/spill_ref,trace.parent=父 response)。spill 写失败/超限</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        (PERS-221/223)同样收敛为单条 tool.error——每调用恰一条终局事件。</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        if getattr(defn, &quot;output_schema&quot;, None):</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            try:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                self._validate_output(defn, raw)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            except (ValidationError, ValueError) as e:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                detail = summarize_validation(e) if isinstance(e, ValidationError) \</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                    else str(e)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                return await self._on_error(ctx, call, &quot;TLB-803&quot;,</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                                            f&quot;输出校验失败:{detail}&quot;)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        from pyharness.core.provider_result import ProviderOutcome</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        ok = bool(raw.get(&#x27;ok&#x27;)) if isinstance(raw, ProviderOutcome) else True</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        text = render_result_text(raw)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        truncated, spill_ref = False, None</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        if len(text) &gt; SPILL_THRESHOLD:</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            try:</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                sp = await self._spill_put(ctx, text, kind=call.name)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>            except PyHError as e:                       # PERS-221/223 → 回喂</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>                return await self._on_error(ctx, call, e.code,</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                                            e.to_model_message())</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            truncated = True</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>            spill_ref = sp                              # {ref,chars,lines,preview}</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>            preview = str(sp.get(&quot;preview&quot;) or text[:500])[:500]</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            chars = int(sp.get(&quot;chars&quot;, len(text)))</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>            lines = int(sp.get(&quot;lines&quot;, text.count(&quot;\n&quot;) + 1))</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            ref = sp.get(&quot;ref&quot;, &quot;?&quot;)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>            summary = f&quot;{preview}…(共{chars}字符/{lines}行,spill:{ref})&quot;</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        else:</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            summary = summarize_text(text)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        await self._append(ctx, &quot;tool.result&quot;,</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                           {&quot;name&quot;: call.name, &quot;call_id&quot;: call.call_id,</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                            &quot;ok&quot;: ok, &quot;summary&quot;: summary,</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                            &quot;truncated&quot;: truncated, &quot;spill_ref&quot;: spill_ref},</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                           actor=&quot;tool&quot;, trace=self._trace(call))</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        return ExecResult(ok=ok, summary=summary, truncated=truncated,</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                          spill_ref=spill_ref, elapsed_ms=elapsed_ms)</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

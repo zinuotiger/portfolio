@@ -1,0 +1,138 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/spill_lifecycle.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/spill_lifecycle.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 138 行</span></nav><main class="wrap source-page"><h1>pyharness/core/spill_lifecycle.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：4e90c99817fb4ac3c8816d6281d27a97fe2d53cb<br>SHA-256（内容校验）：4ff82baa0fd3a218707ba9ac43cb0732be8fcb7962699edf75dd5ff59f8406bf</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 5 个类、函数与方法</summary><ul><li><a href="#L8">detach（异步函数） · L8–L58</a></li><li><a href="#L60">_unsubscribe_purge（函数） · L60–L71</a></li><li><a href="#L73">purge_session（异步函数） · L73–L103</a></li><li><a href="#L105">subscribe_purge（函数） · L105–L138</a><ul><li><a href="#L120">subscribe_purge._on_finished（异步方法） · L120–L131</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Spill lifecycle: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code></code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.core.spill_policy import SPILL_PATTERN, TOOL_NAME, _log_warn, _maybe_await, _session_id, _spill_root, log</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>async def detach(ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    &quot;&quot;&quot;幂等摘除(DIS-SEAM §6.1 ⑤):摘读工具/摘定位器/摘订阅,文件不删。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    会话关闭(ctx.close)时调用;**文件保留**——留给 F060 归档/repair 在会话</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    结束后仍可读的窗口,删除统一由 purge_session 在 session.finished 后执行。</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    摘除失败仅本地日志告警,不阻断会话关闭(文件系统无副作用残留)。</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    storage = getattr(ctx, &quot;storage&quot;, None)</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    # ---- 1) 幂等闸:locator 自报未挂载即已摘;无 locator 面按挂载痕迹判</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    if storage is not None:</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        gate = getattr(storage, &quot;_unmounted&quot;, None)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        if callable(gate):</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>            try:</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>                if await _maybe_await(gate(&quot;spill&quot;)):</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>                    return                        # 已摘除(幂等早退)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>            except Exception:                     # noqa: BLE001 locator 异常:</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>                pass                              # 继续尽力摘除,不阻断</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        else:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>            services = getattr(storage, &quot;services&quot;, None) or {}</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>            if not (hasattr(storage, &quot;spill&quot;) or &quot;spill&quot; in services):</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>                return                            # 无 spill 挂载痕迹 → 已摘</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    # ---- 2) 摘 LLM 可见读工具(TLB-802 = 已摘,静默幂等)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    tools = getattr(ctx, &quot;tools&quot;, None)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    if tools is not None:</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        unreg = getattr(tools, &quot;unregister&quot;, None)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        if not callable(unreg):</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            unreg = getattr(tools, &quot;unregister_definition&quot;, None)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        if callable(unreg):</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            try:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                await _maybe_await(unreg(TOOL_NAME))</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            except PyHError as e:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>                if e.code != &quot;TLB-802&quot;:           # 已摘(重入/双摘)→ 静默</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                    _log_warn(ctx, &quot;spill detach unregister 失败 code=%s&quot;, e.code)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            except Exception as e:                # noqa: BLE001</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>                _log_warn(ctx, &quot;spill detach unregister 异常: %s&quot;, e)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    # ---- 3) 摘定位器(ctx.storage.spill;真实 locator 走 unmount)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    if storage is not None:</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        unmount = getattr(storage, &quot;unmount&quot;, None)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        if callable(unmount):</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            try:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>                await _maybe_await(unmount(&quot;spill&quot;))</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            except Exception as e:                # noqa: BLE001</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>                _log_warn(ctx, &quot;spill detach unmount 失败: %s&quot;, e)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        elif hasattr(storage, &quot;spill&quot;):           # 无 locator API:直接摘属性</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            try:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                delattr(storage, &quot;spill&quot;)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            except Exception as e:                # noqa: BLE001</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                _log_warn(ctx, &quot;spill detach 摘除属性失败: %s&quot;, e)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    # ---- 4) 摘 session.finished 清理订阅(按会话属主)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    _unsubscribe_purge(ctx)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    log.info(&quot;spill detached(文件保留,F060 读窗口)&quot;)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>def _unsubscribe_purge(ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    &quot;&quot;&quot;按会话属主摘除 purge 订阅(owner=f&quot;spill:{sid}&quot;;幂等)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    sid = _session_id(ctx)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    if not sid:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        return</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    bus = getattr(ctx, &quot;bus&quot;, None)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    drop = getattr(bus, &quot;unsubscribe_all&quot;, None)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    if callable(drop):</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        try:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            drop(f&quot;spill:{sid}&quot;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        except Exception as e:                    # noqa: BLE001</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            _log_warn(ctx, &quot;spill purge 订阅摘除失败: %s&quot;, e)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>async def purge_session(session_id: str, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    &quot;&quot;&quot;清理策略主体(F039 随会话生命周期/I-3):删除该会话 spill 目录全部文件。</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    先 containment 校验(只删 spill 根下本会话子目录,逃逸即 PERS-222 拒);</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    目录不存在幂等;删除失败记日志+告警不阻断(F060 repair 兜底残留)。</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    订阅 session.finished 后由本函数收口&quot;spill 随会话生命周期清理&quot;。</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    root = _spill_root(ctx)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    if root is None:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        raise_code(&quot;PERS-222&quot;, session=session_id,</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                   advice=&quot;spill 根未配置,无法校验清理目标,已拒绝&quot;)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    root = root.resolve()</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    target = (root / session_id).resolve()       # 归一后比对</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    try:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        target.relative_to(root)                 # containment 单点(Windows</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    except ValueError:                           # 大小写不敏感,偏离 4)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        raise_code(&quot;PERS-222&quot;, session=session_id,</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                   advice=&quot;清理目标逃逸 spill 根,已拒绝&quot;)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    if target == root:                           # 目标即根(空/`.` session)→ 拒</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        raise_code(&quot;PERS-222&quot;, session=session_id,</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                   advice=&quot;清理目标逃逸 spill 根,已拒绝&quot;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    try:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        if target.exists():</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            for f in target.glob(SPILL_PATTERN):  # 逐文件删(可留审计计数)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                f.unlink(missing_ok=True)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            for f in target.glob(f&quot;{SPILL_PATTERN}.tmp&quot;):   # 残留 tmp(偏离 5)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                f.unlink(missing_ok=True)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            target.rmdir()                        # 空目录收口</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        log.info(&quot;spill purge done session=%s dir=%s&quot;, session_id, target)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    except OSError as e:                          # 残留不致命(F060 兜底)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        _log_warn(ctx, &quot;spill purge failed session=%s: %s&quot;, session_id, e)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>def subscribe_purge(ctx: Any, session_id: Optional[str] = None) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    &quot;&quot;&quot;订阅本会话 session.finished → purge_session(返回 owner 标记,可摘除)。</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    装配于 Provider.enter(生命周期 enter→announce→detach);bus 未接线/无</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    subscribe 面 → 返回 None(清理留待装配层兜底,文件由 F060 repair 覆盖)。</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    sid = session_id or _session_id(ctx)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    if not sid:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        return None</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    bus = getattr(ctx, &quot;bus&quot;, None)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    subscribe = getattr(bus, &quot;subscribe&quot;, None)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    if not callable(subscribe):</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        return None</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    owner = f&quot;spill:{sid}&quot;</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code></code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    async def _on_finished(type_: str, payload: Any) -&gt; None:  # noqa: ARG001</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        &quot;&quot;&quot;session.finished 回调:仅清本会话(总线跨会话共享,按 payload 过滤)。</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code></code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        声明 async:总线 _dispatch 对协程函数 handler 会 await(同步函数返回</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        协程则不会被等待,产生 never-awaited 告警)。</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        p_sid = getattr(payload, &quot;session_id&quot;, None)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        if p_sid is None and isinstance(payload, dict):</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            p_sid = payload.get(&quot;session_id&quot;)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        if p_sid is not None and str(p_sid) != sid:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            return                                # 其他会话的 finished:不动</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        await purge_session(sid, ctx)             # 删除本会话 spill 目录</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code></code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>    try:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        bus.subscribe(&quot;session.finished&quot;, _on_finished, owner=owner)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    except Exception as e:                        # noqa: BLE001 订阅失败不致命</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        _log_warn(ctx, &quot;spill purge 订阅失败: %s&quot;, e)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        return None</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    return owner</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

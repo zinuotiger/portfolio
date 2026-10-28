@@ -1,0 +1,220 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/process_owner.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/process_owner.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 220 行</span></nav><main class="wrap source-page"><h1>pyharness/core/process_owner.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：e892c40a929b459742232cbac4708671f204ca55<br>SHA-256（内容校验）：ba6eb5b21d5e4422d4cb57719320e1b6b40962433a4d4749ca72cc2e7498cc50</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 13 个类、函数与方法</summary><ul><li><a href="#L19">WindowsJob（类） · L19–L61</a><ul><li><a href="#L20">WindowsJob.__init__（方法） · L20–L48</a><ul><li><a href="#L29">WindowsJob.__init__.Basic（类） · L29–L34</a></li><li><a href="#L35">WindowsJob.__init__.Extended（类） · L35–L38</a></li></ul></li><li><a href="#L50">WindowsJob.assign（方法） · L50–L52</a></li><li><a href="#L54">WindowsJob.close（方法） · L54–L61</a></li></ul></li><li><a href="#L73">ProcessOwner（类） · L73–L220</a><ul><li><a href="#L74">ProcessOwner.__init__（方法） · L74–L111</a></li><li><a href="#L113">ProcessOwner.poll（方法） · L113–L123</a></li><li><a href="#L125">ProcessOwner.wait_exit（方法） · L125–L133</a></li><li><a href="#L135">ProcessOwner.terminate（方法） · L135–L168</a></li><li><a href="#L170">ProcessOwner.collect（方法） · L170–L220</a><ul><li><a href="#L173">ProcessOwner.collect.read（方法） · L173–L182</a></li></ul></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Owned process trees. Payloads start only after ownership is established.</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Windows uses a kill-on-close Job Object, never taskkill on a retained PID.</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>POSIX children start in a dedicated session. This is lifecycle containment,</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>not a filesystem/network security sandbox.</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import ctypes</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import os</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>import signal</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>import subprocess</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>import sys</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>import threading</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>import time</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from ctypes import wintypes</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>class WindowsJob:</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    def __init__(self):</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        kernel = ctypes.WinDLL(&#x27;kernel32&#x27;, use_last_error=True)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        self.kernel = kernel</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        kernel.CreateJobObjectW.restype = wintypes.HANDLE</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        kernel.CloseHandle.argtypes = [wintypes.HANDLE]</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        class Basic(ctypes.Structure):</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>            _fields_ = [(&#x27;process_time&#x27;, ctypes.c_longlong), (&#x27;job_time&#x27;, ctypes.c_longlong),</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>                        (&#x27;flags&#x27;, wintypes.DWORD), (&#x27;min_ws&#x27;, ctypes.c_size_t),</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>                        (&#x27;max_ws&#x27;, ctypes.c_size_t), (&#x27;active_limit&#x27;, wintypes.DWORD),</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>                        (&#x27;affinity&#x27;, ctypes.c_size_t), (&#x27;priority&#x27;, wintypes.DWORD),</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                        (&#x27;scheduling&#x27;, wintypes.DWORD)]</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        class Extended(ctypes.Structure):</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            _fields_ = [(&#x27;basic&#x27;, Basic), (&#x27;io&#x27;, ctypes.c_ulonglong * 6),</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                        (&#x27;process_memory&#x27;, ctypes.c_size_t), (&#x27;job_memory&#x27;, ctypes.c_size_t),</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>                        (&#x27;peak_process&#x27;, ctypes.c_size_t), (&#x27;peak_job&#x27;, ctypes.c_size_t)]</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        self.handle = kernel.CreateJobObjectW(None, None)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        if not self.handle:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            raise ctypes.WinError(ctypes.get_last_error())</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        info = Extended()</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        info.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        if not kernel.SetInformationJobObject(self.handle, 9, ctypes.byref(info), ctypes.sizeof(info)):</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            error = ctypes.WinError(ctypes.get_last_error())</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>            kernel.CloseHandle(self.handle)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            self.handle = None</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            raise error</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    def assign(self, process):</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        if not self.kernel.AssignProcessToJobObject(self.handle, wintypes.HANDLE(int(process._handle))):</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            raise ctypes.WinError(ctypes.get_last_error())</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    def close(self):</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        handle = self.handle</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        if handle:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            if not self.kernel.TerminateJobObject(handle, 1):</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                raise ctypes.WinError(ctypes.get_last_error())</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            if not self.kernel.CloseHandle(handle):</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>                raise ctypes.WinError(ctypes.get_last_error())</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            self.handle = None</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>_GATED_COMMAND = (</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    &quot;import os,subprocess,sys; &quot;</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    &quot;gate=os.read(0,1); &quot;</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    &quot;sys.exit(125) if gate!=b&#x27;G&#x27; else None; &quot;</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    &quot;p=subprocess.Popen(sys.argv[1:],stdin=sys.stdin,stdout=sys.stdout,stderr=sys.stderr,creationflags=0x08000000 if os.name==&#x27;nt&#x27; else 0); &quot;</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    &quot;sys.exit(p.wait())&quot;</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>class ProcessOwner:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    def __init__(self, argv, *, cwd, env, text=False, merge_stderr=False, input_open=False):</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        self._mutex = threading.RLock()</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        self._closed = False</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        self._tree_stopped = False</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        self._reaped = False</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        if os.name != &#x27;nt&#x27; and not all(hasattr(os, key) for key in (&#x27;waitid&#x27;, &#x27;WNOWAIT&#x27;, &#x27;P_PID&#x27;)):</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            raise RuntimeError(&#x27;owned execution requires non-reaping waitid; this platform is not enabled&#x27;)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        self.job = WindowsJob() if os.name == &#x27;nt&#x27; else None</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        self.proc = None</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        self._assigned = False</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        options = {&#x27;creationflags&#x27;: 0x08000000} if os.name == &#x27;nt&#x27; else {&#x27;start_new_session&#x27;: True}</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        if text:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            options.update(text=True, encoding=&#x27;utf-8&#x27;, errors=&#x27;replace&#x27;)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        try:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            command = [sys.executable, &#x27;-I&#x27;, &#x27;-B&#x27;, &#x27;-c&#x27;, _GATED_COMMAND, *argv] if self.job else argv</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            self.proc = subprocess.Popen(command, cwd=str(cwd), env=env,</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                stdin=subprocess.PIPE, stdout=subprocess.PIPE,</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE, **options)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            if self.job:</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                self.job.assign(self.proc)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                self._assigned = True</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                self.proc.stdin.write(&#x27;G&#x27; if text else b&#x27;G&#x27;)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                self.proc.stdin.flush()</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            if not input_open:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                self.proc.stdin.close()</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        except BaseException as primary:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            try:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                self.terminate()</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            except BaseException as secondary:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                primary.add_note(f&#x27;process launch cleanup failed: {type(secondary).__name__}&#x27;)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            if self.proc is not None:</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                    if stream is not None:</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                        try:</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                            stream.close()</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                        except BaseException as secondary:</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                            primary.add_note(f&#x27;pipe cleanup failed: {type(secondary).__name__}&#x27;)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            raise</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    def poll(self):</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        &quot;&quot;&quot;Observe without releasing the POSIX identity anchor before group cleanup.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        with self._mutex:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            if self.proc is None:</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                return None</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            if self.job is not None or self._reaped:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                return self.proc.poll()</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            result = os.waitid(os.P_PID, self.proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            if result is None:</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                return None</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            return result.si_status if result.si_code == os.CLD_EXITED else -result.si_status</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    def wait_exit(self, timeout=None):</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        deadline = None if timeout is None else time.monotonic() + timeout</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        while True:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            rc = self.poll()</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            if rc is not None:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                return rc</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            if deadline is not None and time.monotonic() &gt;= deadline:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                raise subprocess.TimeoutExpired(self.proc.args, timeout)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            time.sleep(.01)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code></code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    def terminate(self):</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        with self._mutex:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            if self._closed:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                return</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            errors = []</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            if not self._tree_stopped:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                try:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                    if self.job is not None:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                        self.job.close()</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                    elif self.proc is not None and not self._reaped:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                        try:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                            os.killpg(self.proc.pid, signal.SIGKILL)</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                        except ProcessLookupError:</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                            pass</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                    self._tree_stopped = True</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                except BaseException as exc:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>                    errors.append(exc)</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            if self.proc is not None and self.job is not None and not self._assigned:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>                try:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                    if self.proc.poll() is None:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                        self.proc.kill()</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                except BaseException as exc:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                    errors.append(exc)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            # POSIX must retain its unreaped leader until group termination succeeds.</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>            if self.proc is not None and (self.job is not None or self._tree_stopped):</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>                try:</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>                    self.proc.wait(timeout=5)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                    self._reaped = True</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                except BaseException as exc:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                    errors.append(exc)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>            self._closed = self._tree_stopped and (self.proc is None or self._reaped)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>            if errors:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>                for extra in errors[1:]: errors[0].add_note(f&#x27;cleanup: {type(extra).__name__}&#x27;)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                raise errors[0]</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code></code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    def collect(self, timeout):</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        chunks = [bytearray(), bytearray()]</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        errors = []</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        def read(index, stream):</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            try:</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                while block := stream.read(8192):</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                    room = max(0, 200_000-len(chunks[index]))</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                    chunks[index].extend(block[:room])</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            except BaseException as exc:</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                errors.append(exc)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>            finally:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                try: stream.close()</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        readers = [threading.Thread(target=read, args=(i,s), name=&#x27;owned-process-output&#x27;, daemon=True)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                   for i,s in enumerate((self.proc.stdout,self.proc.stderr)) if s is not None]</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        started = []</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        timeout_hit = False</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        primary = None</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        try:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>            for reader in readers:</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                reader.start()</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                started.append(reader)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            try:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                self.wait_exit(timeout=max(.01,float(timeout)))</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            except subprocess.TimeoutExpired:</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                timeout_hit = True</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        except BaseException as exc:</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>            primary = exc</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        finally:</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            try: self.terminate()</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>            for reader in started:</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>                try:</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>                    reader.join(timeout=5)</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                    if reader.is_alive(): raise RuntimeError(&#x27;owned output reader did not stop&#x27;)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>            for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                if stream is not None and not stream.closed:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                    try: stream.close()</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                    except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        if primary is not None:</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>            for extra in errors: primary.add_note(f&#x27;cleanup: {type(extra).__name__}&#x27;)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>            raise primary</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        if errors:</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            raise errors[0]</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        out, err = (bytes(c).decode(&#x27;utf-8&#x27;,errors=&#x27;replace&#x27;) for c in chunks)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        rc = self.proc.returncode</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        summary = &#x27;\n&#x27;.join(x for x in (out.strip(),err.strip(),f&#x27;exit={rc}&#x27;) if x)</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        if timeout_hit: summary += &#x27;; timeout; owned process tree terminated&#x27;</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        return {&#x27;ok&#x27;:rc == 0 and not timeout_hit,&#x27;exit_code&#x27;:rc,&#x27;stdout&#x27;:out,&#x27;stderr&#x27;:err,</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>                &#x27;timeout&#x27;:timeout_hit,&#x27;cancelled&#x27;:False,&#x27;summary&#x27;:summary}</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

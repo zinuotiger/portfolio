@@ -1,0 +1,585 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/cli.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/cli.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 585 行</span></nav><main class="wrap source-page"><h1>pyharness/cli.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：6d27e00ef82a4f301c457ec4e54d46d3d29723e7<br>SHA-256（内容校验）：2f278e1db3994ed54bbc1105b7686e54331a1d567b1eab76f202e8e5599ab5f0</p><p><a href="../../architecture-detailed.html?node=cli">Command Line Interface（命令行入口）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 22 个类、函数与方法</summary><ul><li><a href="#L108">_attach_engine（异步函数） · L108–L135</a></li><li><a href="#L138">_attach_log_persistence（函数） · L138–L155</a></li><li><a href="#L158">_open_log（异步函数） · L158–L166</a></li><li><a href="#L169">_new_session（异步函数） · L169–L181</a></li><li><a href="#L184">offline_cmd（函数） · L184–L195</a></li><li><a href="#L198">_config_cmd（函数） · L198–L232</a></li><li><a href="#L235">main（函数） · L235–L255</a></li><li><a href="#L258">cli_main（异步函数） · L258–L298</a></li><li><a href="#L303">assemble_ctx（函数） · L303–L327</a></li><li><a href="#L330">bootstrap_shell（异步函数） · L330–L365</a></li><li><a href="#L368">install_two_stage_sigint（函数） · L368–L385</a><ul><li><a href="#L373">install_two_stage_sigint.handler（方法） · L373–L378</a></li></ul></li><li><a href="#L388">_shell_exit_code（函数） · L388–L392</a></li><li><a href="#L395">interactive_loop（异步函数） · L395–L427</a></li><li><a href="#L430">_submit_wait_report（异步函数） · L430–L446</a></li><li><a href="#L449">read_user_input（异步函数） · L449–L478</a></li><li><a href="#L481">_write_prompt（函数） · L481–L484</a></li><li><a href="#L489">run_intent（异步函数） · L489–L523</a></li><li><a href="#L526">run_once_sub（异步函数） · L526–L540</a></li><li><a href="#L543">_build_once_handlers（函数） · L543–L557</a></li><li><a href="#L580">_cmd_plan（异步函数） · L580–L581</a></li><li><a href="#L584">_cmd_workflow（异步函数） · L584–L585</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/cli.py — PyHarness 第一壳:CLI 完整外壳 (specs/cli.py.md 契约;阶段 6)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F064(CLI 完整外壳)· F065(desktop 子命令接管原 web 位)· F066(acp 子命令桥)·</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>F060(repair 子命令桥 + 启动自检)· F041(斜杠命令零 LLM 通道)· F015(审批人类裁决)。</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code></code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>一句话职责:argparse 解析 14 个叶子子命令(chat/run/plan/schedule/job/search/session/</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>fork/repair/desktop/acp/config/budget/stats)与全局旗标(--config/--json/--session/</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>--verbose),按命令分发到交互循环 / 单发任务 / 离线命令 / 长驻外壳,统一退出码</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>(0 成功、1 引擎错误带 F019 码、2 用法错误),headless(stdin 非 tty)默认拒绝无审批</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>通道的危险动作(R8:channel=None → APR-501/GRD-401 在裁决侧天然生效),--json 输出</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>机器可读事件流,Ctrl-C 一次取消当前轮、两次退出(130)。</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>本模块 = 纯外壳:零业务逻辑,一切动作委托引擎(commands.handle_slash / task_queue /</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>session / repair / config),事件由总线订阅渲染,不直写存储;desktop/acp 子命令只做</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>分发与参数透传,实现在 pyharness/desktop.py / pyharness/acp.py(同批任务)。</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>偏离说明(契约 = specs/cli.py.md;以下为与规格伪码冲突/未展开处的取舍,均列理由,</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>与 commands.py/approval.py 同款先例,已入 docstring 供审查):</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>1. parse_args 的全局旗标在每片叶子 subparser 上经 parents 重复声明——argparse 顶层</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>   旗标只认子命令前的位置,DEP §5.1 示例 `repair --session &lt;sid&gt;`/`fork &lt;sid&gt; --as`</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>   需要旗标可置于子命令后;parents 复用后两种写法均合法(伪码 leaf() 未覆盖)。</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>2. 伪码 leaf() 给所有子命令加通用 *args 后再给 run/plan/search/fork/session 加专用</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   位置参(argparse 两可位置参冲突)→ 通用 args 只加在无专用位置参的叶子上,专用</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   位置参命令的 ParseResult.positional 由命名位置参聚合(用户可见 CLI 不变)。</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>3. offline_cmd(cmd, flags) 读 flags[&quot;positional&quot;] 与 ParseResult 结构表分离字段自相</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>   矛盾 → 签名改为 offline_cmd(cmd, positional, flags),位置参直传更清晰。</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>4. cli_main 伪码 run 分支的 text_or_stdin 未入函数清单 → 内联为 _run_text 助手</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   (位置参优先;缺省且 stdin 非 tty 时整读管道;tty 且无参 = 空 → run_intent 抛</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   EVT-100,与 spec 异常表一致)。</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>5. interactive_loop 伪码&quot;取消后递归重入&quot;(return await interactive_loop(...))会无限</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>   深递归 → 改为 while 循环 + 捕获 _CancelledRound 后重布防(armed=False),语义</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>   等价(一次取消当前轮)且无栈风险。</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>6. --once 单轮语义按 DEP §5.2 落地:成功处理完一轮即返 0;伪码 while 循环会在</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>   once 文本来自 --once 时把同一文本无限重复提交(每次循环都重读 flags[&quot;once&quot;])</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   → 判为伪码缺陷,单轮后返回(取消轮次例外:继续回到循环顶)。</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>7. bootstrap_shell 的 repair 前置(auto_scan/repair_session/ensure_repair)与</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>   repair_cmd 依赖 pyharness/repair.py(F060 同批任务,可能尚未落盘)→ 一律函数内</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   惰性导入 + 未装配时降级跳过(记日志),不硬依赖同批未落地模块;装配后自动生效。</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>   同理 desktop/acp 惰性导入(见 cli_main),fakemodule/真实模块两形态兼容</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>   (acp: 模块级 serve(ctx, client_id=...) 权威面;AcpBridge 旧面兜底)。</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>8. 事件渲染订阅:伪码订阅字面类型 `task:{task_id}:#`,而真实总线(EventBus)只认</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>   已注册类型/`段.*` 通配 → 渲染器按真实词表订阅精确类型 + `agent.*/tool.*/</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>   guard.*/approval.*/session.*/task.*` 通配(段前缀匹配),JSONL 行以</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>   {&quot;type&quot;:…,&quot;payload&quot;:…} 直通总线事件(信封 Envelope 化属引擎装配面,后续补齐)。</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>9. run_intent 伪码 res.events_of(&quot;guard.rejected&quot;) 不存在于真实 TaskResult</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>   (dataclass: ok/code/summary/duration_ms,终态以事件为准 INV-01)→ 拒绝清单改为</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>   getattr 探测:结果对象带 events_of/rejected 面则用,否则空清单(引擎装配后由</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>   事件面补全);退出码按 ok/reason/code 多面兼容归一。</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>10. Ctrl-C 真实信号 → 协程上下文投递依赖 asyncio 信号处理内部细节(handler 在事件</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    循环机制层触发时异常不经交互协程),本模块按 spec 语义落地 handler(一次置位</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    raise _CancelledRound / 二次 SystemExit(130))并把 _CancelledRound 同时作为</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    main() 的受控退出路径(130),真实按键语义留待 PTY 交互冒烟校准(DEP §4.7)。</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>11. 启动序(ctx 装配):spec 依赖表引 pyharness.bootstrap / assemble_ctx,该装配模块</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    未落盘 → 装配在 cli 内联为轻量门面(settings/bus/session/task_queue(runner=None,</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    未注入执行器时任务 CYC-999 快速失败,防 S-1 伪造执行)/approval/shell(退出旗标)/</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    storage/handlers(单发处理器注入面,见 run_once_sub)),引擎脊柱注入点保留注释。</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>12. repair_cmd/run_once_sub 报告字段按鸭子类型读取(fixed/lost/backup_path/</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    quarantined 可能为列表或计数,repair 模块报告面为准),避免对同批模块字段形状</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    硬编码。</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>13. DEP §10 G5 验收文本&quot;连续两次 Ctrl-C 退出码 0&quot;与 specs/cli.py.md 异常表</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    SystemExit(130)/KeyboardInterrupt→130 冲突 → 以本模块规格为准:中断退出 130,</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    /exit 与 Ctrl-D(EOF) 才走 0。</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>import argparse</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>import asyncio</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>import json</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>import logging</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>import signal</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>import sys</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>import uuid</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code></code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>from pyharness import config as config</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>from pyharness.core import commands</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code></code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code># 文本模式渲染卡片的事件类型(其余事件 json 模式全量、text 模式静默)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code># 渲染终止事件(引擎终态或会话终态;渲染任务另由 wait_for 返回后强制取消兜底)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code># 总线订阅面:精确 + 段通配(真实总线 EventBus 的 _wild_match 段前缀匹配)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code></code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>from pyharness.cli_output import (log, PROMPT, EXIT_INTERRUPT, OFFLINE_CMDS, SHELL_CMDS, INTERACTIVE_CMDS, _TEXT_CARD_TYPES, _END_EVENT_TYPES, _RENDER_PATTERNS, _CancelledRound, ParseResult, ShellCtx, ExitResult, StreamRenderer, _normalize_payload, _trunc, _text_card, _json_line, _emit_plain, _emit_error, _result_ok, _result_code, _result_summary, _result_reason, _rejected_list, _wait_and_render, _render_events, prompt_approval, _report_field, _report_dict, exit_code_for)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>from pyharness.cli_parser import (_add_global_flags, parse_args, _positional_of, CmdEntry, CMD_TABLE, _args_json, _run_text)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>from pyharness.cli_settings import (_load_settings)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>from pyharness.cli_sessions import (_ExitFlag, _sessions_path, _flush_session, _scan_unhealthy, _repairable_unhealthy, _ensure_repair)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>from pyharness.cli_history import (_sessions_dir_ctx, _session_lines, _cmd_search, _cmd_session, _cmd_fork)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>from pyharness.cli_orchestration import (_cmd_job, _cmd_schedule, _cmd_plan as _plan_command, _cmd_workflow as _workflow_command)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>from pyharness.cli_maintenance import (_skill_cmd, _target_cfg_path, _scan_usage, _budget_cmd, _stats_cmd, repair_cmd)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>from pyharness.cli_runtime import (_wire_queue)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>async def _attach_engine(sh: ShellCtx) -&gt; None:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    &quot;&quot;&quot;CLI 真引擎装配:把轻量门面换成 spine + runner + 真实 TaskQueue。</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    bootstrap_shell 只做会话/权限门面;chat/run/plan 真正干活前必须把</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    engine 装配进来(原设计留了 ctx.handlers/runner 注入点但从未接线)。</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    ctx = getattr(sh, &quot;ctx&quot;, None)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    if ctx is None:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        raise_code(&quot;CYC-999&quot;, hint=&quot;ShellCtx 缺 ctx,无法装配引擎&quot;)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    if getattr(ctx, &quot;engine_spine&quot;, None) is not None:</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        return</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    from pyharness import engine as _eng</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    log_ = getattr(ctx, &quot;session&quot;, None)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    if log_ is None:</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        raise_code(&quot;CYC-999&quot;, hint=&quot;引擎装配前无会话(chat/run/plan 应先开/建会话)&quot;)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    channel = &quot;cli&quot; if not getattr(sh, &quot;headless&quot;, True) else None</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    # The bootstrap provider owns verdict subscriptions on this same bus.</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    # Close it before replacing it so only the runtime receives its verdicts.</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    bootstrap_approval = getattr(ctx, &quot;approval&quot;, None)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    if bootstrap_approval is not None:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        await bootstrap_approval.aclose()</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    await _eng.attach_engine_to_ctx(</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        ctx, ctx.settings, log_=log_,</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        sessions_dir=Path(getattr(getattr(ctx, &quot;storage&quot;, None),</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                                  &quot;sessions_dir&quot;, &quot;.&quot;)).expanduser(),</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        bus=ctx.bus,</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        store=getattr(log_, &quot;_persistence&quot;, None),</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        channel=channel)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code></code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>def _attach_log_persistence(bus: Any, log_: Any, store: Any) -&gt; None:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    &quot;&quot;&quot;总线 → 存储订阅(**委托唯一实现** ``persistence.session_recorder``)。</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code></code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    2026-09-21 R9:此前这里是**第三份**各自实现 —— 属主固定 ``&quot;persistence&quot;``(多会话</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    同总线时&quot;按属主摘除&quot;会互相误伤)且**无 sid 过滤**(总线上他会话事件会被写进本会话</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    store,同 R8-1 在 engine 侧修掉的缺陷)。现统一:属主 ``persistence:{sid}`` +</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>    过滤在 ``session_recorder`` 单点。</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code></code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    SessionLog 构造时 bus=None(open_session 面),装配后回填 _bus 并先订后写。</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    from pyharness.events import EVENT_TYPES</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    from pyharness.persistence import session_recorder</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code></code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    sid = str(getattr(log_, &quot;sid&quot;, &quot;&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    record = session_recorder(store, sid)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    for t in EVENT_TYPES:                      # 词表逐类型订阅(精确命中)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        bus.subscribe(t, record, owner=f&quot;persistence:{sid}&quot;)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    log_._bus = bus                            # 回填总线:append 即分发即落盘</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code></code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code></code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>async def _open_log(cfg: Any, sid: str, bus: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    &quot;&quot;&quot;重放重建会话(核心路径:store 追加句柄 + open_session 全量回放 + 总线落盘</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>    订阅;坏行由回放记跳 PERS-201 隔离,不中断)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    from pyharness.core.session import open_session</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    from pyharness.persistence import flush_kwargs_of, open_store</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    store = open_store(sid, dir=_sessions_path(cfg), **flush_kwargs_of(cfg))</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    log_ = await open_session(sid, store)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    _attach_log_persistence(bus, log_, store)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    return log_</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code></code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code></code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>async def _new_session(cfg: Any, bus: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    &quot;&quot;&quot;开新会话:随机 sid → store → session.created 首事件(seq=1,EVT-106 引导);</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    先接总线落盘订阅再写首事件(created 亦入真源)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    from pyharness.core.session import open_session</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    from pyharness.persistence import flush_kwargs_of, open_store</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>    sid = f&quot;s-{uuid.uuid4().hex[:12]}&quot;          # Envelope session_id min_length=8</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    store = open_store(sid, dir=_sessions_path(cfg), **flush_kwargs_of(cfg))</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>    log_ = await open_session(sid, store)       # 空日志回放(文件刚建)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    _attach_log_persistence(bus, log_, store)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>    await log_.append(&quot;session.created&quot;,</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                      {&quot;title&quot;: &quot;&quot;, &quot;model&quot;: cfg.llm.model},</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                      actor=&quot;system&quot;, sync=True)</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    return log_</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code></code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code></code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>def offline_cmd(cmd: str, positional: list[str], flags: dict) -&gt; int:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    &quot;&quot;&quot;离线子命令(config/budget/stats/skill):不装配引擎零网络零 LLM(DEP §5.1 ✅)。</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>    config validate 失败退 1;未知子动作退 2。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    if cmd == &quot;config&quot;:</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        return _config_cmd(positional, flags)</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    if cmd == &quot;budget&quot;:</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        return _budget_cmd(flags)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    if cmd == &quot;stats&quot;:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        return _stats_cmd(flags)</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>    if cmd == &quot;skill&quot;:</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        return _skill_cmd(positional, flags)</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>    return 2</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code></code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code></code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>def _config_cmd(positional: list[str], flags: dict) -&gt; int:</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    &quot;&quot;&quot;config init/validate/show(秘密只回显 env:/file: 引用,无 --show-secrets)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    sub = (positional or [&quot;show&quot;])[0]</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>    json_mode = bool(flags.get(&quot;json&quot;))</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>    if sub == &quot;validate&quot;:</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        errs = config.validate_only(flags.get(&quot;config&quot;))   # 非法 → 字段明细(TC-G2)</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        if errs:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            for line in errs:</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>                print(line)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>            return 1</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        print(&quot;ok&quot;)</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        return 0</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>    if sub == &quot;show&quot;:</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        settings = _load_settings(flags.get(&quot;config&quot;))</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        data = config.render_show(settings)</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        if json_mode:</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            _json_line(data)</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        else:</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>            for k in sorted(data):</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>                print(f&quot;{k} = {data[k]}&quot;)</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        return 0</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>    if sub == &quot;init&quot;:</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        path = Path(_target_cfg_path(flags)).expanduser()</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        if path.exists():</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>            print(f&quot;config 已存在:{path}(不覆盖;validate 查看健康度)&quot;)</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            return 0</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        path.parent.mkdir(parents=True, exist_ok=True)</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        import yaml</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        path.write_text(yaml.safe_dump(config.DEFAULTS, allow_unicode=True,</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                                       sort_keys=False),</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                        encoding=&quot;utf-8&quot;)</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        print(f&quot;已写入默认配置:{path}(密钥请改用 env:/file: 引用)&quot;)</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        return 0</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    print(f&quot;未知 config 子命令:{sub}(可用:init/validate/show)&quot;, file=sys.stderr)</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>    return 2</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code></code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code></code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>def main(argv: Optional[list[str]] = None) -&gt; int:</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    &quot;&quot;&quot;进程入口(console_scripts `pyharness`):事件循环只在这里创建;任何未捕获</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>    异常 → CYC-999 结构化到 stderr、退出 1。返回进程退出码。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>    try:</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        parsed = parse_args(argv if argv is not None else sys.argv[1:])</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        return asyncio.run(cli_main(parsed))</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>    except KeyboardInterrupt:</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        print(&quot;\n[interrupted] 已退出&quot;, file=sys.stderr)</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        return EXIT_INTERRUPT</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>    except _CancelledRound:                    # 信号→循环机制层透传的受控路径(偏离 10)</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        print(&quot;\n[已取消当前轮,再按 Ctrl-C 退出]&quot;, file=sys.stderr)</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        return EXIT_INTERRUPT</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>    except PyHError as e:                      # 引擎错误:带码退出(1)</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        _emit_error(e, json_mode=_args_json())</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        return 1</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>    except SystemExit:                         # argparse 用法错误(2)/--help(0)透传</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        raise</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    except Exception as e:                     # 未预期兜底,禁现场造码(CYC-999)</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        print(f&quot;CYC-999 {e!r}&quot;, file=sys.stderr)</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        log.debug(&quot;cli uncaught&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        return 1</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code></code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code></code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>async def cli_main(r: ParseResult) -&gt; int:</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>    &quot;&quot;&quot;分发总控(F064 验收直译):offline 命令不装配引擎直接跑;其余按子命令进</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>    bootstrap 后分发;desktop/acp 为长驻外壳交出其控制权。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>    if r.cmd not in CMD_TABLE:                 # 理论不可达(argparse 已拦)</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        raise_code(&quot;CYC-999&quot;, cmd=r.cmd, hint=&quot;未知子命令未被子命令解析拦截&quot;)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>    entry = CMD_TABLE[r.cmd]</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>    if entry.offline:                          # config/budget/stats:零装配</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        return offline_cmd(r.cmd, r.positional, r.flags)</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>    sh = await bootstrap_shell(r)              # 启动序 + repair 前置 + headless 判定</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>    try:</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        if r.cmd == &quot;chat&quot;:</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>            await _attach_engine(sh)           # 真实引擎:浅门面 → 可跑执行路径</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>            return await interactive_loop(sh, once=r.flags.get(&quot;once&quot;))</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        if r.cmd == &quot;run&quot;:</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>            text = await _run_text(sh, r.positional)</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>            if not text:</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>                raise_code(&quot;EVT-100&quot;, advice=&quot;run 需要任务文本(stdin 或参数)&quot;,</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>                           hint=&quot;用法:pyharness run \&quot;任务文本\&quot; 或管道喂入&quot;)</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>            await _attach_engine(sh)</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>            return await run_intent(sh, text, headless=sh.headless)</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        if r.cmd == &quot;repair&quot;:</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>            return await repair_cmd(sh, r.flags.get(&quot;session&quot;))    # F060 桥</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        if r.cmd == &quot;desktop&quot;:</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>            from pyharness.desktop import run_desktop     # F065 交权(惰性:同批任务)</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>            return await run_desktop(sh.ctx)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        if r.cmd == &quot;acp&quot;:</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>            from pyharness.desktop.sessions import DesktopSessionManager</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            sh.ctx.session = DesktopSessionManager(</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                dir=_sessions_path(sh.ctx.settings),</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>                bus=sh.ctx.bus, config=sh.ctx.settings)   # ACP 真会话门面</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            mod = __import__(&quot;pyharness.acp&quot;, fromlist=[&quot;serve&quot;, &quot;AcpBridge&quot;])</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>            serve = getattr(mod, &quot;serve&quot;, None)</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>            if serve is None:                            # AcpBridge 旧面兜底(偏离 7)</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                bridge = getattr(mod, &quot;AcpBridge&quot;)(sh.ctx, channel=&quot;acp:cli&quot;)</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>                return await bridge.serve()</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            return await serve(sh.ctx, client_id=&quot;acp:cli&quot;)</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>        # plan/schedule/job/search/session/fork:统一&quot;装配+执行+渲染&quot;单发路径</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        sh.ctx.handlers = _build_once_handlers(sh)</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        return await run_once_sub(sh, r.cmd, r.positional, r.flags)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>    finally:</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        await _flush_session(sh)               # 收尾落盘:普通事件攒批全量刷盘(F011)</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code></code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code></code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code></code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code></code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>def assemble_ctx(cfg: Any, *, session: Any = None) -&gt; SimpleNamespace:</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>    &quot;&quot;&quot;轻量门面装配(见偏离 11):settings/bus/session/task_queue/approval/shell</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>    (退出旗标)/storage/handlers(单发处理器注入面)。引擎脊柱八模块注入点保留,</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>    同批后续任务在此接线。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>    from pyharness.bus import EventBus, bus_kwargs_of</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>    bus = EventBus(**bus_kwargs_of(cfg))     # F005 背压阈值由装配层注入(N1)</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>    ns = SimpleNamespace(</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        settings=cfg,</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        bus=bus,</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        session=session,</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        task_queue=None,</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>        approval=None,</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        agent=None,</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        budget=None,</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        channel=None,</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        shell=_ExitFlag(),</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        render=None,</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        handlers={},                            # 引擎单发处理器注入面(run_once_sub)</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>        storage=SimpleNamespace(</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>            sessions_dir=Path(cfg.storage.sessions_dir).expanduser(),</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>            db_path=Path(cfg.storage.db_path).expanduser()),</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>    )</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>    if session is not None:</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        _wire_queue(ns)</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>    return ns</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code></code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code></code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>async def bootstrap_shell(r: ParseResult) -&gt; ShellCtx:</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>    &quot;&quot;&quot;启动序 + headless 判定:config → ctx 装配 →(repair 前置:显式 --session 或</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>    自检命中)→ 会话开/建 → channel 注入(stdin.isatty() 且 cmd∈{chat,plan} →</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>    &quot;cli&quot;,否则 None=headless,R8 安全默认)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>    cfg = _load_settings(r.flags.get(&quot;config&quot;))     # CFG-601 失败即中止,不装配</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>    sessions_dir = _sessions_path(cfg)</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>    sid: Optional[str] = r.flags.get(&quot;session&quot;)</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>    cmd = r.cmd</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>    ctx: SimpleNamespace = assemble_ctx(cfg)</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code></code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>    # 会话解析:chat/run 无 --session → 启动自检(F060)命中损坏则修复续跑,否则新建;</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>    # chat/run/plan 显式 --session → 缺日志 EVT-106 守卫 + 损坏先修再 open(幂等);</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>    # 其余命令(repair/desktop/acp/引擎单发)不预开会话,由各自处理器按需装配。</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>    if sid is None and cmd in {&quot;chat&quot;, &quot;run&quot;}:</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>        bad = await _scan_unhealthy(sessions_dir, cfg=cfg)  # repair 模块未装配时跳过</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>        if bad is not None:</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>            sid = bad                               # 命中损坏会话 → 修复并续跑</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>    if sid is not None and cmd in {&quot;chat&quot;, &quot;run&quot;, &quot;plan&quot;}:</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>        path = sessions_dir / f&quot;{sid}.jsonl&quot;</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>        if not path.exists():</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>            raise_code(&quot;EVT-106&quot;, sid=sid,</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>                       hint=&quot;会话不存在(日志缺失);先 `session list` 确认 sid,&quot;</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>                            &quot;或省略 --session 开启新会话&quot;)</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        await _ensure_repair(ctx, sid)              # 损坏先修再 open(F060)</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        ctx.session = await _open_log(cfg, sid, ctx.bus)</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>        _wire_queue(ctx)</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>    elif sid is None and cmd in {&quot;chat&quot;, &quot;run&quot;}:</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        # 新建会话:run/chat 是会话产生者(引擎后续只在已开会话上跑任务)</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>        ctx.session = await _new_session(cfg, ctx.bus)</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>        _wire_queue(ctx)</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code></code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>    interactive_cmd = cmd in INTERACTIVE_CMDS and not r.flags.get(&quot;once&quot;)</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>    headless = not (sys.stdin.isatty() and interactive_cmd)</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>    ctx.channel = None if headless else &quot;cli&quot;       # R8:无通道即安全默认</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>    return ShellCtx(ctx=ctx, loop=asyncio.get_running_loop(),</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>                    channel=ctx.channel, headless=headless, flags=r.flags)</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code></code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code></code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>def install_two_stage_sigint(sh: ShellCtx) -&gt; dict:</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>    &quot;&quot;&quot;两段式 SIGINT:第 1 次置位并 raise _CancelledRound(取消当前轮);第 2 次</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>    SystemExit(130)。Windows 同语义(禁 SIGKILL);返回 state 供测试取 handler。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>    state: dict[str, Any] = {&quot;armed&quot;: False}</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code></code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>    def handler(signum: int, frame: Any) -&gt; None:</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>        if not state[&quot;armed&quot;]:</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>            state[&quot;armed&quot;] = True</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>            print(&quot;\n[Ctrl-C] 再按一次退出(取消当前轮)&quot;, file=sys.stderr)</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>            raise _CancelledRound()</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        raise SystemExit(EXIT_INTERRUPT)</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code></code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>    try:</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>        signal.signal(signal.SIGINT, handler)</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>    except (ValueError, OSError):                  # 非主线程/平台限制:降级不装</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>        log.warning(&quot;SIGINT handler 安装失败(非主线程?),Ctrl-C 语义降级&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>    state[&quot;handler&quot;] = handler</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>    return state</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code></code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code></code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>def _shell_exit_code(sh: ShellCtx) -&gt; Optional[int]:</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>    &quot;&quot;&quot;ctx.shell 退出旗标读取(commands.cmd_exit 置位后消费)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>    shell = getattr(sh.ctx, &quot;shell&quot;, None)</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>    code = getattr(shell, &quot;exit_code&quot;, None) if shell is not None else None</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>    return code if code is not None else None</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code></code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code></code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>async def interactive_loop(sh: ShellCtx, *, once: Any = False) -&gt; int:</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>    &quot;&quot;&quot;chat 交互主循环:多行输入(`\\` 续行)、斜杠命令交 handle_slash(零 LLM)、</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>    普通文本交 task_queue.submit 并流式渲染、审批交互弹提示;Ctrl-C 一次取消当前</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>    轮、两次退出(130);once 真值 = 单轮即返(--once 非交互注入,见偏离 6)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>    state = install_two_stage_sigint(sh)</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>    once_round = bool(once)</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>    while True:</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>        try:</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>            raw = await read_user_input(sh, once=once_round)</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>            if raw is None:                          # EOF(Ctrl-D)→ 退出 0</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>                return 0</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>            if raw.startswith(&quot;/&quot;):                  # 斜杠:不给 LLM 的控制通道(F041)</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>                cont = await commands.handle_slash(raw, sh.ctx)</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>                code = _shell_exit_code(sh)</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>                if code is not None:                 # /exit 经 ctx.shell 置位</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>                    return code</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>                if not cont:                         # 兼容旧面 false=退出</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>                    return 0</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>                if once_round:</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>                    return 0</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>                continue</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>            await _submit_wait_report(sh, raw)       # 文本意图:入队+渲染+终态</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>            if once_round:</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>                return 0                             # 单轮模式:处理完一轮即返</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>        except _CancelledRound:</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>            state[&quot;armed&quot;] = False                   # 重布防:下一轮再按 = 取消该轮</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>            print(&quot;\n[已取消当前轮,再按 Ctrl-C 退出]&quot;, file=sys.stderr)</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>            continue                                 # 回循环顶(等价伪码递归,见偏离 5)</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>        except PyHError as e:                        # 引擎错误回显后回循环(交互韧性)</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>            _emit_error(e, json_mode=bool(sh.flags.get(&quot;json&quot;)))</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>            continue</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>        except KeyboardInterrupt:                    # 兜底(信号未达 handler 的路径)</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>            return EXIT_INTERRUPT</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code></code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code></code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>async def _submit_wait_report(sh: ShellCtx, raw: str) -&gt; None:</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>    &quot;&quot;&quot;一轮文本意图:submit → 订阅渲染 → wait_for 终态;失败摘要回显(引擎装配后</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>    事件由渲染器呈现,此处只兜终态失败)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>    q = getattr(sh.ctx, &quot;task_queue&quot;, None)</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>    if q is None:</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>        raise_code(&quot;CYC-999&quot;, hint=&quot;任务队列未装配(runner 注入点待引擎装配)&quot;)</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>    meta = {&quot;channel&quot;: sh.ctx.channel or &quot;headless&quot;}</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>    session = getattr(sh.ctx, &quot;session&quot;, None)</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>    if session is not None:</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>        await session.append(</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>            &quot;user.message&quot;, {&quot;content&quot;: raw}, actor=&quot;user&quot;, origin=&quot;cli&quot;,</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>            sync=True)</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>    task_id = await q.submit(raw, meta=meta)</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>    res = await _wait_and_render(sh, task_id)</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>    if res is not None and not _result_ok(res):</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>        _emit_plain(f&quot;[任务失败] {_result_code(res) or &#x27;CYC-999&#x27;}&quot;</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>                    f&quot; {_result_summary(res)}&quot;, err=True)</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code></code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code></code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>async def read_user_input(sh: ShellCtx, *, once: bool = False) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>    &quot;&quot;&quot;多行读取 + once 直通:once → --once 文本或管道全文;stdin 非 tty → 整读</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code>    一次性消费(headless run/chat 语义);tty → 逐行,行尾 `\\` 续行,空输入重提示;</code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>    EOF(Ctrl-D) → None。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>    if once:</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>        txt = sh.flags.get(&quot;once&quot;) or sys.stdin.read()</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>        return (txt or &quot;&quot;).strip() or None</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>    if not sys.stdin.isatty():</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>        data = sys.stdin.read()</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>        return data.strip() or None                  # headless 一次性消费</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>    lines: list[str] = []</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>    json_mode = bool(sh.flags.get(&quot;json&quot;))</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>    while True:</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>        _write_prompt(sh, json_mode=json_mode)</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>        try:</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>            line = await asyncio.to_thread(input, &quot;&quot;)</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>        except EOFError:</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>            return None                              # Ctrl-D:净退</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>        except KeyboardInterrupt:</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code>            raise                                    # 两段式向上冒泡(130)</code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code>        if not line:</code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>            if not lines:</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>                continue                             # 空输入重提示</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>            break                                    # 续行中空行 = 提交</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>        if line.endswith(&quot;\\&quot;):</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>            lines.append(line[:-1])                  # 续行:去尾 \ 拼接</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code>            continue</code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>        lines.append(line)</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>        break</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code>    return &quot;\n&quot;.join(lines).strip() or None</code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code></code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code></code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>def _write_prompt(sh: ShellCtx, *, json_mode: bool) -&gt; None:</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>    &quot;&quot;&quot;提示符出口:json 模式人类提示禁入 stdout,改走 stderr(机器流纯净)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>    print(PROMPT, end=&quot;&quot;, flush=True,</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>          file=sys.stderr if json_mode else sys.stdout)</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code></code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code></code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code></code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code></code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>async def run_intent(sh: ShellCtx, text: str, *, headless: bool) -&gt; int:</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>    &quot;&quot;&quot;run 单发任务:无人值守单轮 submit → 阻塞至终态 → 报告结果/拒绝清单;</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code>    headless 下 channel=None 使审批自动拒(APR-501)与 critical 直拒(GRD-401)</code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code>    天然生效(R8)。返回 0/1。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code>    if not text:</code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code>        raise_code(&quot;EVT-100&quot;, advice=&quot;run 需要任务文本(stdin 或参数)&quot;,</code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code>                   hint=&quot;用法:pyharness run \&quot;任务文本\&quot; 或管道喂入&quot;)</code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code>    sh.ctx.channel = None if headless else &quot;cli&quot;     # 无审批通道即安全默认(R8)</code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code>    q = getattr(sh.ctx, &quot;task_queue&quot;, None)</code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code>    if q is None:</code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code>        raise_code(&quot;CYC-999&quot;, hint=&quot;任务队列未装配(runner 注入点待引擎装配)&quot;)</code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>    session = getattr(sh.ctx, &quot;session&quot;, None)</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code>    if session is not None:</code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code>        await session.append(</code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>            &quot;user.message&quot;, {&quot;content&quot;: text}, actor=&quot;user&quot;, origin=&quot;cli&quot;,</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>            sync=True)</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code>    task_id = await q.submit(text, meta={&quot;channel&quot;: sh.ctx.channel})</code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code>    res = await _wait_and_render(sh, task_id)</code></div>
+<div class="code-line" id="L507"><a class="line-number" href="#L507">507</a><code>    rejected = _rejected_list(res)                   # guard.rejected 拒绝明细(G4)</code></div>
+<div class="code-line" id="L508"><a class="line-number" href="#L508">508</a><code>    if sh.flags.get(&quot;json&quot;):</code></div>
+<div class="code-line" id="L509"><a class="line-number" href="#L509">509</a><code>        _json_line({&quot;task_id&quot;: task_id,</code></div>
+<div class="code-line" id="L510"><a class="line-number" href="#L510">510</a><code>                    &quot;result&quot;: {&quot;summary&quot;: _result_summary(res),</code></div>
+<div class="code-line" id="L511"><a class="line-number" href="#L511">511</a><code>                               &quot;code&quot;: _result_code(res) or None,</code></div>
+<div class="code-line" id="L512"><a class="line-number" href="#L512">512</a><code>                               &quot;reason&quot;: _result_reason(res) or None},</code></div>
+<div class="code-line" id="L513"><a class="line-number" href="#L513">513</a><code>                    &quot;rejected&quot;: [str(r) for r in rejected]})</code></div>
+<div class="code-line" id="L514"><a class="line-number" href="#L514">514</a><code>    else:</code></div>
+<div class="code-line" id="L515"><a class="line-number" href="#L515">515</a><code>        print(_result_summary(res))</code></div>
+<div class="code-line" id="L516"><a class="line-number" href="#L516">516</a><code>        for r in rejected:                           # 拒绝清单逐条(含 headless 拒)</code></div>
+<div class="code-line" id="L517"><a class="line-number" href="#L517">517</a><code>            print(f&quot;[拒绝] {r}&quot;)</code></div>
+<div class="code-line" id="L518"><a class="line-number" href="#L518">518</a><code>    reason = _result_reason(res)</code></div>
+<div class="code-line" id="L519"><a class="line-number" href="#L519">519</a><code>    if reason in {&quot;complete&quot;, &quot;cancelled_by_user&quot;}:</code></div>
+<div class="code-line" id="L520"><a class="line-number" href="#L520">520</a><code>        return 0</code></div>
+<div class="code-line" id="L521"><a class="line-number" href="#L521">521</a><code>    if _result_ok(res):</code></div>
+<div class="code-line" id="L522"><a class="line-number" href="#L522">522</a><code>        return 0</code></div>
+<div class="code-line" id="L523"><a class="line-number" href="#L523">523</a><code>    return 1                                         # 引擎错误终态(reason=error)</code></div>
+<div class="code-line" id="L524"><a class="line-number" href="#L524">524</a><code></code></div>
+<div class="code-line" id="L525"><a class="line-number" href="#L525">525</a><code></code></div>
+<div class="code-line" id="L526"><a class="line-number" href="#L526">526</a><code>async def run_once_sub(sh: ShellCtx, cmd: str, positional: list[str],</code></div>
+<div class="code-line" id="L527"><a class="line-number" href="#L527">527</a><code>                       flags: dict) -&gt; int:</code></div>
+<div class="code-line" id="L528"><a class="line-number" href="#L528">528</a><code>    &quot;&quot;&quot;plan/schedule/job/search/session/fork 统一单发路径:经 ctx.handlers 注入的</code></div>
+<div class="code-line" id="L529"><a class="line-number" href="#L529">529</a><code>    引擎侧处理器(装配面;specs/cli.py.md run_once_sub 伪码未展开,外壳只做分发与</code></div>
+<div class="code-line" id="L530"><a class="line-number" href="#L530">530</a><code>    参数透传——见模块 docstring 偏离 11/12)。未装配 → CYC-999 明确报错不静默。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L531"><a class="line-number" href="#L531">531</a><code>    handlers = getattr(sh.ctx, &quot;handlers&quot;, None) or {}</code></div>
+<div class="code-line" id="L532"><a class="line-number" href="#L532">532</a><code>    fn = handlers.get(cmd)</code></div>
+<div class="code-line" id="L533"><a class="line-number" href="#L533">533</a><code>    if fn is None:</code></div>
+<div class="code-line" id="L534"><a class="line-number" href="#L534">534</a><code>        raise_code(&quot;CYC-999&quot;, cmd=cmd,</code></div>
+<div class="code-line" id="L535"><a class="line-number" href="#L535">535</a><code>                   detail=f&quot;引擎单发处理器未装配(handlers.{cmd} 注入点保留;&quot;</code></div>
+<div class="code-line" id="L536"><a class="line-number" href="#L536">536</a><code>                          f&quot;依赖引擎装配层,同批后续落地)&quot;)</code></div>
+<div class="code-line" id="L537"><a class="line-number" href="#L537">537</a><code>    res = fn(sh, positional, flags)</code></div>
+<div class="code-line" id="L538"><a class="line-number" href="#L538">538</a><code>    if hasattr(res, &quot;__await__&quot;):</code></div>
+<div class="code-line" id="L539"><a class="line-number" href="#L539">539</a><code>        res = await res</code></div>
+<div class="code-line" id="L540"><a class="line-number" href="#L540">540</a><code>    return int(res) if res is not None else 0</code></div>
+<div class="code-line" id="L541"><a class="line-number" href="#L541">541</a><code></code></div>
+<div class="code-line" id="L542"><a class="line-number" href="#L542">542</a><code></code></div>
+<div class="code-line" id="L543"><a class="line-number" href="#L543">543</a><code>def _build_once_handlers(sh: ShellCtx) -&gt; dict:</code></div>
+<div class="code-line" id="L544"><a class="line-number" href="#L544">544</a><code>    &quot;&quot;&quot;真实单发处理器表(plan/schedule/job/search/session/fork)。</code></div>
+<div class="code-line" id="L545"><a class="line-number" href="#L545">545</a><code></code></div>
+<div class="code-line" id="L546"><a class="line-number" href="#L546">546</a><code>    此前 handlers 留空导致 5 个 once 子命令一律 CYC-999;这里把已有模块</code></div>
+<div class="code-line" id="L547"><a class="line-number" href="#L547">547</a><code>    (session_query/plan_mode/schedule/jobs)以只读/管理命令面接进 CLI。</code></div>
+<div class="code-line" id="L548"><a class="line-number" href="#L548">548</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L549"><a class="line-number" href="#L549">549</a><code>    return {</code></div>
+<div class="code-line" id="L550"><a class="line-number" href="#L550">550</a><code>        &quot;search&quot;: _cmd_search,</code></div>
+<div class="code-line" id="L551"><a class="line-number" href="#L551">551</a><code>        &quot;session&quot;: _cmd_session,</code></div>
+<div class="code-line" id="L552"><a class="line-number" href="#L552">552</a><code>        &quot;fork&quot;: _cmd_fork,</code></div>
+<div class="code-line" id="L553"><a class="line-number" href="#L553">553</a><code>        &quot;job&quot;: _cmd_job,</code></div>
+<div class="code-line" id="L554"><a class="line-number" href="#L554">554</a><code>        &quot;schedule&quot;: _cmd_schedule,</code></div>
+<div class="code-line" id="L555"><a class="line-number" href="#L555">555</a><code>        &quot;plan&quot;: _cmd_plan,</code></div>
+<div class="code-line" id="L556"><a class="line-number" href="#L556">556</a><code>        &quot;workflow&quot;: _cmd_workflow,</code></div>
+<div class="code-line" id="L557"><a class="line-number" href="#L557">557</a><code>    }</code></div>
+<div class="code-line" id="L558"><a class="line-number" href="#L558">558</a><code></code></div>
+<div class="code-line" id="L559"><a class="line-number" href="#L559">559</a><code></code></div>
+<div class="code-line" id="L560"><a class="line-number" href="#L560">560</a><code></code></div>
+<div class="code-line" id="L561"><a class="line-number" href="#L561">561</a><code></code></div>
+<div class="code-line" id="L562"><a class="line-number" href="#L562">562</a><code></code></div>
+<div class="code-line" id="L563"><a class="line-number" href="#L563">563</a><code></code></div>
+<div class="code-line" id="L564"><a class="line-number" href="#L564">564</a><code></code></div>
+<div class="code-line" id="L565"><a class="line-number" href="#L565">565</a><code></code></div>
+<div class="code-line" id="L566"><a class="line-number" href="#L566">566</a><code></code></div>
+<div class="code-line" id="L567"><a class="line-number" href="#L567">567</a><code></code></div>
+<div class="code-line" id="L568"><a class="line-number" href="#L568">568</a><code>__all__ = [</code></div>
+<div class="code-line" id="L569"><a class="line-number" href="#L569">569</a><code>    # 数据结构</code></div>
+<div class="code-line" id="L570"><a class="line-number" href="#L570">570</a><code>    &quot;ParseResult&quot;, &quot;ShellCtx&quot;, &quot;ExitResult&quot;, &quot;StreamRenderer&quot;, &quot;CmdEntry&quot;,</code></div>
+<div class="code-line" id="L571"><a class="line-number" href="#L571">571</a><code>    &quot;CMD_TABLE&quot;, &quot;_CancelledRound&quot;,</code></div>
+<div class="code-line" id="L572"><a class="line-number" href="#L572">572</a><code>    # 函数清单(contract 面)</code></div>
+<div class="code-line" id="L573"><a class="line-number" href="#L573">573</a><code>    &quot;main&quot;, &quot;parse_args&quot;, &quot;cli_main&quot;, &quot;bootstrap_shell&quot;, &quot;interactive_loop&quot;,</code></div>
+<div class="code-line" id="L574"><a class="line-number" href="#L574">574</a><code>    &quot;read_user_input&quot;, &quot;run_intent&quot;, &quot;offline_cmd&quot;, &quot;repair_cmd&quot;,</code></div>
+<div class="code-line" id="L575"><a class="line-number" href="#L575">575</a><code>    &quot;_render_events&quot;, &quot;prompt_approval&quot;, &quot;install_two_stage_sigint&quot;,</code></div>
+<div class="code-line" id="L576"><a class="line-number" href="#L576">576</a><code>    &quot;exit_code_for&quot;, &quot;assemble_ctx&quot;, &quot;run_once_sub&quot;, &quot;_run_text&quot;,</code></div>
+<div class="code-line" id="L577"><a class="line-number" href="#L577">577</a><code>]</code></div>
+<div class="code-line" id="L578"><a class="line-number" href="#L578">578</a><code></code></div>
+<div class="code-line" id="L579"><a class="line-number" href="#L579">579</a><code></code></div>
+<div class="code-line" id="L580"><a class="line-number" href="#L580">580</a><code>async def _cmd_plan(sh: ShellCtx, positional: list[str], flags: dict) -&gt; int:</code></div>
+<div class="code-line" id="L581"><a class="line-number" href="#L581">581</a><code>    return await _plan_command(sh, positional, flags, new_session=_new_session, attach_engine=_attach_engine)</code></div>
+<div class="code-line" id="L582"><a class="line-number" href="#L582">582</a><code></code></div>
+<div class="code-line" id="L583"><a class="line-number" href="#L583">583</a><code></code></div>
+<div class="code-line" id="L584"><a class="line-number" href="#L584">584</a><code>async def _cmd_workflow(sh: ShellCtx, positional: list[str], flags: dict) -&gt; int:</code></div>
+<div class="code-line" id="L585"><a class="line-number" href="#L585">585</a><code>    return await _workflow_command(sh, positional, flags, new_session=_new_session, attach_engine=_attach_engine)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

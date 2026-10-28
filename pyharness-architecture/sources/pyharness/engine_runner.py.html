@@ -1,0 +1,386 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/engine_runner.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/engine_runner.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 386 行</span></nav><main class="wrap source-page"><h1>pyharness/engine_runner.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：673f6ed26f7bf54569f093d4531c0b1506110a3e<br>SHA-256（内容校验）：86b088e65c53a657c5346a54117a19a3b0eb13563a0331af7bc77a133a68aa2e</p><p><a href="../../architecture-detailed.html?node=agent">Agent Lifecycle（代理生命周期）</a> · <a href="../../architecture-detailed.html?node=task_runner">Task Runner Adapter（任务运行适配器）</a> · <a href="../../architecture-detailed.html?node=spill_kv">Session Spill and Key Value Storage（会话长输出与键值存储）</a> · <a href="../../architecture-detailed.html?node=evidence">Governance Evidence（治理证据引用归档）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 12 个类、函数与方法</summary><ul><li><a href="#L16">_owned_task_message（函数） · L16–L40</a></li><li><a href="#L42">make_runner（函数） · L42–L151</a><ul><li><a href="#L52">make_runner.run_for_task（异步方法） · L52–L143</a></li><li><a href="#L145">make_runner.cancel_current（异步方法） · L145–L148</a></li></ul></li><li><a href="#L153">archive_task_evidence（异步函数） · L153–L231</a></li><li><a href="#L233">_terminal_state_of（函数） · L233–L248</a></li><li><a href="#L250">_evidence_producer（函数） · L250–L270</a><ul><li><a href="#L263">_evidence_producer._on_segment_end（异步方法） · L263–L269</a></li></ul></li><li><a href="#L272">_turn_source_of（函数） · L272–L282</a></li><li><a href="#L284">_agent_ctx_of（异步函数） · L284–L299</a></li><li><a href="#L301">_activate_storage_caps（异步函数） · L301–L335</a></li><li><a href="#L337">_activate_session_caps（异步函数） · L337–L386</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Engine runner: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import asyncio</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from typing import Any, Optional, TYPE_CHECKING</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.core.task_runner import TaskLifecycle</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>if TYPE_CHECKING:</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    pass</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.core.agent import create_agent</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pyharness.engine_types import EngineRunner, EngineSpine, log</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from pyharness.engine_plugins import _cfg_of, _preload_plugins</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>def _owned_task_message(log_: Any, task: Any) -&gt; Optional[Any]:</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    &quot;&quot;&quot;严格归属窗口:取 (上一个 task.enqueued, 本任务 enqueued] 内最后一条 user.message。</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    修复(P1-1):旧实现取&quot;enqueued 之前最后一条 user.message&quot;,会把 plan 步骤的</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    /plan 旧消息顶给步骤执行(plan_mode 提交纯意图,不落 user.message),并发下还</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    会让 schedule 任务拿到前台消息。窗口为空(纯意图任务)→ None,由调用方按</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    task.intent 补写信号消息。只读遍历事件源,零副作用。</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    mark = int(getattr(task, &quot;enqueued_seq&quot;, 0) or 0)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    if mark &lt;= 0:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        return None</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    prev_enq = 0</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    env = None</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    for e in log_.events_after(0):</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        seq = int(getattr(e, &quot;seq&quot;, 0) or 0)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        if seq &gt; mark:</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>            break</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        if e.type == &quot;task.enqueued&quot;:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            if seq &lt; mark:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                prev_enq = seq</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>                env = None                      # 新窗口:清空旧归属(前窗口消息不复用)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>            continue                             # 本任务自身 enqueued:非消息</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        if e.type == &quot;user.message&quot; and seq &gt; prev_enq:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            env = e</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    return env</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>def make_runner(spine: EngineSpine, *, preload_plugins=_preload_plugins) -&gt; EngineRunner:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    &quot;&quot;&quot;task_queue runner seam:async run_for_task(task) → loop.wake(env)。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    task 的配套 user.message 已由 schedule.trigger/前台 submit 落盘(seq 已知);</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    经严格归属窗口从事件源找该 envelope,窗口为空则按 task.intent 补写,交</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    loop.wake 驱动真实处理。</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    log_ = spine.session</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    loop = spine.loop</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code></code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    async def run_for_task(task: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        # GAP-13:攒批落盘定时器惰性启动(幂等)。放在此处而非装配段,是因为装配</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        # 段是同步函数、且此时可能尚无运行中的事件循环——本 seam 是 chat/run 的</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        # 唯一生产驱动点,循环必已就绪。</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        try:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            await spine.start_flush_ticker()</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        except Exception as e:                 # noqa: BLE001 定时器起不来不阻断任务</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            log.warning(&quot;flush ticker 启动失败: %s&quot;, type(e).__name__)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        # 懒预载:created 已落后首跑前装载示例插件(util.now;EVT-106 首事件</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        # 约束 → 不可在 open_session 后立即 append,故延迟到 submit 时刻)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        if not getattr(spine, &quot;_plugins_ready&quot;, False):</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            try:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                await preload_plugins(spine)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            except Exception as e:             # noqa: BLE001 预载失败不阻断</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                log.debug(&quot;plugin lazy preload failed: %s&quot;, type(e).__name__)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            spine._plugins_ready = True</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        # 装配期策略留痕(F-01):**必须在 session.created 之后**发射——装配函数</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        # (_build_governance/activate_orchestration)运行时 seq=0,直接 append 会被</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        # EVT-106 拒(&quot;事件须在 session.created 之后&quot;)并让整个装配抛出。本处是</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        # 生产唯一驱动点(chat/run 均经 task_queue → 本 seam),此时会话已开启。</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        # 幂等闸保证每 spine 恰一条;发射失败不阻断任务(与上方插件预载同款)。</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        if not getattr(spine, &quot;_policy_announced&quot;, False):</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            _pol = getattr(getattr(spine, &quot;governance&quot;, None), &quot;policy&quot;, None)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            if _pol is not None:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                try:</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                    await _pol.emit_assembled(reason=&quot;assembly&quot;)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                except Exception as e:         # noqa: BLE001 治理留痕失败不阻断任务</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                    log.warning(&quot;policy.updated 装配留痕失败: %s&quot;, type(e).__name__)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            spine._policy_announced = True</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        # 崩溃遗留 job 的**事件级**恢复(B1/R24):补写 `job.failed(reason=crash)`。</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        # 放在本 seam(而非装配期):装配期 seq=0,append 会被 EVT-106 拒;此处是生产</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        # 唯一驱动点且会话已开启 —— 与上方策略留痕同款。幂等闸保证每 spine 恰一次;</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        # 失败只记日志不阻断任务(恢复属收尾)。</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        if not getattr(spine, &quot;_jobs_recovered&quot;, False):</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            jobs = getattr(spine, &quot;jobs&quot;, None)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            rec = getattr(jobs, &quot;recover&quot;, None)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            if callable(rec):</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                try:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                    await rec()</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                except Exception as e:             # noqa: BLE001 恢复失败不阻断</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                    log.warning(&quot;job 崩溃恢复失败: %s&quot;, type(e).__name__)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            spine._jobs_recovered = True</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        intent = str(getattr(task, &quot;intent&quot;, &quot;&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        env = _owned_task_message(log_, task)   # 严格归属窗口(P1-1)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        if env is None and intent:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            # 窗口内无配套 user.message(plan 步等纯意图任务):意图本身即待执行</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            # 指令,按 schedule 前例落 user.message(system 署名)驱动循环——</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            # 提交者不落 message 则 agent 无从 derive 到该任务(schedule._fire 同款)。</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            env = await log_.append(&quot;user.message&quot;, {&quot;content&quot;: intent},</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                                    actor=&quot;system&quot;,</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                                    origin=f&quot;task:{getattr(task, &#x27;id&#x27;, &#x27;&#x27;)}&quot;,</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                                    task_id=getattr(task, &quot;id&quot;, None),</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                                    sync=True)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        if env is None:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            raise PyHError(&quot;CYC-999&quot;, ctx={&quot;hint&quot;: &quot;runner 找不到对应 user.message 事件&quot;})</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        ag_ctx = await _agent_ctx_of(spine, env)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        # 当前任务关联(F044 弱耦合字符串引用;2026-09-21 R11-6 修):</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        # goal/todo 工具与 llm.chunk 出口经 ``ctx.task_id`` 取&quot;当前任务&quot;,而此前</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        # **全库无任何写入点** ⇒ 恒 None ⇒ ``goal`` 的&quot;所关联任务失败 → 目标状态</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        # 推导&quot;(goal.py:357)与&quot;关联任务&quot;渲染**从未生效**。任务在同一会话内串行</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        # (单 running),故按任务边界设置/清除安全;每个会话(含子会话)各自持 ctx,</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        # 不跨会话串。异常/取消路径经 finally 还原。</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        prev_task_id = getattr(ag_ctx, &quot;task_id&quot;, None)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        ag_ctx.task_id = getattr(task, &quot;id&quot;, None)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        # KF-C(A4/R24):把**框架侧**&quot;本轮来源&quot;提到 ctx —— 到点触发那一轮此前**无任何</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        # 通道**告知模型&quot;这是定时触发&quot; ⇒ 模型只会复述任务状态(&quot;提醒已设好&quot;),而不是</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        # 产出提醒本身。取值只取 `task.meta.source`(**受控**:由 schedule._fire 写入),</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        # 不取任何模型/工具文本(注入防御);由 system_prompt 的受控段渲染。</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        prev_src = getattr(ag_ctx, &quot;turn_source&quot;, None)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        ag_ctx.turn_source = _turn_source_of(task)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        try:</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            lifecycle: TaskLifecycle | None = getattr(spine, &#x27;task_lifecycle&#x27;, None)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            if lifecycle is None:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                res = await loop.wake(env, ctx=ag_ctx)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>            else:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                res = await lifecycle.run_task(env, ag_ctx, lambda: loop.wake(env, ctx=ag_ctx))</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        finally:</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            ag_ctx.task_id = prev_task_id</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            ag_ctx.turn_source = prev_src</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        # F042/#7 自动标题:run 正常完成后命名一次(幂等;LLM 失败静默留空)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        if (res is not None and getattr(res, &quot;reason&quot;, &quot;&quot;) == &quot;complete&quot;</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                and not getattr(spine, &quot;_auto_titled&quot;, False)):</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            try:</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                from pyharness.core.auto_title import auto_title</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                if await auto_title(ag_ctx):</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                    spine._auto_titled = True</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            except Exception as e:             # noqa: BLE001 命名失败不阻断对话</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                log.debug(&quot;auto_title failed: %s&quot;, type(e).__name__)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        # 证据归档**不在此处**:触发点已移到段生命周期(segment.end 订阅,见</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        # ``_evidence_producer``)。原因:本函数在五种终态中的三种(异常/预算/取消)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        # 不执行到收尾,放这里会漏归档;且此处早于段关闭(旧 N3)。</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        return res</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    async def cancel_current(task_id: Optional[str] = None) -&gt; None:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        cur = loop.current</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        if cur is not None:</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            cur.cancelled = True</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>            # 协作式:由 loop 轮内 CancelledError 传播收尾</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    return EngineRunner(run_for_task=run_for_task,</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>                        cancel_current=cancel_current)</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code></code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>async def archive_task_evidence(spine: EngineSpine, task_id: str,</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                                ctx: Any = None) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    &quot;&quot;&quot;任务段治理证据归档——``EvidenceCollector`` 的**生产生产者**(GAP-8)。</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code></code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>    修复前:``EvidenceCollector`` 已订阅真总线(4 类事件),但**唯一写点**</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    ``archive()`` 在全库**零调用** ⇒ ``evidence.archived`` 永不产生、索引恒空、</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    ``collect_for_task()`` 恒返回 ``()``。</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code></code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    **产生规则(冻结)**——这是一个**设计裁定**,不是&quot;为了有调用点而调用&quot;:</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code></code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    1. **单位 = 任务段**(``task_id``)。段是回放/复算/预算审计的最小单位(F044),</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>       也正是 ``collect_for_task`` 的聚合键;证据按段组织才有查询语义。</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    2. **触发条件 = 段内至少一条 ``decision.issued``**。治理证据回答的是&quot;这次</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>       授权/拒绝发生在什么上下文、依据什么、能否复核&quot;,没有治理决策的段**不归档**</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>       ——&quot;不发生&quot;与&quot;失败&quot;是两件事,不为空段造工件。</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    3. **只存引用,不复制事件内容**(INV-G4/E1):refs 指向段锚 + 段内每条决策</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>       (``decision_id``)与凭证(``receipt_id``)。事件日志仍是唯一真源。</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    4. **幂等**:同一 ``task_id`` 只归档一次——判据取自**日志重放**(已存在指向该</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>       段锚的 ``evidence.archived`` 即跳过),故**重启后重放同样成立**,不依赖内存。</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    5. **降级**:治理层未接线(纯内存/单测)、无段锚、引用构造失败 ⇒ 静默跳过,</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>       绝不阻断任务(证据是派生视图,不是主链前提)。</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code></code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    返回 ``evidence_id``;未归档(不满足条件)返回 ``None``。</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    log_ = getattr(spine, &quot;session&quot;, None)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>    coll = getattr(getattr(spine, &quot;governance&quot;, None), &quot;evidence&quot;, None)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    if log_ is None or coll is None:</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        return None</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    try:</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        events = list(log_.events_after(0))</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        seg_locator = f&quot;{task_id}:seg&quot;</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        # ① 幂等闸:日志重放判定(重启后仍成立)</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        for e in events:</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>            if getattr(e, &quot;type&quot;, None) != &quot;evidence.archived&quot;:</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                continue</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            for r in (getattr(e, &quot;payload&quot;, None) or {}).get(&quot;refs&quot;) or []:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                if (isinstance(r, dict) and r.get(&quot;kind&quot;) == &quot;segment&quot;</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                        and str(r.get(&quot;locator&quot;)) == seg_locator):</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                    return None</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        # ② 段窗口:本任务 segment.start 之后的全部事件属该段</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        start = next((int(e.seq) for e in events</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                      if getattr(e, &quot;type&quot;, None) == &quot;segment.start&quot;</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                      and str((getattr(e, &quot;payload&quot;, None) or {})</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                              .get(&quot;task_id&quot;) or &quot;&quot;) == str(task_id)), None)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        if start is None:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            return None</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        seg = [e for e in events if int(getattr(e, &quot;seq&quot;, 0) or 0) &gt;= start]</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        decisions = [e for e in seg</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                     if getattr(e, &quot;type&quot;, None) == &quot;decision.issued&quot;]</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        if not decisions:</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            return None                       # 无治理事实:不归档(非失败)</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        receipts = [e for e in seg</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                    if getattr(e, &quot;type&quot;, None) == &quot;receipt.emitted&quot;]</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        denied = [d for d in decisions</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                  if str((getattr(d, &quot;payload&quot;, None) or {})</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                         .get(&quot;verdict&quot;) or &quot;&quot;) == &quot;reject&quot;]</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        refs: list[dict] = [{&quot;kind&quot;: &quot;segment&quot;, &quot;locator&quot;: seg_locator}]</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        refs += [{&quot;kind&quot;: &quot;decision_id&quot;,</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>                  &quot;locator&quot;: str((getattr(d, &quot;payload&quot;, None) or {})</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                                 .get(&quot;decision_id&quot;) or &quot;&quot;)}</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>                 for d in decisions]</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        refs += [{&quot;kind&quot;: &quot;receipt_id&quot;,</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>                  &quot;locator&quot;: str((getattr(r, &quot;payload&quot;, None) or {})</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                                 .get(&quot;receipt_id&quot;) or &quot;&quot;)}</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>                 for r in receipts]</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        refs = [r for r in refs if r[&quot;locator&quot;]]          # 空 locator 不合法,剔除</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        # 终态标量(N3/M5-3):``task.completed`` / ``task.failed`` **先于**</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        # ``segment.end`` 落盘,故此刻可读。以**标量并入 claim** —— 不新增 payload</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        # 字段(INV-G4「只存引用」;payload schema 变更属 H-3,不在本轮范围)。</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        term = _terminal_state_of(seg, str(task_id))</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        ev = await coll.archive(</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            claim=f&quot;task {task_id} 的治理事实可追溯(终态={term})&quot;,</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>            refs=refs, ctx=ctx or SimpleNamespace(session=log_),</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>            summary=(f&quot;终态={term};决策 {len(decisions)} 条(拒绝 {len(denied)})、&quot;</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                     f&quot;凭证 {len(receipts)} 条&quot;))</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        return getattr(ev, &quot;evidence_id&quot;, None)</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>    except Exception:                          # noqa: BLE001 派生视图:绝不阻断主链</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        log.warning(&quot;证据归档跳过 task=%s&quot;, task_id, exc_info=True)</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        return None</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code></code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>def _terminal_state_of(seg_events: list, task_id: str) -&gt; str:</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>    &quot;&quot;&quot;段内终态标量(供 claim 标注;N3/M5-3)。</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code></code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    ``task.completed`` → ``success``;``task.failed`` → ``cancelled`` 或</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>    ``error:&lt;code&gt;``;两者皆无(段被外力关闭)→ ``unknown``。</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>    for e in reversed(seg_events):</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        t = getattr(e, &quot;type&quot;, None)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        if t == &quot;task.completed&quot;:</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>            return &quot;success&quot;</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        if t == &quot;task.failed&quot;:</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            p = getattr(e, &quot;payload&quot;, None) or {}</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            if str(p.get(&quot;reason&quot;) or &quot;&quot;) == &quot;cancelled&quot;:</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                return &quot;cancelled&quot;</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>            return f&quot;error:{p.get(&#x27;error&#x27;) or &#x27;unknown&#x27;}&quot;</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>    return &quot;unknown&quot;</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code></code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>def _evidence_producer(spine: EngineSpine):</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>    &quot;&quot;&quot;段关闭时的证据生产者回调(**N3/M5-3 的触发点**)。</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code></code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>    **为什么不放在 ``run_for_task`` 的函数体里**:该函数跑在独立子任务中</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>    (``task_queue._run_task`` 的 ``create_task``),五种终态里有三种(异常/预算/取消)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>    会让它**不执行到收尾**⇒ 段内有治理决策却零证据(实测 3/5)。而 ``segment.end``</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>    由 ``_run_task`` 自身 ``finally`` 中的 ``close_segment`` 落盘,``_run_task``</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>    **不被取消**(取消只作用于子任务)⇒ 实测 **5/5** 落盘。挂到该事件即继承此保证,</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>    并天然消除 N3(生产者不再早于段关闭)。</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code></code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>    幂等由 ``archive_task_evidence`` 内的日志重放闸保证;失败在该函数内吞掉</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>    (派生视图不阻断主链),故本回调不会影响段关闭。</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>    async def _on_segment_end(type_: str, env: Any) -&gt; None:</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        if getattr(env, &quot;type&quot;, None) != &quot;segment.end&quot;:</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>            return</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        task_id = str((getattr(env, &quot;payload&quot;, None) or {}).get(&quot;task_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        if not task_id:</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>            return</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        await archive_task_evidence(spine, task_id)</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>    return _on_segment_end</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code></code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>def _turn_source_of(task: Any) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>    &quot;&quot;&quot;本轮**框架侧来源**标记(KF-C/A4):只取 ``task.meta[&quot;source&quot;]``,其余一律 None。</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code></code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>    受控取值(非模型文本):``schedule._fire`` 写入 ``{&quot;source&quot;: &quot;schedule:&lt;name&gt;&quot;}``;</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>    普通用户轮无该键 → None(提示词里不出现该段)。</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>    meta = getattr(task, &quot;meta&quot;, None) or {}</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>    if not isinstance(meta, dict):</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        return None</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>    src = str(meta.get(&quot;source&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>    return src or None</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code></code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>async def _agent_ctx_of(spine: EngineSpine, env: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>    &quot;&quot;&quot;agent_loop 消费的 ctx = create_agent 装配的 Agent.ctx(spine 绑定)。</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code></code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>    Agent 与 loop 1:1;ctx.session/scope/llm 即 spine 组件——Agent.ctx 由</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>    create_agent 构造并绑定 loop。env 仅作输入(loop.wake 已携带)。</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>    首建 agent 时顺带激活 storage 能力(spill 定位器,幂等)。</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>    sid = str(getattr(env, &quot;session_id&quot;, &quot;&quot;) or getattr(spine.session, &quot;sid&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>              or &quot;&quot;)</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>    ag = spine.active_agents.get(sid) if hasattr(spine, &quot;active_agents&quot;) else None</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>    if ag is None:</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        ag = create_agent(sid, spine, spine.settings or _cfg_of(spine))</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        spine.active_agents[sid] = ag</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        await _activate_storage_caps(ag, spine)     # spill 首访激活(F039)</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        await _activate_session_caps(ag, spine)     # FTS 检索能力激活(F057)</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>    return ag.ctx</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code></code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>async def _activate_storage_caps(ag: Any, spine: EngineSpine) -&gt; None:</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>    &quot;&quot;&quot;storage 能力激活(F039):SpillProvider enter(建私有目录+订阅清理)+挂定位器。</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code></code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>    ctx.storage 与 spine.storage 同对象引用 → 激活后 executor 关4 读</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>    ctx.storage.spill 立即可见。会话 1:1 单 agent,激活一次;失败记日志不阻断</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>    对话(未激活时超长输出走 PERS-221 截断兜底)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>    if getattr(spine, &quot;_spill_provider&quot;, None) is not None:</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        return</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>    try:</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        from pyharness.core import spill as _spill_mod</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        prov = _spill_mod.SpillProvider(ctx=ag.ctx)</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        await prov.enter(ag.ctx)</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        spine._spill_provider = prov</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>        storage = getattr(spine, &quot;storage&quot;, None)</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        if storage is not None:</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>            storage.spill = prov</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        log.info(&quot;spill provider activated sid=%s&quot;, ag.session_id)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>    except Exception as e:                         # noqa: BLE001 激活失败:截断兜底,不阻断</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        log.warning(&quot;spill activate skipped: %s&quot;, type(e).__name__)</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>    # #53 会话 KV(SessionKV;同步 JSON 落盘,懒激活幂等)</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>    if getattr(spine, &quot;_kv_activated&quot;, False):</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        return</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>    try:</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        from pyharness.core import kv as _kv_mod</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        base = Path(str(getattr(getattr(spine, &quot;storage&quot;, None),</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>                                &quot;sessions_dir&quot;, &quot;.&quot;))).expanduser()</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        kv = _kv_mod.SessionKV(base / f&quot;{ag.session_id}.kv.json&quot;,</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>                               session_id=ag.session_id)</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>        storage = getattr(spine, &quot;storage&quot;, None)</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        if storage is not None:</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>            storage.kv = kv</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>            spine._kv_activated = True</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        log.info(&quot;session kv activated sid=%s&quot;, ag.session_id)</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>    except Exception as e:                         # noqa: BLE001 激活失败不阻断</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>        log.warning(&quot;kv activate skipped: %s&quot;, type(e).__name__)</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code></code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>async def _activate_session_caps(ag: Any, spine: Any) -&gt; None:</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>    &quot;&quot;&quot;会话检索能力激活(F057):开 FTS 派生索引 → 注册 session.fts_query 工具</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>    → 挂 ctx.session.fts 与 ctx.session_query(repair 落后对账读数面)。</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code></code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>    幂等(spine._fts_entered 旗标);失败(磁盘/权限/SQLite 无 FTS5)只告警不阻断</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>    ——索引是派生视图,可整体重建(原则 1)。db 路径与 CLI `search` 同源</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>    (storage.db_path)。2026-09-12 修复:此前 SessionQueryIndex 有完整实现+单测,</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>    但装配层零调用点 → LLM 调 session.fts_query 必抛 TLB-802&quot;索引未挂载&quot;。</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>    if getattr(spine, &quot;_fts_entered&quot;, False):</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>        return</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>    spine._fts_entered = True                      # 试过就不再重试(索引可选)</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>    idx = None</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>    try:</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>        from pyharness.core.session_query import SessionQueryIndex</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>        cfg = getattr(spine, &quot;settings&quot;, None) or _cfg_of(spine)</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        db = Path(str(getattr(getattr(cfg, &quot;storage&quot;, None), &quot;db_path&quot;,</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>                              &quot;~/.pyharness/index.db&quot;))).expanduser()</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>        sid = str(getattr(ag, &quot;session_id&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>                  or getattr(spine.session, &quot;sid&quot;, &quot;&quot;))</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        idx = SessionQueryIndex(db, sources={sid: spine.session})</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>        spine.fts = idx                           # ownership before first await</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>        await idx.enter(ag.ctx)                    # 开库建表 + 总线订阅</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>        await idx.announce(ag.ctx)                 # 注册 session.fts_query + 挂载</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>        spine.fts = idx</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>        ag.ctx.session_query = idx                 # F060 对账读数(repair 用)</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        log.info(&quot;session fts activated sid=%s db=%s&quot;, sid, db)</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>    except BaseException as e:</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>        if idx is not None:</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>            cleanup = asyncio.create_task(idx.detach(None))</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>            cancelled = None</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>            while True:</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>                try:</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>                    await asyncio.shield(cleanup)</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>                    spine.fts = None</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>                    break</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>                except asyncio.CancelledError as cancellation:</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>                    if cleanup.done():</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>                        raise</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>                    cancelled = cancellation</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>                except BaseException as cleanup_error:</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>                    e.add_note(f&#x27;index cleanup failed: {type(cleanup_error).__name__}&#x27;)</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>                    raise e</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>            if cancelled is not None:</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>                cancelled.add_note(f&#x27;index activation failed: {type(e).__name__}&#x27;)</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>                raise cancelled from e</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>        if not isinstance(e, Exception):</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>            raise</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>        # Optional index failures remain visible; cancellation is never degraded.</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>        log.warning(&quot;fts activate skipped: %s&quot;, type(e).__name__)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

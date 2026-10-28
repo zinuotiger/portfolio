@@ -1,0 +1,586 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/persistence.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/persistence.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 586 行</span></nav><main class="wrap source-page"><h1>pyharness/persistence.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：f5b1063002256b0c933d02034485e4b39b9ec092<br>SHA-256（内容校验）：5e78fd98a69d0b111e8b3036c4b99c8a6b604daa8421197a160cd032c0fea6a2</p><p><a href="../../architecture-detailed.html?node=persistence">JSON Lines Persistence（追加日志持久化与恢复）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 24 个类、函数与方法</summary><ul><li><a href="#L108">is_aux_session_file（函数） · L108–L110</a></li><li><a href="#L113">_os_lock_fd（函数） · L113–L125</a></li><li><a href="#L128">_os_unlock_fd（函数） · L128–L139</a></li><li><a href="#L142">_FileLock（类） · L142–L177</a><ul><li><a href="#L150">_FileLock.__init__（方法） · L150–L152</a></li><li><a href="#L154">_FileLock.try_acquire（方法） · L154–L167</a></li><li><a href="#L169">_FileLock.release（方法） · L169–L177</a></li></ul></li><li><a href="#L186">acquire_session_lock（函数） · L186–L201</a></li><li><a href="#L204">release_session_lock（函数） · L204–L214</a></li><li><a href="#L217">session_lock_held（函数） · L217–L241</a></li><li><a href="#L244">session_lock_path（函数） · L244–L246</a></li><li><a href="#L249">session_log_paths（函数） · L249–L260</a></li><li><a href="#L263">SessionStore（类） · L263–L467</a><ul><li><a href="#L277">SessionStore.__init__（方法） · L277–L303</a></li><li><a href="#L306">SessionStore.close（方法） · L306–L334</a></li><li><a href="#L336">SessionStore.ensure_writable（方法） · L336–L339</a></li><li><a href="#L353">SessionStore.replay（方法） · L353–L361</a></li><li><a href="#L363">SessionStore.repair（异步方法） · L363–L414</a></li><li><a href="#L416">SessionStore._rewrite_without_tail（方法） · L416–L450</a></li><li><a href="#L452">SessionStore._rotate（方法） · L452–L467</a></li></ul></li><li><a href="#L490">session_recorder（函数） · L490–L508</a><ul><li><a href="#L502">session_recorder._record（异步方法） · L502–L507</a></li></ul></li><li><a href="#L511">flush_kwargs_of（函数） · L511–L526</a></li><li><a href="#L529">open_store（函数） · L529–L577</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>r&quot;&quot;&quot;pyharness/persistence.py — 会话日志持久化 (specs/persistence.py.md; F011/F060)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>会话真源的物理形态:事件逐行 JSONL append(UTF-8 单行信封+payload)、攒批/强同步</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>双速 flush、原子写(同目录临时文件 + fsync + rename)、轮转(&gt;50MB)、截断检测与</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>写通道失败状态机(suspended →(通道恢复)→ normal)。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>**F060 修复入口在 ``pyharness/repair.py``**(``repair_session``:备份 → 修复 →</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>``session.recovered`` 声明;CLI `repair` / 桌面 / 启动自检皆走它)。本模块的</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>``SessionStore.repair()`` 是**早期面**(阶段 6 之前先行落地):生产**零调用者**、</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>仅由 ``tests/unit/test_persistence.py`` 使用 —— 见 **L-27**。**不要**在生产路径</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>调用它。备份命名已按 ``specs/repair.py.md`` 的冲突更正统一为</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>``{sid}.corrupt-{ts}.jsonl``(以 PRD F060 为准)。</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>不变式(INV-01 只追加,INV-07 单写者,INV-08 无回边):</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>- 正常写路径纯 append 句柄,无就地改写;一切重写(repair 截断、轮转 rename)</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>  走同目录临时文件/rename 原子路径,且修复前强制备份。</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>- 事件信封只经本模块写盘,不自造信封(seq/ts 只能框架分配,EVENT-SCHEMA §1.1-4):</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>  本模块产出的 system.error / session.recovered 一律经注入的 on_system_event 回调</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>  上抛(由装配层/bus 日志订阅者注入),保拓扑无回边、不反向 import session。</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>损坏标记 / 隔离约定(供阶段 6 pyharness/repair 模块消费,本模块先行落地):</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>- 隔离区:_quarantine:set[int] 行号(repair 决策/用户查看),经 quarantine_info()</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>  暴露;坏行只记跳隔离、绝不自动删(中部坏行 = 人类决策)。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>- 备份命名(F060 权威):``{sid}.corrupt-{ts}.jsonl``（``repair.backup_file`` 与本模块</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>  早期面 ``SessionStore.repair`` 现已**同名族**，见 specs/repair.py.md 的命名冲突更正）；</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>  历史文件名 ``{sid}.jsonl.bak-{ts}`` 仍由 aux 判据 ``\.jsonl\.bak-`` 只扫跳过。</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>- 不可修复(编码级坏块):原文件 rename 为 {sid}.jsonl.corrupt-{ts} 保留并</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>  PERS-202 明确报错,不覆盖（与备份名不同名 ⇒ 不会互相覆盖）。</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>- 轮转命名:{sid}.{n}.jsonl(n 从 1 递增),重放按 {sid}.1..n → {sid}.jsonl 序号合并。</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>- RepairReport(fixed/quarantined/backup_path) = session.recovered 事件的</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>  fixed/quarantined/backup 载荷镜像(F060)。</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>文件布局偏离:spec 头部标注 pyharness/core/persistence.py(8 脊柱归位计划);</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>当前仓库 spine 模块平铺包根(events/config/errors 同层),故落地</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>pyharness/persistence.py,待 core/ 归位阶段整体迁移(契约不变)。</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>错误全走 raise_code(PERS-2xx);外部依赖:events.Envelope、errors.raise_code、</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>config.DEFAULTS(轮转/攒批参数)、log。</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>import logging</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>import json</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>import os</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>import re</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>import threading</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>from collections import deque</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>from typing import Any, Awaitable, Callable, Iterator, Optional</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>from pyharness.config import DEFAULTS</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>from pyharness.events import Envelope, SYNC_TYPES, declared_ranges</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>from pyharness.events.vocab import validate_payload</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code># ===================================================================== 常量</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code># L1 权威默认值(config.DEFAULTS 唯一落地;全量 config 解析在装配层完成后再注入)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code># 重试队列上限(PERS-202 暂停判据之二;PARAMETER-ANCHOR 无锁死,沿用 DIS 伪码 192)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code># 连续失败上限(PERS-202 暂停判据之一;GAP-2)。**全部写路径共用此单一阈值**——</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code># 修复前只有 ``_flush_batch``(异步攒批)检查它,而 ``append(sync=True)`` /</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code># ``flush()`` 只累加计数不判阈值 ⇒ 强同步与公开 flush 路径在磁盘持续故障时</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code># 永不进入失败状态(会话不暂停、retry_q 无界增长)。</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code># 只读检测尾部窗口(半行定位范围)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code># ================================================================= 工具函数</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code># ================================================================= 跨进程文件锁</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code># 进程内锁注册表:{resolved lock path -&gt; [_FileLock, refcount]}。同进程多 store 打开</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code># 同一会话(如桌面 + 进程内 repair)复用同一 OS 锁,不误判为跨进程冲突。</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code># 会话**辅助档**命名(轮转段/修复备份/隔离档/旧备份名):它们**属于**某会话的字节</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code># 历史,但**不是独立会话**。这是判定该事实的**唯一来源**(R14-3)—— 此前只有</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code># ``repair`` 用真判据,其余五处各自用 ``stem.startswith(&quot;s-&quot;)``,而</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code># ``{sid}.1.jsonl`` / ``{sid}.corrupt-*`` / ``{sid}.quarantine-*`` 的 stem 同样以</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code># ``s-`` 开头 ⇒ 辅助档被当成独立会话(实测:``search`` 撞 fts_rows 主键冲突崩成</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code># PERS-202、桌面会话列表混入修复备份、``budget/stats`` 重复计数)。</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code># ================================================================= RepairReport</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code># ================================================================= SessionStore</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>from pyharness.persistence_policy import (log, _ROTATE_BYTES, _FLUSH_BATCH, _FLUSH_INTERVAL_S, _DEFAULT_SESSIONS_DIR, _RETRY_Q_LIMIT, _FAIL_STREAK_LIMIT, _TAIL_WINDOW, _resolve_by_seq, now_ts, default_sessions_dir)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>from pyharness.persistence_reader import (rotated_segment_paths, session_data_paths, _iter_replay, SessionReader, _last_newline_before, detect_truncation, _read_clean, RepairReport)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>from pyharness.persistence_writer import PersistenceWriter</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>from pyharness.persistence_recovery import PersistenceRecovery</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code></code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>AUX_SESSION_PATTERNS: tuple = (</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    re.compile(r&quot;\.\d+\.jsonl$&quot;),          # 轮转段 {sid}.{n}.jsonl</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    re.compile(r&quot;\.corrupt-&quot;),             # 修复备份 {sid}.corrupt-{ts}.jsonl</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    re.compile(r&quot;\.quarantine-&quot;),          # 隔离档 {sid}.quarantine-{ts}.jsonl</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    re.compile(r&quot;\.jsonl\.bak-&quot;),          # persistence 草案旧备份名</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code></code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>def is_aux_session_file(path: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    &quot;&quot;&quot;该文件是否会话**辅助档**(轮转段/修复备份/隔离档)—— 属于某会话但非独立会话。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    return any(p.search(Path(path).name) for p in AUX_SESSION_PATTERNS)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code></code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>def _os_lock_fd(fd: int) -&gt; None:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    &quot;&quot;&quot;对 fd 取 OS 级**非阻塞**独占锁;已被占 → OSError。Windows msvcrt / POSIX fcntl。</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code></code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    锁独立于 JSONL 追加句柄(锁文件另开),故 store 内 close/reopen 句柄(轮转/截断</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    重写)不会丢锁。msvcrt 锁首字节,fcntl 锁整文件。</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    if os.name == &quot;nt&quot;:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        import msvcrt</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        os.lseek(fd, 0, os.SEEK_SET)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)      # 锁首字节;被占抛 OSError</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    else:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        import fcntl</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code></code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>def _os_unlock_fd(fd: int) -&gt; None:</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    &quot;&quot;&quot;释放 fd 上的 OS 级锁(尽力;失败不阻断 close)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    try:</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        if os.name == &quot;nt&quot;:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            import msvcrt</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            os.lseek(fd, 0, os.SEEK_SET)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        else:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            import fcntl</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            fcntl.flock(fd, fcntl.LOCK_UN)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    except OSError as e:                            # noqa: BLE001 释放失败不阻断</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        log.warning(&quot;PERS-202 域:文件锁释放失败 why=%s&quot;, e)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code></code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code></code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>class _FileLock:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    &quot;&quot;&quot;会话日志跨进程独占锁(INV-07 单写者)。</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    在 lock_path 上取 OS 级非阻塞独占锁,防两进程同写一 JSONL 造成 seq 重复 /</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    轮转 os.replace 互覆 / 重写时他进程活句柄写的字节静默消失。锁文件独立于 JSONL</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    且**不删除**(留 0 字节 .lock 属标准做法;删锁反有 release↔unlink 竞态)。</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code></code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    def __init__(self, lock_path: Path) -&gt; None:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        self._path = lock_path</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        self._fd: Optional[int] = None</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code></code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    def try_acquire(self) -&gt; bool:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        &quot;&quot;&quot;非阻塞取锁;成功 True。冲突/IO 失败 → False(不抛,由调用方转 PERS-202)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        try:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>            self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            fd = os.open(str(self._path), os.O_RDWR | os.O_CREAT, 0o600)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        except OSError:</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            return False</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        try:</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>            _os_lock_fd(fd)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        except OSError:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>            os.close(fd)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>            return False</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        self._fd = fd</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        return True</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code></code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    def release(self) -&gt; None:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        &quot;&quot;&quot;释放锁(幂等);不删锁文件。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        if self._fd is None:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            return</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        try:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            _os_unlock_fd(self._fd)</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        finally:</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            fd, self._fd = self._fd, None</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>            os.close(fd)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code></code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code></code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>_LOCKS: dict[str, list] = {}</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code></code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code></code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>_LOCKS_MUTEX = threading.RLock()</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code></code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code></code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>def acquire_session_lock(lock_path: Path) -&gt; None:</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    &quot;&quot;&quot;取会话日志独占锁(进程内引用计数可重入);跨进程冲突 → PERS-202。</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code></code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    调用方须在 finally 里配对 release_session_lock(lock_path)。</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    with _LOCKS_MUTEX:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        key = str(lock_path)</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        ent = _LOCKS.get(key)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        if ent is not None:</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            ent[1] += 1</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>            return</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        lock = _FileLock(lock_path)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        if not lock.try_acquire():</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            raise_code(&quot;PERS-202&quot;, op=&quot;lock&quot;, path=str(lock_path),</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>                       advice=&quot;另一进程正在写/修复该会话;先结束该进程再打开&quot;)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        _LOCKS[key] = [lock, 1]</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code></code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code></code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>def release_session_lock(lock_path: Path) -&gt; None:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>    &quot;&quot;&quot;释放会话日志独占锁(引用计数归零才真正解锁;幂等)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>    with _LOCKS_MUTEX:</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        key = str(lock_path)</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        ent = _LOCKS.get(key)</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        if ent is None:</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>            return</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        ent[1] -= 1</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        if ent[1] &lt;= 0:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            del _LOCKS[key]</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            ent[0].release()</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code></code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code></code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>def session_lock_held(lock_path: Path) -&gt; bool:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>    &quot;&quot;&quot;该会话是否**正被其他持有者占用**(只探测,不改语义;R14-2)。</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code></code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>    启动自检不应把**活会话**当作可修对象:被别的进程持有的会话既不该被报为&quot;待修&quot;,</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>    本进程也修不动(``repair_session`` 取锁即 PERS-202)。此前自检会把&quot;索引攒批窗口内</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>    的正常会话&quot;报为损坏 → ``_ensure_repair`` 撞 PERS-202 并**上抛** ⇒ 第二个 CLI 启动</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>    直接失败(两进程实测复现)。</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code></code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>    语义:同进程已持有(``_LOCKS`` 命中)→ True;锁文件不存在 → False(**不**新建);</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    跨进程 ``try_acquire`` 成功 → 立即归还并返回 False。纯探测,不留副作用。</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code></code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>    **残余**(如实标注):探测在被占用时会**失败取锁**(不持有,无窗口);只有在会话</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>    **空闲**时才会短暂持有再归还 —— 该微秒级窗口内若有他进程正好 ``open_store`` 同一</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>    会话,会收到一次 PERS-202(可重试)。量级远小于它修掉的&quot;第二个 CLI 启动即失败&quot;,</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    且与既有取锁语义同源(无新的锁类型)。</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>    if str(lock_path) in _LOCKS:</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        return True</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>    if not lock_path.exists():</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        return False                     # 从未取过锁:未被占用(不新建锁文件)</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>    lock = _FileLock(lock_path)</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>    if lock.try_acquire():</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        lock.release()                   # 探针成功:立即归还(锁文件不删,见 _FileLock)</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        return False</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>    return True</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code></code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code></code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>def session_lock_path(path: Path) -&gt; Path:</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>    &quot;&quot;&quot;会话日志对应的锁文件路径(``{sid}.jsonl.lock``;不匹配 repair 的 *.jsonl 扫描)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>    return path.with_name(path.name + &quot;.lock&quot;)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code></code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code></code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>def session_log_paths(d: Any) -&gt; list:</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>    &quot;&quot;&quot;枚举目录下的会话**主文件**(每会话恰一个;排序稳定;目录不存在 → [])。</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code></code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    **唯一枚举点**(R14-3):一并排除非会话命名与全部辅助档。凡&quot;把目录里的 ``*.jsonl``</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>    当作会话&quot;的调用方都该走这里,而不是各自 ``glob(&quot;*.jsonl&quot;)`` +</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>    ``stem.startswith(&quot;s-&quot;)`` —— 后者对辅助档**恒为真**,是五处同源的漏判据。</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>    d = Path(d)</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>    if not d.is_dir():</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        return []</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>    return [p for p in sorted(d.glob(&quot;*.jsonl&quot;))</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>            if p.stem.startswith(&quot;s-&quot;) and not is_aux_session_file(p)]</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code></code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code></code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>class SessionStore(PersistenceWriter, PersistenceRecovery):</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>    &quot;&quot;&quot;单个会话的 JSONL 存储(单写者纪律 INV-07)。</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code></code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>    字段(spec 关键数据结构):session_id / path / _fh(append 句柄)/ _pending</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>    (攒批缓冲)/ _retry_q(失败重试,拒新不丢旧)/ _fail_streak / _quarantine /</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>    SYNC_TYPES。写通道状态机:攒批 →(满 batch/间隔定时器)→ flush;强同步三类</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>    立即 write+flush;OSError 重试 ≤3,3 败 → system.error(PERS-202)+ 会话暂停;</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>    repair → recovering → normal。间隔定时器的**持有者**是 ``EngineSpine``</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>    (``start_flush_ticker``;本类只暴露 ``flush_interval_s`` 读面,见 GAP-13)。</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code></code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>    # 强同步事件族(与 events.vocab 同一 frozenset,单一真源在词表)</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>    SYNC_TYPES: frozenset = SYNC_TYPES</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code></code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>    def __init__(self, session_id: str, path: Path, fh, *,</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>                 rotate_bytes: Optional[int] = None,</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>                 flush_batch: Optional[int] = None,</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>                 flush_interval_s: Optional[float] = None,</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                 lock_path: Optional[Path] = None,</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>                 on_system_event: Optional[Callable[[str, dict], Awaitable]] = None):</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        self.session_id = session_id</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        self.path = path</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        self._fh = fh                             # 追加句柄(append,UTF-8,单写者)</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        self._lock_path = lock_path               # 跨进程独占锁文件(open_store 持有)</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        self._close_mutex = threading.RLock()</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        self._scan_offset = 0</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        self._committed_rows: dict[int, dict] = {}</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        self._segments_scanned = False</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>        self._closing = False</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>        self.rotate_bytes = rotate_bytes or _ROTATE_BYTES</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>        self.flush_batch = flush_batch or _FLUSH_BATCH</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>        self.flush_interval_s = flush_interval_s or _FLUSH_INTERVAL_S</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        self.on_system_event = on_system_event    # 注入回调(装配层/bus 订阅者)</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        self._pending: deque[tuple[int, str]] = deque()   # 攒批缓冲(seq, line)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        # 打开时的&quot;崩溃残片&quot;标记(R13-2):文件非空且末字节非 \n ⇒ 首写前补行尾分隔,</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        # 否则新事件会与残片拼在同一物理行而不可解析(静默丢事件)。</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>        self._torn_tail: bool = detect_truncation(path) is not None</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        self._retry_q: deque[tuple[int, str]] = deque()   # 写失败重试队列</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>        self._fail_streak = 0                     # 连续失败计数(≥3 暂停)</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        self._quarantine: set[int] = set()        # 坏行行号隔离区(repair/查看)</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        self._suspended = False                   # 暂停中:拒新不丢旧</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code></code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>    # ------------------------------------------------------------ 关闭</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>    def close(self) -&gt; None:</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        &quot;&quot;&quot;收尾:flush + 关追加句柄 + 释放跨进程锁(会话终态/进程退出前调用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        with self._close_mutex:</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            self._closing = True</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>            errors = []</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>            lock_path, self._lock_path = self._lock_path, None</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>            if not self._fh.closed:</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>                try:</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>                    rows = _resolve_by_seq(list(self._retry_q) + list(self._pending))</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>                    if rows:</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>                        self._write_batch(rows)</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>                        self._retry_q.clear()</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>                        self._pending.clear()</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>                    self._fh.flush()</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>                except BaseException as exc:</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>                    errors.append(exc)</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>                try:</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>                    self._fh.close()</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>                except BaseException as exc:</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>                    errors.append(exc)</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>            if lock_path is not None:</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>                try:</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>                    release_session_lock(lock_path)</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>                except BaseException as exc:</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>                    errors.append(exc)</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>            if errors:</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>                for exc in errors[1:]:</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>                    errors[0].add_note(f&#x27;additional cleanup failure: {type(exc).__name__}&#x27;)</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>                raise errors[0]</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code></code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>    def ensure_writable(self) -&gt; None:</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>        &quot;&quot;&quot;写入前置检查；调用方在分配事件前调用，避免总线隔离拒写异常。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>        if self._closing or self._suspended or self._fh.closed:</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>            raise_code(&quot;PERS-202&quot;, hint=&quot;会话写通道暂停或已关闭;恢复后再提交&quot;)</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code></code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>    # ------------------------------------------------------------ 落盘主路径</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code></code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code></code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>    # ------------------------------------------------------ 失败状态(GAP-2)</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code></code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code></code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>    # ------------------------------------------------------- 写入(残片自愈,R13-2)</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code></code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code></code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>            # 未达阈值:保留重试队列,等下一次 flush 定时器/强同步点重试</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code></code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>    # ------------------------------------------------------------ 读取(隔离,不中断)</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>    def replay(self) -&gt; Iterator[Envelope]:</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        &quot;&quot;&quot;行迭代器(轮转文件按序号合并:先 {sid}.1..n 后主文件)。</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code></code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        空行跳过;坏行(解码失败/JSON 非法/信封校验失败)记 PERS-201 进 _quarantine</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        隔离区,继续下一行——回放 = 恢复 = 审计同一路径,绝不因单行损坏中断</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>        (§3.8)。行号按文件从 1 起(多文件时可能重号,隔离判定以 repair 主文件</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>        扫描为准)。</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>        return _iter_replay(self._rotated_paths() + [self.path], self._quarantine)</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code></code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>    async def repair(self, session_id: Optional[str] = None) -&gt; RepairReport:</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        &quot;&quot;&quot;**委托** F060 权威实现（`pyharness.repair.repair_session`）；本面是早期适配器。</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code></code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>        契约（`specs/repair.py.md` §0）：「**本模块是 F060 修复策略与编排的唯一归属**…</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>        core/persistence 早期草案中同名 repair 若已实现，**应改为委托本模块，禁两套</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>        修复策略并存**」。R24 依此把本方法由「第二套流水线」改为**薄适配器**（此前两套</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>        并存：备份命名不同、隔离表示不同、派生视图重建缺失）。</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code></code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>        安全委托序（**关键**）：本对象正持有自己的**追加句柄**，而 `repair_session` 会</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>        整体重写主文件（它自己以 `ctx.session` 守卫**拒绝**活会话修复，正是防句柄失</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>        同步）⇒ 委托前必须 flush + **关本句柄**，委托后**重开**：</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code></code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>          ① `flush()`（攒批落盘）→ ② 关 `_fh` → ③ 委托 `repair_session`（同进程</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>          会话锁可重入，不冲突）→ ④ 重开追加句柄 + 按事实重建 `_torn_tail`</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>          → ⑤ 解除暂停（写通道已随修复恢复）。</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code></code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>        返回**本模块的** `RepairReport`（`fixed`/`quarantined: list[int]`/`backup_path`），</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>        由权威报告投影而来，保持既有的声明返回类型不变。</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        sid = session_id or self.session_id</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>        path = self.path</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>        if not path.exists():</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>            return RepairReport()                 # 空会话:空报告(新会话)</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>        await self.flush()                        # ① 攒批先落盘</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>        close = getattr(self._fh, &quot;close&quot;, None)</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>        if callable(close):</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>            close()  # Do not rewrite while ownership of the old handle is uncertain.</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>        from pyharness.repair import repair_session     # 惰性:避免模块级回边</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>        ctx = SimpleNamespace(</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>            storage=SimpleNamespace(sessions_dir=path.parent))</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>        primary = None</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>        try:</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>            rep = await repair_session(ctx, sid, interactive=False)</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>        except BaseException as exc:</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>            primary = exc</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>            raise</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>        finally:</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>            self._invalidate_scan()</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>            try:</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>                self._fh = open(path, &quot;a&quot;, encoding=&quot;utf-8&quot;, newline=&quot;\n&quot;)</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>                self._torn_tail = detect_truncation(path) is not None</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>                if primary is None: self._suspended = False</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>            except BaseException as exc:</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>                if primary is None: raise</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>                primary.add_note(f&#x27;repair reopen failed: {type(exc).__name__}&#x27;)</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>        kept = [int(getattr(e, &quot;line_no&quot;, 0)) for e in</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>                (getattr(rep, &quot;quarantined&quot;, None) or [])]</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>        self._quarantine.clear()</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>        self._quarantine.update(kept)</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>        return RepairReport(fixed=list(getattr(rep, &quot;fixed&quot;, None) or []),</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>                            quarantined=sorted(self._quarantine),</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>                            backup_path=getattr(rep, &quot;backup_path&quot;, None))</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code></code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>    def _rewrite_without_tail(self, cut_offset: int) -&gt; None:</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>        &quot;&quot;&quot;把主文件截至 cut_offset 的内容原子重写(临时文件 + fsync + rename)。</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code></code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>        同目录 tmp → fsync → os.replace 原子替换 → 重开追加句柄;rename 原子性</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>        保证任何时刻磁盘上要么旧完整文件要么新完整文件,杜绝半写。Windows 先关</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>        句柄再 rename(持开句柄 replace 会 PermissionError),失败不留临时残留。</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>        tmp = self.path.with_name(self.path.name + f&quot;.tmp-{os.getpid()}&quot;)</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>        primary = None</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>        cleanup_errors = []</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>        try:</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>            try:</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>                self._fh.close()</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>                with open(self.path, &quot;rb&quot;) as src, open(tmp, &quot;wb&quot;) as dst:</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>                    dst.write(src.read(cut_offset))</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>                    dst.flush()</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>                    os.fsync(dst.fileno())</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>                os.replace(tmp, self.path)</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>            except OSError as exc:</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>                raise_code(&quot;PERS-202&quot;, op=&quot;rewrite_without_tail&quot;, why=str(exc),</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>                           advice=&quot;原子截断失败；保留原文件及故障证据&quot;)</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>        except BaseException as exc:</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>            primary = exc</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>            raise</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>        finally:</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>            try: tmp.unlink(missing_ok=True)</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>            except BaseException as exc: cleanup_errors.append(exc)</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>            if self._fh.closed:</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>                try: self._fh = open(self.path, &quot;a&quot;, encoding=&quot;utf-8&quot;, newline=&quot;\n&quot;)</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>                except BaseException as exc: cleanup_errors.append(exc)</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>            self._invalidate_scan()</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>            if primary is not None:</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>                for exc in cleanup_errors: primary.add_note(f&#x27;cleanup failed: {exc!r}&#x27;)</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>            elif cleanup_errors:</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>                raise BaseExceptionGroup(&#x27;rewrite cleanup failed&#x27;, cleanup_errors)</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code></code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>    def _rotate(self) -&gt; None:</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>        &quot;&quot;&quot;主文件 &gt;50MB → 原子 rename 为 {sid}.{n}.jsonl → 开新主句柄。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>        self._fh.flush()</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>        n = max((int(p.stem.rsplit(&#x27;.&#x27;, 1)[1]) for p in self._rotated_paths()), default=0) + 1</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>        target = self.path.with_name(f&quot;{self.session_id}.{n}.jsonl&quot;)</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>        self._fh.close()                          # Windows:先关句柄再 rename</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>        try:</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>            os.replace(self.path, target)         # 原子 rename(同文件系统)</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>        except OSError:</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>            self._fh = open(self.path, &quot;a&quot;, encoding=&quot;utf-8&quot;, newline=&quot;\n&quot;)</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>            raise                                # 主文件未动,恢复句柄</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>        self._fh = open(self.path, &quot;a&quot;, encoding=&quot;utf-8&quot;, newline=&quot;\n&quot;)</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>        self._torn_tail = False                   # 新文件无残片(R13-2)</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>        self._invalidate_scan()</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>        log.info(&quot;jsonl rotated: %s (size_mb=%d)&quot;,</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>                 target, self.rotate_bytes // 1_048_576)</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code></code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code></code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code></code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code></code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>    # ------------------------------------------------------------ 截断检测(只读)</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code></code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>    # ------------------------------------------------------------ repair 崩溃恢复(F060)</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code></code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>    # ------------------------------------------------------------ 原子截断重写(repair 专用)</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code></code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code>    # ------------------------------------------------------------ 轮转(内部)</code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code></code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code></code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>    # ------------------------------------------------------------ seq 空洞</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code></code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code></code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>    # ------------------------------------------------------------ 隔离区查询</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code></code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>    # ------------------------------------------------------------ 系统事件上抛(注入回调)</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code></code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code></code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code># ================================================================= 工厂</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>def session_recorder(store: Any, session_id: str) -&gt; Callable:</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code>    &quot;&quot;&quot;总线 → 存储订阅工厂(**唯一实现**;engine 与桌面壳共用,禁各自实现)。</code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code></code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code>    **sid 过滤是必须的**:多会话**共用一条总线**时,订阅者会收到**所有**会话的信封;</code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code>    不过滤则 B 的事件会串写进 A 的 JSONL(实测:两个 ``session.created`` 落同一文件,</code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code>    回放错序并让 repair 误判空洞/误隔离)。``store.append`` 侧只写字节、**不做** sid</code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code>    校验,故过滤责任**只在此单点**(桌面壳曾各自实现过一份,engine 侧长期缺失 ——</code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code>    2026-09-21 R8 补)。</code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code></code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code>    另:瞬时类型(``llm.chunk`` 等以 dict 上总线)不进 append-only JSONL。</code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>    强同步清单**唯一真源** = ``events.vocab.SYNC_TYPES``(ADR-019 P-3),不本地维护副本。</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code>    async def _record(type_: str, payload: Any) -&gt; None:</code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>        if not hasattr(payload, &quot;model_dump_json&quot;):</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>            return</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code>        if session_id and getattr(payload, &quot;session_id&quot;, None) != session_id:</code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code>            return                     # 跨会话事件:不落本会话文件</code></div>
+<div class="code-line" id="L507"><a class="line-number" href="#L507">507</a><code>        await store.append(payload, sync=type_ in SYNC_TYPES)</code></div>
+<div class="code-line" id="L508"><a class="line-number" href="#L508">508</a><code>    return _record</code></div>
+<div class="code-line" id="L509"><a class="line-number" href="#L509">509</a><code></code></div>
+<div class="code-line" id="L510"><a class="line-number" href="#L510">510</a><code></code></div>
+<div class="code-line" id="L511"><a class="line-number" href="#L511">511</a><code>def flush_kwargs_of(cfg: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L512"><a class="line-number" href="#L512">512</a><code>    &quot;&quot;&quot;由 Settings **鸭子取值**解析攒批/定时落盘标量(N1)。</code></div>
+<div class="code-line" id="L513"><a class="line-number" href="#L513">513</a><code></code></div>
+<div class="code-line" id="L514"><a class="line-number" href="#L514">514</a><code>    本模块**不 import** ``pyharness.config``(依赖方向纪律):只按属性读取。</code></div>
+<div class="code-line" id="L515"><a class="line-number" href="#L515">515</a><code>    缺键 ⇒ 返回 ``{}``,``open_store`` 回落模块常量(DEFAULTS),行为与修复前一致</code></div>
+<div class="code-line" id="L516"><a class="line-number" href="#L516">516</a><code>    —— 即&quot;未配置&quot;与&quot;配置为默认值&quot;不可区分但**结果相同**,不引入新语义。</code></div>
+<div class="code-line" id="L517"><a class="line-number" href="#L517">517</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L518"><a class="line-number" href="#L518">518</a><code>    j = getattr(getattr(cfg, &quot;log&quot;, None), &quot;jsonl&quot;, None)</code></div>
+<div class="code-line" id="L519"><a class="line-number" href="#L519">519</a><code>    out: dict = {}</code></div>
+<div class="code-line" id="L520"><a class="line-number" href="#L520">520</a><code>    fis = getattr(j, &quot;flush_interval_s&quot;, None)</code></div>
+<div class="code-line" id="L521"><a class="line-number" href="#L521">521</a><code>    fb = getattr(j, &quot;flush_batch&quot;, None)</code></div>
+<div class="code-line" id="L522"><a class="line-number" href="#L522">522</a><code>    if fis is not None:</code></div>
+<div class="code-line" id="L523"><a class="line-number" href="#L523">523</a><code>        out[&quot;flush_interval_s&quot;] = fis</code></div>
+<div class="code-line" id="L524"><a class="line-number" href="#L524">524</a><code>    if fb is not None:</code></div>
+<div class="code-line" id="L525"><a class="line-number" href="#L525">525</a><code>        out[&quot;flush_batch&quot;] = fb</code></div>
+<div class="code-line" id="L526"><a class="line-number" href="#L526">526</a><code>    return out</code></div>
+<div class="code-line" id="L527"><a class="line-number" href="#L527">527</a><code></code></div>
+<div class="code-line" id="L528"><a class="line-number" href="#L528">528</a><code></code></div>
+<div class="code-line" id="L529"><a class="line-number" href="#L529">529</a><code>def open_store(session_id: str, *, dir: Optional[Path] = None,</code></div>
+<div class="code-line" id="L530"><a class="line-number" href="#L530">530</a><code>               flush_interval_s: Optional[float] = None,</code></div>
+<div class="code-line" id="L531"><a class="line-number" href="#L531">531</a><code>               flush_batch: Optional[int] = None) -&gt; SessionStore:</code></div>
+<div class="code-line" id="L532"><a class="line-number" href="#L532">532</a><code>    &quot;&quot;&quot;创建/打开会话存储(工厂):目录 mkdir(700) → 主文件 append 句柄。</code></div>
+<div class="code-line" id="L533"><a class="line-number" href="#L533">533</a><code></code></div>
+<div class="code-line" id="L534"><a class="line-number" href="#L534">534</a><code>    文件已存在(重启恢复):由 session.open_session 重放取 _seq 基线;检测到尾部</code></div>
+<div class="code-line" id="L535"><a class="line-number" href="#L535">535</a><code>    半行 → 告警提示先跑 repair(open 不自动截断——修复前强制备份,F060)。</code></div>
+<div class="code-line" id="L536"><a class="line-number" href="#L536">536</a><code>    异常:目录/文件不可写 → PERS-202。</code></div>
+<div class="code-line" id="L537"><a class="line-number" href="#L537">537</a><code></code></div>
+<div class="code-line" id="L538"><a class="line-number" href="#L538">538</a><code>    ``flush_interval_s`` / ``flush_batch``(N1):**已解析的标量**,由**装配层**从</code></div>
+<div class="code-line" id="L539"><a class="line-number" href="#L539">539</a><code>    ``Settings`` 取值后传入(见 ``flush_kwargs_of``);缺省 ``None`` ⇒ 用模块常量</code></div>
+<div class="code-line" id="L540"><a class="line-number" href="#L540">540</a><code>    (DEFAULTS)。修复前本工厂**不接收也不传递**这两个值 ⇒ ``config.log.jsonl.*``</code></div>
+<div class="code-line" id="L541"><a class="line-number" href="#L541">541</a><code>    是**死配置**(实测:配置 3.0/7,store 实为 0.5/64)。</code></div>
+<div class="code-line" id="L542"><a class="line-number" href="#L542">542</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L543"><a class="line-number" href="#L543">543</a><code>    d = dir or default_sessions_dir()</code></div>
+<div class="code-line" id="L544"><a class="line-number" href="#L544">544</a><code>    try:</code></div>
+<div class="code-line" id="L545"><a class="line-number" href="#L545">545</a><code>        d.mkdir(parents=True, exist_ok=True, mode=0o700)</code></div>
+<div class="code-line" id="L546"><a class="line-number" href="#L546">546</a><code>    except OSError as e:</code></div>
+<div class="code-line" id="L547"><a class="line-number" href="#L547">547</a><code>        raise_code(&quot;PERS-202&quot;, op=&quot;mkdir&quot;, path=str(d), why=str(e),</code></div>
+<div class="code-line" id="L548"><a class="line-number" href="#L548">548</a><code>                   advice=&quot;查磁盘/权限;repair 后恢复&quot;)</code></div>
+<div class="code-line" id="L549"><a class="line-number" href="#L549">549</a><code>    path = d / f&quot;{session_id}.jsonl&quot;              # 会话日志锚点 ~/.pyharness/sessions</code></div>
+<div class="code-line" id="L550"><a class="line-number" href="#L550">550</a><code>    lock_path = session_lock_path(path)           # 跨进程独占锁(INV-07 单写者)</code></div>
+<div class="code-line" id="L551"><a class="line-number" href="#L551">551</a><code>    try:</code></div>
+<div class="code-line" id="L552"><a class="line-number" href="#L552">552</a><code>        acquire_session_lock(lock_path)           # 冲突 → PERS-202(不建第二写者)</code></div>
+<div class="code-line" id="L553"><a class="line-number" href="#L553">553</a><code>    except PyHError:</code></div>
+<div class="code-line" id="L554"><a class="line-number" href="#L554">554</a><code>        raise</code></div>
+<div class="code-line" id="L555"><a class="line-number" href="#L555">555</a><code>    except Exception as e:                        # noqa: BLE001 非预期锁故障:拒开</code></div>
+<div class="code-line" id="L556"><a class="line-number" href="#L556">556</a><code>        raise_code(&quot;PERS-202&quot;, op=&quot;lock&quot;, path=str(lock_path), why=str(e),</code></div>
+<div class="code-line" id="L557"><a class="line-number" href="#L557">557</a><code>                   advice=&quot;会话锁获取异常;查磁盘/权限&quot;)</code></div>
+<div class="code-line" id="L558"><a class="line-number" href="#L558">558</a><code>    fh = None</code></div>
+<div class="code-line" id="L559"><a class="line-number" href="#L559">559</a><code>    try:</code></div>
+<div class="code-line" id="L560"><a class="line-number" href="#L560">560</a><code>        trunc = detect_truncation(path)</code></div>
+<div class="code-line" id="L561"><a class="line-number" href="#L561">561</a><code>        if trunc is not None:</code></div>
+<div class="code-line" id="L562"><a class="line-number" href="#L562">562</a><code>            log.warning(&quot;PERS-201:尾部半行待 repair file=%s offset=%s&quot;, path, trunc)</code></div>
+<div class="code-line" id="L563"><a class="line-number" href="#L563">563</a><code>        # newline=&quot;\n&quot;:JSONL 统一 \n 行尾,Windows 下禁 \r\n 翻译(半行检测按字节)</code></div>
+<div class="code-line" id="L564"><a class="line-number" href="#L564">564</a><code>        fh = open(path, &quot;a&quot;, encoding=&quot;utf-8&quot;, newline=&quot;\n&quot;)</code></div>
+<div class="code-line" id="L565"><a class="line-number" href="#L565">565</a><code>        return SessionStore(session_id=session_id, path=path, fh=fh,</code></div>
+<div class="code-line" id="L566"><a class="line-number" href="#L566">566</a><code>                            lock_path=lock_path, flush_interval_s=flush_interval_s,</code></div>
+<div class="code-line" id="L567"><a class="line-number" href="#L567">567</a><code>                            flush_batch=flush_batch)</code></div>
+<div class="code-line" id="L568"><a class="line-number" href="#L568">568</a><code>    except BaseException as primary:</code></div>
+<div class="code-line" id="L569"><a class="line-number" href="#L569">569</a><code>        for cleanup in ([fh.close] if fh is not None else []) + [lambda: release_session_lock(lock_path)]:</code></div>
+<div class="code-line" id="L570"><a class="line-number" href="#L570">570</a><code>            try:</code></div>
+<div class="code-line" id="L571"><a class="line-number" href="#L571">571</a><code>                cleanup()</code></div>
+<div class="code-line" id="L572"><a class="line-number" href="#L572">572</a><code>            except BaseException as secondary:</code></div>
+<div class="code-line" id="L573"><a class="line-number" href="#L573">573</a><code>                primary.add_note(f&#x27;initialization cleanup failed: {type(secondary).__name__}&#x27;)</code></div>
+<div class="code-line" id="L574"><a class="line-number" href="#L574">574</a><code>        if isinstance(primary, OSError):</code></div>
+<div class="code-line" id="L575"><a class="line-number" href="#L575">575</a><code>            raise_code(&#x27;PERS-202&#x27;, op=&#x27;open&#x27;, path=str(path), why=str(primary),</code></div>
+<div class="code-line" id="L576"><a class="line-number" href="#L576">576</a><code>                       advice=&#x27;查磁盘/权限;repair 后恢复&#x27;)</code></div>
+<div class="code-line" id="L577"><a class="line-number" href="#L577">577</a><code>        raise</code></div>
+<div class="code-line" id="L578"><a class="line-number" href="#L578">578</a><code></code></div>
+<div class="code-line" id="L579"><a class="line-number" href="#L579">579</a><code></code></div>
+<div class="code-line" id="L580"><a class="line-number" href="#L580">580</a><code>__all__ = [</code></div>
+<div class="code-line" id="L581"><a class="line-number" href="#L581">581</a><code>    &quot;SessionStore&quot;, &quot;RepairReport&quot;, &quot;open_store&quot;, &quot;detect_truncation&quot;,</code></div>
+<div class="code-line" id="L582"><a class="line-number" href="#L582">582</a><code>    &quot;default_sessions_dir&quot;, &quot;now_ts&quot;,</code></div>
+<div class="code-line" id="L583"><a class="line-number" href="#L583">583</a><code>    &quot;acquire_session_lock&quot;, &quot;release_session_lock&quot;, &quot;session_lock_path&quot;,</code></div>
+<div class="code-line" id="L584"><a class="line-number" href="#L584">584</a><code>    &quot;session_lock_held&quot;, &quot;is_aux_session_file&quot;, &quot;session_log_paths&quot;,</code></div>
+<div class="code-line" id="L585"><a class="line-number" href="#L585">585</a><code>    &quot;rotated_segment_paths&quot;, &quot;session_data_paths&quot;, &quot;SessionReader&quot;,</code></div>
+<div class="code-line" id="L586"><a class="line-number" href="#L586">586</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

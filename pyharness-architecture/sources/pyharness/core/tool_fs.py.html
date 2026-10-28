@@ -1,0 +1,539 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/tool_fs.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/tool_fs.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 539 行</span></nav><main class="wrap source-page"><h1>pyharness/core/tool_fs.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：aedc2edce16981c5af508dcc16bc773758b9ff98<br>SHA-256（内容校验）：dcf20414a6d8f42df71d3db9da36c931a9cdcc28cc82e4642f60924cb1b6295d</p><p><a href="../../../architecture-detailed.html?node=filesystem">Workspace File Tools（工作区文件工具）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 17 个类、函数与方法</summary><ul><li><a href="#L107">_cfg_get（函数） · L107–L136</a></li><li><a href="#L139">_read_spill_bytes（函数） · L139–L141</a></li><li><a href="#L144">_spill_max_bytes（函数） · L144–L147</a></li><li><a href="#L150">_extra_read_dirs（函数） · L150–L157</a></li><li><a href="#L164">_workspace_root（函数） · L164–L181</a></li><li><a href="#L184">_under（函数） · L184–L193</a></li><li><a href="#L196">_in_extra_read（函数） · L196–L205</a></li><li><a href="#L208">resolve_in_workspace（函数） · L208–L245</a></li><li><a href="#L249">_reject_credential（函数） · L249–L272</a></li><li><a href="#L276">_spill_put（异步函数） · L276–L298</a></li><li><a href="#L302">_looks_binary（函数） · L302–L304</a></li><li><a href="#L307">read_file（异步函数） · L307–L351</a></li><li><a href="#L355">write_file（异步函数） · L355–L387</a></li><li><a href="#L391">list_dir（异步函数） · L391–L445</a><ul><li><a href="#L406">list_dir._visible（方法） · L406–L408</a></li></ul></li><li><a href="#L449">delete_file（异步函数） · L449–L469</a></li><li><a href="#L482">register（函数） · L482–L532</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/tool_fs.py — 文件系统工具族 fs.* (specs/tool_fs.py.md 契约;阶段 3 模块)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F034(fs.read_file 文件读取)· F035(fs.write_file 写入与覆盖保护)·</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>F036(fs.list_dir 目录列举)· fs.delete_file(critical 审计锚点);联动 F023</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>(g-fs-path/g-overwrite 兜底语义)/F039(超限 spill)/F055(workspace 单点几何语义)。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>权威口径:specs/tool_fs.py.md(编码契约,伪代码权威)、PRD-Core §5.4 F034-F036、</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>SECURITY.md §4.2(危险分级)/§7.2(文件影响域)、CONSTRAINTS-03-ToolSafety</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>(T-05 五要素/T-09 输出有界)、ERR.md §2.9(TLB-8xx)/§2.11(POL-FS-*)、</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>PARAMETER-ANCHOR(写文件上限 1MB、spill 单文件 10MB);冲突以 PRD-Core 为准。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>职责一句话:文件系统工具族——fs.read_file(UTF-8 自动 BOM、&gt;64KB 转 spill 不进</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>上下文)、fs.write_file(自动建目录、临时文件+rename 原子写、覆写审批由管道 g7</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>负责、工具内不二判)、fs.list_dir(隐藏默认隐藏、≤500 条截断留痕)、fs.delete_file</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>(danger=critical 注册即拒的审计锚点);所有路径先过 resolve_in_workspace 单点归一</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>(管道 g3 已过之后的纵深第二道,PRD F034 明示&quot;再兜一层&quot;)。</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>本文件是 Provider 侧纵深(阶段 3 自含,INV-08):不 import tools_guard/tools_executor/</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>approval 内部符号;路径几何判定与 guard 同码同判(POL-FS-1/2/3)但自含实现,阶段 5</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>若落 F055 共享实现则签名不变、内部改调。Provider 以 async handler(args, ctx) 裸函数</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>形态绑定(executor 关3 兼容两种 Provider 形态:async handle 直接协程、同步经线程池)。</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>偏离说明(契约=spec;以下为既有实现冲突/空白处的取舍,均列理由):</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>1. 配置读取面:spec 伪码写 ctx.cfg[&quot;loop.content.file_spill_bytes&quot;] 等键,而</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   config.Settings 实为 pydantic 属性链(L1 默认值权威)→ _cfg_get 同时兼容属性链</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   与 dict 访问;ctx.cfg 未接线(阶段装配期)→ 回落 L1 默认值并记 debug 日志</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>   (运行面不因未接线崩溃,阈值有界默认)。</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>2. spill.put 调用形态与 tools_executor._spill_put(已落地消费者)对齐:</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   put(text, kind=kind),不传 ctx——spill.py 尚未落地,executor 侧已是该形态的</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   既有调用方,未来 spill 实现须同时服务两消费方;tool 侧按 F034 规格先</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   ctx.redact 脱敏再落盘(INV-09,spill 文件为明文出口),不依赖 spill 内部脱敏。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>3. workspace 根取数兼容双面:spec resolve 伪码用 ctx.scope.workspace,而 scope 落地</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>   实现(scope.py 偏离 1)与 guard(g3)统一存 scope.policy.workspace_root → 先读</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   ctx.scope.workspace(未来门面挂载面),回落 scope.policy.workspace_root/裸 policy。</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>   根缺失/未接线 = 装配 bug → CYC-999 fail-closed,绝不回落进程 CWD 锚定。</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>4. fs.read_file 解码失败(非 UTF-8 文本、样本无 NUL)→ TLB-806 拒读(与&quot;二进制</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>   拒读&quot;同码族语义,提示换工具);spec 伪码未覆盖该分支(直 decode 会以裸</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>   UnicodeDecodeError 泄漏为 TLB-805 运行异常),按错误码语义归并。</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>5. fs.read_file/delete_file 对&quot;目标是目录&quot;显式 TLB-805(spec delete 异常表同款</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>   先例;read 伪码只查 exists 会让 IsADirectoryError 以 TLB-805 运行异常形态泄漏,</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>   显式化后提示更可行动,码不变)。</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>6. fs.list_dir 截断语义取&quot;条目 &gt;500 才 truncated&quot;(常量段/职责 4 权威):伪码</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>   `len&gt;=500 → truncated=True` 会在恰 500 条时误标截断,落地为追加前检查</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>   (&gt;500 丢弃多余并留痕,恰 500 完整返回不误标)。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>7. fs.list_dir recursive 取&quot;1 层递归&quot;(参数表与注册 description&quot;1 层递归&quot;权威,</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>   T-07 描述须与执行同谓词),弃用伪码 p.glob(&quot;**/*&quot;) 的全深度语义——description</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>   明示 1 层,全深度会与对外描述不符。</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>8. fs.list_dir glob 参数按伪码实现为**名称前缀匹配**(startswith,注释明示&quot;前缀</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>   匹配由 agent 扩展&quot;);注册 description 的&quot;通配&quot;措辞为 spec 原文照录,不擅改。</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>9. 遍历中消失的条目(子项 stat 时已被并发删除/断链)→ FileNotFoundError 单条跳过,</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>   其余 OSError 上抛(TLB-805)——巨目录列举不被单条竞态整体打爆。</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>10. register() 在 spec 伪码逐条 register_tool(d) 之外补绑 Provider(register_tool</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    的 provider 具名参数,同包已支持):Provider handle = 模块级 async handler 裸函数,</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    与 executor 关3 契约一致;不补绑则 executor.lookup_provider 报&quot;契约已注册但</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    未绑定 Provider&quot;,工具不可执行。</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>import inspect</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>import logging</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>import os</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>import stat as stat_mod</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>import uuid</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>from datetime import datetime</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>from typing import TYPE_CHECKING, Any</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>from pyharness.core.tools_registry import ToolDefinition  # noqa: F401 五要素字段源</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>if TYPE_CHECKING:  # 仅类型标注;registry 鸭子注入(不 import 内部符号)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    from pyharness.core.tools_registry import ToolRegistry</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>log = logging.getLogger(&quot;pyharness.tool_fs&quot;)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code># ------------------------------------------------------------------ 常量</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>READ_SPILL_BYTES: int = 65536</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>&quot;&quot;&quot;读阈值默认(loop.content.file_spill_bytes L1,1024-1048576 可配)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>WRITE_MAX_BYTES: int = 1_048_576</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>&quot;&quot;&quot;写文件上限 1MB(schema maxLength 契约层拒,TLB-803 零执行,F035/PARAMETER-ANCHOR)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>_APPEND_MAX_BYTES: int = WRITE_MAX_BYTES</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>&quot;&quot;&quot;mode=append 的目标文件上限(=写入上限):append 实现为整读+重写,超限则 TLB-805 拒,</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>防对超大文件做无界整读(P3:append 无界整读)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code></code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>LIST_MAX_ENTRIES: int = 500</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>&quot;&quot;&quot;目录列举条目上限(F036;&gt;500 截断留痕,防巨目录打爆上下文)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>BINARY_SAMPLE: int = 8192</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>&quot;&quot;&quot;二进制探测样本字节数(NUL 字节命中即拒读 TLB-806)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>SPILL_MAX_FILE_BYTES: int = 10_485_760</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>&quot;&quot;&quot;spill 单文件上限默认(storage.spill.max_per_file_bytes L1 = 10MB,超限 PERS-223)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code></code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>_CRED_BASENAMES: tuple[str, ...] = (&quot;credentials.yaml&quot;, &quot;credentials.yml&quot;)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>&quot;&quot;&quot;凭据型文件名(g4 同源纵深:任何位置命中该形态 = 凭据文件,拒读 POL-CRED-1)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>_DEFAULT_CRED_FILE: str = &quot;~/.pyharness/credentials.yaml&quot;</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>&quot;&quot;&quot;凭据文件兜底清单项(config security.credentials.file L1 同源)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code></code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>_DOT_HIDDEN: tuple[str, ...] = (&quot;.&quot;, &quot;..&quot;)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>&quot;&quot;&quot;目录列举隐藏过滤锚(点开头即隐藏;iterdir 不含 . / ..,防御性保留)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code># ---------------------------------------------------------------- 配置辅助</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>def _cfg_get(ctx: Any, dotted: str, default: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    &quot;&quot;&quot;读 ctx 配置点分键(属性链与 dict 访问双兼容;未接线/缺键回落默认)。</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    2026-09-21 R11-7 修:此前**只认 `ctx.cfg`**,而装配层设的是 **`ctx.config`**</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    (`create_agent`)⇒ 本模块**所有配置阈值恒回落模块默认**:`loop.content.</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    file_spill_bytes`(读阈值)与 `security.policy.read_extra_dirs`(**只读例外目录**)</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    都不生效 —— 后者是安全相关面:运维配了例外目录仍会被拒(方向 fail-closed,但</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    文档承诺的授权能力不可达)。同族三处(session_query/spill/tool_web)一直兼容</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    `(&quot;cfg&quot;,&quot;config&quot;)` 两名字,**仅本处漏了一处判据**(同类第五次)。</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    cfg = None</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    for name in (&quot;cfg&quot;, &quot;config&quot;, &quot;settings&quot;):</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        cfg = getattr(ctx, name, None)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        if cfg is not None:</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            break</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    if cfg is None:</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        log.debug(&quot;ctx 配置面未接线,配置键 %s 回落默认 %r&quot;, dotted, default)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        return default</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    cur: Any = cfg</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    for part in dotted.split(&quot;.&quot;):</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        if isinstance(cur, dict):</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            if part not in cur:</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>                return default</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            cur = cur[part]</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        else:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            nxt = getattr(cur, part, None)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            if nxt is None:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                return default</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            cur = nxt</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    return cur if cur is not None else default</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code></code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>def _read_spill_bytes(ctx: Any) -&gt; int:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    &quot;&quot;&quot;fs.read_file 转 spill 阈值(loop.content.file_spill_bytes,默认 64KB)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    return int(_cfg_get(ctx, &quot;loop.content.file_spill_bytes&quot;, READ_SPILL_BYTES))</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code></code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code></code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>def _spill_max_bytes(ctx: Any) -&gt; int:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    &quot;&quot;&quot;spill 单文件上限(storage.spill.max_per_file_bytes,默认 10MB)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    return int(_cfg_get(ctx, &quot;storage.spill.max_per_file_bytes&quot;,</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                        SPILL_MAX_FILE_BYTES))</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code></code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code></code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>def _extra_read_dirs(ctx: Any) -&gt; list[str]:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    &quot;&quot;&quot;只读例外目录清单(security.policy.read_extra_dirs;config+guard 留痕授权)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    v = _cfg_get(ctx, &quot;security.policy.read_extra_dirs&quot;, None)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    if v is None:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        return []</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    if isinstance(v, str):                       # 宽松兼容:单串配置</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        return [v] if v.strip() else []</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>    return [str(x) for x in v if str(x).strip()]</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code></code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code></code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>from pyharness.core.tool_redaction import _redact</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code></code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code></code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code># ------------------------------------------------------------ 路径几何第二道闸</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>def _workspace_root(ctx: Any) -&gt; Path:</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    &quot;&quot;&quot;workspace 唯一根(偏离 3:ctx.scope.workspace → policy.workspace_root 回落)。</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code></code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    根缺失/空 = 装配 bug:fail-closed CYC-999(绝不回落进程 CWD 作锚定根)。</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    scope = getattr(ctx, &quot;scope&quot;, None)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    if scope is None:</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        raise_code(&quot;CYC-999&quot;, module=&quot;tool_fs&quot;,</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                   hint=&quot;ctx.scope 未接线:workspace 根缺失,拒绝路径解析(fail-closed)&quot;)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    ws = getattr(scope, &quot;workspace&quot;, None)</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>    if ws is None:</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        policy = getattr(scope, &quot;policy&quot;, None) or scope</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        ws = getattr(policy, &quot;workspace_root&quot;, None)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    if not ws:</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        raise_code(&quot;CYC-999&quot;, module=&quot;tool_fs&quot;,</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                   hint=&quot;workspace 根为空/未接线(ctx.scope.workspace 或 &quot;</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                        &quot;scope.policy.workspace_root),拒绝路径解析(fail-closed)&quot;)</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    return Path(os.path.expanduser(str(ws))).resolve()</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code></code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code></code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>def _under(p: Path, root: Path) -&gt; bool:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    &quot;&quot;&quot;p 是否几何落在 root 内(含根本身;normcase 后带分隔符边界前缀比较)。</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code></code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    同 guard._inside_workspace 语义(大小写/分隔符归一,Windows 同源比较)。</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    rs = os.path.normcase(str(root))</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    ps = os.path.normcase(str(p))</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    if ps == rs:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        return True</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>    return ps.startswith(rs.rstrip(&quot;\\/&quot;) + os.sep)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code></code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code></code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>def _in_extra_read(real: Path, ctx: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    &quot;&quot;&quot;只读例外目录命中判定(real 最终落点 ∈ 任一 read_extra_dirs 解析根内)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>    for d in _extra_read_dirs(ctx):</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        try:</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            base = Path(os.path.expanduser(str(d))).resolve()</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        except OSError:</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            continue                            # 例外目录本身不可解析 → 跳过</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        if _under(real, base):</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>            return True</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>    return False</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code></code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code></code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>def resolve_in_workspace(raw: str, ctx: Any, *, writable: bool = False) -&gt; Path:</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>    &quot;&quot;&quot;路径单点归一(第二道几何闸,F034/F055 语义;模块内私有不注册为工具)。</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    三道拒(与管道 g3 同码同判,防 TOCTOU 与内层直调,INV-04):</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>      POL-FS-1 绝对路径词法越界(不在 workspace 内);</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>      POL-FS-2 规范化后含 &quot;..&quot; 逃逸(相对路径归一后越界);</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>      POL-FS-3 symlink/junction 最终解析越界(writable=True 无只读例外;</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>              writable=False 允许 security.policy.read_extra_dirs 只读例外)。</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    失败一律 GRD-401(reason=POL-FS-x)结构化上抛,零副作用。</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>    root = _workspace_root(ctx)</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>    p = Path(str(raw)).expanduser()</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>    if p.is_absolute():</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        # POL-FS-1:绝对路径越界 —— **只读例外目录**(security.policy.read_extra_dirs)</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        # 命中且本调用为只读时放行(A2/R24:此前该例外在 provider 层也不可达 ⇒ 配了仍拒)。</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        if not _under(p, root) and not (not writable</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>                                        and _in_extra_read(p, ctx)):</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>            raise_code(&quot;GRD-401&quot;, reason=&quot;POL-FS-1&quot;, path=str(raw),</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                       advice=&quot;只允许 workspace 内路径(绝对路径越界;&quot;</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                              &quot;只读例外目录未命中)&quot;)</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        cand = p</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>    else:</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        cand = root / p                          # 相对路径锚定 workspace 根</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    norm = Path(os.path.normpath(cand))</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>    if not _under(norm, root) and not (not writable</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                                       and _in_extra_read(norm, ctx)):</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        raise_code(&quot;GRD-401&quot;, reason=&quot;POL-FS-2&quot;, path=str(raw),</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                   advice=&quot;路径含 .. 越界(只读例外目录未命中)&quot;)</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    try:</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        real = norm.resolve()                    # 解开 symlink/junction</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>    except OSError:</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        raise_code(&quot;GRD-401&quot;, reason=&quot;POL-FS-3&quot;, path=str(raw),</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                   advice=&quot;符号链接解析失败,按越界拒绝(无法安全归一)&quot;)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>    inside = _under(real, root)</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>    if not inside and not (not writable and _in_extra_read(real, ctx)):</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        raise_code(&quot;GRD-401&quot;, reason=&quot;POL-FS-3&quot;, path=str(raw),</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>                   advice=&quot;符号链接指向 workspace 外(只读例外目录亦未命中)&quot;)</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>    return real</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code></code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code></code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code># ------------------------------------------------------------ 凭据纵深兜底</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>def _reject_credential(p: Path, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>    &quot;&quot;&quot;读凭据文件纵深拦截(与 g4 同码 POL-CRED-1;防内层直调绕过管道)。</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code></code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    命中口径双轨(g4 同源):①规范化绝对路径 ∈ 凭据文件清单(默认</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>    ~/.pyharness/credentials.yaml);②文件形态名(credentials.yaml/yml,</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>    凭据文件拷进 workspace 任何位置都拦)。</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>    raw_paths = _cfg_get(ctx, &quot;security.credentials.file&quot;, None)</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>    if isinstance(raw_paths, str):</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        cred_paths: list[str] = [raw_paths] if raw_paths.strip() else []</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>    elif raw_paths:</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        cred_paths = [str(x) for x in raw_paths if str(x).strip()]</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>    else:</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        cred_paths = [_DEFAULT_CRED_FILE]</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>    np_target = os.path.normcase(str(p))</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>    for c in cred_paths:</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        norm_c = os.path.normcase(os.path.abspath(os.path.expanduser(str(c))))</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        if np_target == norm_c:                  # 命中清单精确路径</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>            raise_code(&quot;GRD-401&quot;, reason=&quot;POL-CRED-1&quot;, path=str(p),</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>                       advice=&quot;凭据文件禁止经工具读取(F016 单口)&quot;)</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>    base = os.path.basename(np_target).lower()</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>    if base in _CRED_BASENAMES:                  # 凭据文件形态(名字即证据)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        raise_code(&quot;GRD-401&quot;, reason=&quot;POL-CRED-1&quot;, path=str(p),</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>                   advice=&quot;凭据文件禁止经工具读取(形态名命中,含 workspace 内副本)&quot;)</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code></code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code></code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code># ------------------------------------------------------------ 溢出落盘依赖</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>async def _spill_put(ctx: Any, text: str, kind: str) -&gt; dict:</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>    &quot;&quot;&quot;ctx.storage.spill.put 封装(偏离 2:与 executor._spill_put 调用形态一致)。</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code></code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>    storage.spill 未接线 → PERS-221 结构化上抛(超长输出无法归档,不静默);</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>    put 返回须为 SpillMeta dict(F039 契约),否则 PERS-221。</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>    spill = getattr(getattr(ctx, &quot;storage&quot;, None), &quot;spill&quot;, None)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>    if spill is None:</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        raise_code(&quot;PERS-221&quot;, module=&quot;tool_fs&quot;,</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>                   hint=&quot;storage.spill 未接线(能力未激活),超限内容无法归档&quot;)</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>    try:</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        r = spill.put(text, kind=kind)</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        if inspect.isawaitable(r):</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>            r = await r</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>    except PyHError:</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>        raise</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>    except Exception as exc:                     # noqa: BLE001 落盘故障 → PERS-221</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>        raise_code(&quot;PERS-221&quot;, module=&quot;tool_fs&quot;, cause=exc,</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                   advice=&quot;spill 写失败,查 spill 目录权限与磁盘空间&quot;)</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>    if not isinstance(r, dict):</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        raise_code(&quot;PERS-221&quot;, module=&quot;tool_fs&quot;,</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>                   hint=&quot;storage.spill.put 返回非 dict(契约违约)&quot;)</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>    return r</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code></code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code></code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code># ================================================================ fs.read_file</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>def _looks_binary(data: bytes) -&gt; bool:</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>    &quot;&quot;&quot;二进制探测:NUL 字节样本命中(BINARY_SAMPLE=8192 头样本)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>    return b&quot;\x00&quot; in data[:BINARY_SAMPLE]</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code></code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code></code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>async def read_file(args: dict, ctx: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>    &quot;&quot;&quot;fs.read_file(F034):读 workspace 内文本文件(UTF-8 自动 BOM)。</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code></code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>    流程:第二道几何闸 → 凭据纵深 → stat 判存在/目录/大小(&gt;10MB spill 上限</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>    PERS-223 拒)→ 整读(≤10MB)→ 二进制探测拒读 TLB-806 → utf-8-sig 解码;</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>    内容 ≤64KB(loop.content.file_spill_bytes)全量返回;&gt;64KB 经 ctx.storage.</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>    spill.put 落盘只返回摘要+引用,全文不进上下文/历史(输出有界 T-09)。</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>    p = resolve_in_workspace(args[&quot;path&quot;], ctx, writable=False)</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>    _reject_credential(p, ctx)                   # g4 同码兜底(POL-CRED-1)</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>    try:</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        st = p.stat()</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>    except FileNotFoundError:</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        raise_code(&quot;TLB-802&quot;, path=str(p),</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>                   advice=&quot;文件不存在,先 list_dir 自查路径拼写&quot;)</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>    except OSError as e:</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        raise_code(&quot;TLB-805&quot;, path=str(p), cause=e,</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>                   advice=&quot;文件不可访问(权限/IO),请重试&quot;)</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>    if stat_mod.S_ISDIR(st.st_mode):</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        raise_code(&quot;TLB-805&quot;, path=str(p),</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>                   advice=&quot;目标是目录,本工具只读文件,先 list_dir 侦查&quot;)</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>    if st.st_size &gt; _spill_max_bytes(ctx):       # 预检:超 spill 单文件上限</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>        raise_code(&quot;PERS-223&quot;, path=str(p), size=st.st_size,</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>                   advice=&quot;文件超过 spill 上限,换 F052 分块或缩小目标&quot;)</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>    try:</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>        data = p.read_bytes()                    # ≤10MB 才整读</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>    except OSError as e:</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        raise_code(&quot;TLB-805&quot;, path=str(p), cause=e,</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>                   advice=&quot;文件读取失败(权限/IO),请重试&quot;)</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>    if _looks_binary(data):</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>        raise_code(&quot;TLB-806&quot;, path=str(p),</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>                   advice=&quot;二进制文件,不能用文本读取(换专门工具)&quot;)</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>    try:</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>        text = data.decode(&quot;utf-8-sig&quot;)          # 自动 BOM</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>    except UnicodeDecodeError:</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        raise_code(&quot;TLB-806&quot;, path=str(p),       # 偏离 4:非 UTF-8 拒读</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>                   advice=&quot;非 UTF-8 文本(解码失败),不能用文本读取&quot;)</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>    if len(data) &lt;= _read_spill_bytes(ctx):      # 小文件全量返回</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>        return {&quot;content&quot;: _redact(ctx, text), &quot;truncated&quot;: False,</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>                &quot;bytes&quot;: len(data), &quot;path&quot;: str(p)}</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>    redacted = _redact(ctx, text)                # 出口脱敏后再落盘(INV-09)</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>    meta = await _spill_put(ctx, redacted, kind=&quot;read&quot;)</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>    return {&quot;content&quot;: str(meta.get(&quot;preview&quot;, &quot;&quot;))[:500],</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>            &quot;truncated&quot;: True, &quot;spill_ref&quot;: meta,</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>            &quot;bytes&quot;: len(data), &quot;path&quot;: str(p)}   # 大文件只给摘要+引用</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code></code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code></code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code># =============================================================== fs.write_file</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>async def write_file(args: dict, ctx: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>    &quot;&quot;&quot;fs.write_file(F035):新建/追加文本到 workspace 内,自动建目录,原子写。</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code></code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>    原子写:同目录临时文件写毕 → os.replace 原子替换(崩溃不留半文件);</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>    失败清临时文件后原样上抛(executor 收敛 TLB-805)。覆写审批由管道 g7</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>    在 Provider 前完成(工具内不二判、不降级);content &gt;1MB 已在契约层</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>    (schema maxLength)拒,零执行(TLB-803,INV-06)。</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>    p = resolve_in_workspace(args[&quot;path&quot;], ctx, writable=True)  # 写:只认 workspace</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>    content = args[&quot;content&quot;]                    # 契约已验 ≤1MB</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>    if args.get(&quot;mode&quot;, &quot;write&quot;) == &quot;append&quot; and p.exists():</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>        try:</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>            if p.stat().st_size &gt; _APPEND_MAX_BYTES:</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>                raise_code(&quot;TLB-805&quot;, path=str(p),</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>                           advice=f&quot;追加目标超过 {_APPEND_MAX_BYTES} 字节上限&quot;</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>                                  &quot;(整读+重写代价过大);改用 write 或分段&quot;)</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>            content = p.read_text(encoding=&quot;utf-8&quot;) + content  # append=复制+追加</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>        except (OSError, UnicodeDecodeError) as e:</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>            raise_code(&quot;TLB-805&quot;, path=str(p), cause=e,</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>                       advice=&quot;追加读取原文件失败(权限/IO/编码非 UTF-8),请重试&quot;)</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>    try:</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>        p.parent.mkdir(parents=True, exist_ok=True)   # 自动建目录</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>    except OSError as e:</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        raise_code(&quot;TLB-805&quot;, path=str(p.parent), cause=e,</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>                   advice=&quot;父目录创建失败(权限/IO),请重试&quot;)</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>    tmp = p.with_name(p.name + f&quot;.tmp-{uuid.uuid4().hex[:8]}&quot;)  # 同目录临时文件</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>    try:</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        tmp.write_text(content, encoding=&quot;utf-8&quot;, newline=&quot;&quot;)   # 防换行改写</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>        os.replace(tmp, p)                       # 原子替换</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>    except BaseException:</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>        tmp.unlink(missing_ok=True)              # 失败清临时文件</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>        raise</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>    return {&quot;bytes&quot;: len(content.encode(&quot;utf-8&quot;)), &quot;path&quot;: str(p)}</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code></code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code></code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code># =============================================================== fs.list_dir</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>async def list_dir(args: dict, ctx: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>    &quot;&quot;&quot;fs.list_dir(F036):列 workspace 内目录条目(名称/类型/大小/修改时间)。</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code></code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>    隐藏文件默认隐藏(all=True 显示);glob 为名称前缀过滤(伪码 startswith,偏离 8);</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>    recursive=1 层递归(偏离 7);条目 &gt;500 截断留痕 truncated=True(偏离 6),</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>    防巨目录打爆上下文(输出有界 T-09)。</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>    p = resolve_in_workspace(args.get(&quot;path&quot;) or &quot;.&quot;, ctx, writable=False)</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>    if not p.is_dir():</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>        raise_code(&quot;TLB-802&quot;, path=str(p),</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>                   advice=&quot;目录不存在或路径不是目录,先 list_dir 父目录侦查&quot;)</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>    show_all = bool(args.get(&quot;all&quot;))</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>    recursive = bool(args.get(&quot;recursive&quot;))</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>    gpat = args.get(&quot;glob&quot;)</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code></code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>    def _visible(name: str) -&gt; bool:</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>        &quot;&quot;&quot;隐藏过滤(点开头即隐藏;all=True 显示)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>        return show_all or not name.startswith(&quot;.&quot;)</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code></code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>    cands: list[Path] = []</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>    try:</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>        top = [c for c in p.iterdir() if _visible(c.name)]</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>        cands = list(top)</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>        if recursive:                            # 1 层递归:仅直接子目录的条目</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>            for d in top:</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>                if d.is_dir():</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>                    cands.extend(c for c in d.iterdir() if _visible(c.name))</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>    except OSError as e:</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>        raise_code(&quot;TLB-805&quot;, path=str(p), cause=e,</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>                   advice=&quot;目录列举失败(权限/IO),请重试&quot;)</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>    cands.sort(key=lambda c: c.name)             # 稳定排序(确定性输出)</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code></code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>    entries: list[dict] = []</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>    truncated = False</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>    for child in cands:</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>        if gpat and not child.name.startswith(gpat):</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>            continue                             # 通配过滤(前缀匹配,偏离 8)</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>        if len(entries) &gt;= LIST_MAX_ENTRIES:     # &gt;500 截断留痕(偏离 6)</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>            truncated = True</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>            break</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>        try:</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>            st = child.stat()</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>        except FileNotFoundError:</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>            continue                             # 竞态消失/断链:单条跳过(偏离 9)</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>        except OSError as e:</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>            raise_code(&quot;TLB-805&quot;, path=str(p), cause=e,</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>                       advice=&quot;目录条目读取失败(权限/IO),请重试&quot;)</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>        entries.append({</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>            &quot;name&quot;: child.name,</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>            &quot;type&quot;: &quot;dir&quot; if child.is_dir() else &quot;file&quot;,</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>            &quot;size&quot;: st.st_size if child.is_file() else None,   # size 仅文件</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>            &quot;modified&quot;: datetime.fromtimestamp(st.st_mtime)</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>            .isoformat(timespec=&quot;seconds&quot;),                    # ISO 8601 mtime</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>        })</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>    return {&quot;entries&quot;: entries, &quot;truncated&quot;: truncated}</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code></code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code></code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code># ============================================================= fs.delete_file</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>async def delete_file(args: dict, ctx: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>    &quot;&quot;&quot;fs.delete_file(critical 锚点,PRD §6.3/T-SEC)。</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code></code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>    注册为 danger=critical——管道 g-danger 对 critical 直接拒绝、不可审批</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>    (POL-DGR-1),正常路径 Provider 恒零执行(审计样本:&quot;拦了且没执行&quot;)。</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>    本函数体是真实删除实现,仅策略被显式下调或测试直调 Provider 时才可达;</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>    即便下调也守第二道几何闸(writable=True 只认 workspace 根)。</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>    p = resolve_in_workspace(args[&quot;path&quot;], ctx, writable=True)</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>    if not p.exists():</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>        raise_code(&quot;TLB-802&quot;, path=str(p),</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>                   advice=&quot;文件不存在,先 list_dir 确认&quot;)</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>    if p.is_dir():</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>        raise_code(&quot;TLB-805&quot;, path=str(p),</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>                   advice=&quot;本工具只删文件;目录删除不在工具面&quot;)</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>    try:</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>        p.unlink()                               # 真实副作用仅策略下调后发生</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>    except OSError as e:</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>        raise_code(&quot;TLB-805&quot;, path=str(p), cause=e,</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code>                   advice=&quot;删除失败(权限/IO),请重试&quot;)</code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code>    return {&quot;deleted&quot;: str(p)}</code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code></code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code></code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code># ============================================================ 五要素注册入口</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>PROVIDERS: dict[str, Any] = {</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>    &quot;fs.read_file&quot;: read_file,</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code>    &quot;fs.write_file&quot;: write_file,</code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>    &quot;fs.list_dir&quot;: list_dir,</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>    &quot;fs.delete_file&quot;: delete_file,</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code>}</code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code>&quot;&quot;&quot;Provider handle 映射(裸 async handler,executor 关3 契约:handle(args, ctx))。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code></code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code></code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>def register(registry: &quot;ToolRegistry&quot;) -&gt; list[str]:</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>    &quot;&quot;&quot;五要素注册入口(F008/T-05):装配 4 个 ToolDefinition 并逐个登记。</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code></code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code>    ToolDefinition(name/description/schema/danger/handler 五要素齐备,owner=</code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>    &quot;builtin&quot;);schema 编译与 description 防注入检查(T-07)由 registry 层完成;</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code>    重复注册由 registry 拒(TLB-801)。偏离 10:register_tool 补绑 Provider</code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code>    (register_tool(defn, provider=…)),否则 executor 查不到实现。</code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>    defs = [</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code>        ToolDefinition(name=&quot;fs.read_file&quot;, danger=&quot;low&quot;,</code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code>                       description=&quot;读 workspace 内文本文件(UTF-8 自动 BOM);&quot;</code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code>                                   &quot;超过 64KB 自动转 spill 引用&quot;,</code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code>                       schema={&quot;type&quot;: &quot;object&quot;,</code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code>                               &quot;properties&quot;: {&quot;path&quot;: {&quot;type&quot;: &quot;string&quot;}},</code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code>                               &quot;required&quot;: [&quot;path&quot;],</code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code>                               &quot;additionalProperties&quot;: False},</code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code>                       owner=&quot;builtin&quot;, timeout_s=30),</code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code>        ToolDefinition(name=&quot;fs.write_file&quot;, danger=&quot;low&quot;,</code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>                       description=&quot;新建或追加文本到 workspace 内文件;&quot;</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code>                                   &quot;自动建目录;原子写入&quot;,</code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code>                       schema={&quot;type&quot;: &quot;object&quot;,</code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>                               &quot;properties&quot;: {</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>                                   &quot;path&quot;: {&quot;type&quot;: &quot;string&quot;},</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code>                                   &quot;content&quot;: {&quot;type&quot;: &quot;string&quot;,</code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code>                                               &quot;maxLength&quot;: WRITE_MAX_BYTES},</code></div>
+<div class="code-line" id="L507"><a class="line-number" href="#L507">507</a><code>                                   &quot;mode&quot;: {&quot;enum&quot;: [&quot;write&quot;, &quot;append&quot;]}},</code></div>
+<div class="code-line" id="L508"><a class="line-number" href="#L508">508</a><code>                               &quot;required&quot;: [&quot;path&quot;, &quot;content&quot;],</code></div>
+<div class="code-line" id="L509"><a class="line-number" href="#L509">509</a><code>                               &quot;additionalProperties&quot;: False},</code></div>
+<div class="code-line" id="L510"><a class="line-number" href="#L510">510</a><code>                       owner=&quot;builtin&quot;, timeout_s=30),</code></div>
+<div class="code-line" id="L511"><a class="line-number" href="#L511">511</a><code>        ToolDefinition(name=&quot;fs.list_dir&quot;, danger=&quot;none&quot;,</code></div>
+<div class="code-line" id="L512"><a class="line-number" href="#L512">512</a><code>                       description=&quot;列 workspace 内目录条目(名称/类型/大小/&quot;</code></div>
+<div class="code-line" id="L513"><a class="line-number" href="#L513">513</a><code>                                   &quot;修改时间),支持通配与 1 层递归&quot;,</code></div>
+<div class="code-line" id="L514"><a class="line-number" href="#L514">514</a><code>                       schema={&quot;type&quot;: &quot;object&quot;,</code></div>
+<div class="code-line" id="L515"><a class="line-number" href="#L515">515</a><code>                               &quot;properties&quot;: {&quot;path&quot;: {&quot;type&quot;: &quot;string&quot;},</code></div>
+<div class="code-line" id="L516"><a class="line-number" href="#L516">516</a><code>                                              &quot;glob&quot;: {&quot;type&quot;: &quot;string&quot;},</code></div>
+<div class="code-line" id="L517"><a class="line-number" href="#L517">517</a><code>                                              &quot;recursive&quot;: {&quot;type&quot;: &quot;boolean&quot;},</code></div>
+<div class="code-line" id="L518"><a class="line-number" href="#L518">518</a><code>                                              &quot;all&quot;: {&quot;type&quot;: &quot;boolean&quot;}},</code></div>
+<div class="code-line" id="L519"><a class="line-number" href="#L519">519</a><code>                               &quot;required&quot;: [], &quot;additionalProperties&quot;: False},</code></div>
+<div class="code-line" id="L520"><a class="line-number" href="#L520">520</a><code>                       owner=&quot;builtin&quot;, timeout_s=15),</code></div>
+<div class="code-line" id="L521"><a class="line-number" href="#L521">521</a><code>        ToolDefinition(name=&quot;fs.delete_file&quot;, danger=&quot;critical&quot;,</code></div>
+<div class="code-line" id="L522"><a class="line-number" href="#L522">522</a><code>                       description=&quot;删除 workspace 内文件(默认恒拒,&quot;</code></div>
+<div class="code-line" id="L523"><a class="line-number" href="#L523">523</a><code>                                   &quot;仅审计演示锚点)&quot;,</code></div>
+<div class="code-line" id="L524"><a class="line-number" href="#L524">524</a><code>                       schema={&quot;type&quot;: &quot;object&quot;,</code></div>
+<div class="code-line" id="L525"><a class="line-number" href="#L525">525</a><code>                               &quot;properties&quot;: {&quot;path&quot;: {&quot;type&quot;: &quot;string&quot;}},</code></div>
+<div class="code-line" id="L526"><a class="line-number" href="#L526">526</a><code>                               &quot;required&quot;: [&quot;path&quot;],</code></div>
+<div class="code-line" id="L527"><a class="line-number" href="#L527">527</a><code>                               &quot;additionalProperties&quot;: False},</code></div>
+<div class="code-line" id="L528"><a class="line-number" href="#L528">528</a><code>                       owner=&quot;builtin&quot;, timeout_s=15),</code></div>
+<div class="code-line" id="L529"><a class="line-number" href="#L529">529</a><code>    ]</code></div>
+<div class="code-line" id="L530"><a class="line-number" href="#L530">530</a><code>    for d in defs:                               # 逐个登记并绑定 Provider</code></div>
+<div class="code-line" id="L531"><a class="line-number" href="#L531">531</a><code>        registry.register_tool(d, provider=PROVIDERS.get(d.name))</code></div>
+<div class="code-line" id="L532"><a class="line-number" href="#L532">532</a><code>    return [d.name for d in defs]                # 注册名清单</code></div>
+<div class="code-line" id="L533"><a class="line-number" href="#L533">533</a><code></code></div>
+<div class="code-line" id="L534"><a class="line-number" href="#L534">534</a><code></code></div>
+<div class="code-line" id="L535"><a class="line-number" href="#L535">535</a><code>__all__ = [</code></div>
+<div class="code-line" id="L536"><a class="line-number" href="#L536">536</a><code>    &quot;resolve_in_workspace&quot;, &quot;read_file&quot;, &quot;write_file&quot;, &quot;list_dir&quot;,</code></div>
+<div class="code-line" id="L537"><a class="line-number" href="#L537">537</a><code>    &quot;delete_file&quot;, &quot;register&quot;, &quot;PROVIDERS&quot;,</code></div>
+<div class="code-line" id="L538"><a class="line-number" href="#L538">538</a><code>    &quot;READ_SPILL_BYTES&quot;, &quot;WRITE_MAX_BYTES&quot;, &quot;LIST_MAX_ENTRIES&quot;, &quot;BINARY_SAMPLE&quot;,</code></div>
+<div class="code-line" id="L539"><a class="line-number" href="#L539">539</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

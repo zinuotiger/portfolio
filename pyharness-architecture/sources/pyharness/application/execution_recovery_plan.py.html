@@ -1,0 +1,100 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/execution_recovery_plan.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/execution_recovery_plan.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 100 行</span></nav><main class="wrap source-page"><h1>pyharness/application/execution_recovery_plan.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：d99ecf8cfbf5d18f523eb462301998faf7f5ca9f<br>SHA-256（内容校验）：d2f44a1b1cf0214a468b57e4083a422932716c9eeb7467e6294469f67dce8f94</p><p><a href="../../../architecture-detailed.html?node=recovery">ExecutionRecovery（恢复条件观察）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 7 个类、函数与方法</summary><ul><li><a href="#L15">journal_basis（函数） · L15–L17</a></li><li><a href="#L20">security_refusal（函数） · L20–L21</a></li><li><a href="#L24">state_available（函数） · L24–L32</a></li><li><a href="#L35">index_scope_path（函数） · L35–L35</a></li><li><a href="#L38">index_observation（函数） · L38–L47</a></li><li><a href="#L50">sealed_plan（函数） · L50–L54</a></li><li><a href="#L57">observe_recovery_plan（异步函数） · L57–L100</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Strict observation of exact execution facts; no writer, repair or dispatch.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.execution_checkpoints import prefix_digest</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.execution_child_graph import child_admissions</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.execution_child_reader import read_child_log</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.product_execution_sessions import read_execution_log</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.product_executions import execution_projection</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.execution_artifact_receipts import delegated_receipts</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.application.execution_liveness import control_observation</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.application.recovery_contracts import RecoveryPlan,IndexObservation</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>def journal_basis(log):</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    events=list(log.events_after(0))</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    return dict(session_id=log.sid,observed_seq=events[-1].seq,prefix_digest=prefix_digest(events))</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>def security_refusal(events):</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    return any(e.type in (&#x27;guard.rejected&#x27;,&#x27;approval.denied&#x27;,&#x27;approval.timeout&#x27;) for e in events)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>def state_available(projects,events,checkpoint):</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    from pyharness.application.execution_state_reader import read_state_snapshot</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    if checkpoint is None:return False</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    cp=next((e for e in events if e.seq==checkpoint[&#x27;source_seq&#x27;]),None)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    fact=next((e for e in events if e.type==&#x27;execution.state_checkpoint&#x27; and e.payload[&#x27;checkpoint_seq&#x27;]==checkpoint[&#x27;source_seq&#x27;]),None)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    if fact is None or fact.payload[&#x27;status&#x27;]!=&#x27;captured&#x27;:return False</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    try:body=read_state_snapshot(projects.service.platform,fact,cp)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    except (OSError,PyHError):return False</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    return body.filesystem_capture in (&#x27;files_and_directories&#x27;,&#x27;no_workspace&#x27;)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code></code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>def index_scope_path(service):return Path(service.effective_settings().storage.db_path).expanduser().resolve()</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>def index_observation(service,events):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    from pyharness.core.query_projection import read_max_seq,is_indexable</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    expected=max((e.seq for e in events if is_indexable(e.type,e)),default=0)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    path=index_scope_path(service);scope=digest_of(canonical(str(path)))</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    if not path.exists():return IndexObservation(state=&#x27;not_built&#x27;,scope_digest=scope,expected_content_seq=expected,observed_content_seq=0)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    try:</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        actual=read_max_seq(path,events[0].session_id)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        return IndexObservation(state=&#x27;current&#x27; if actual==expected else &#x27;stale&#x27;,scope_digest=scope,expected_content_seq=expected,observed_content_seq=actual)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    except (OSError,PyHError):</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        return IndexObservation(state=&#x27;unavailable&#x27;,scope_digest=scope,expected_content_seq=expected,error_code=&#x27;PERS-202&#x27;)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>def sealed_plan(summary,**facts):</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    reference={k:summary[k] for k in (&#x27;execution_id&#x27;,&#x27;revision&#x27;,&#x27;digest&#x27;,&#x27;source_seq&#x27;)}</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    value=RecoveryPlan(project_id=summary[&#x27;project_id&#x27;],execution_ref=reference,plan_digest=&#x27;0&#x27;*64,**facts)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    digest=digest_of(canonical(value.model_dump(mode=&#x27;json&#x27;,exclude={&#x27;plan_digest&#x27;})))</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    return value.model_copy(update={&#x27;plan_digest&#x27;:digest}).model_dump(mode=&#x27;json&#x27;)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>async def observe_recovery_plan(projects,row,summary):</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    service=projects.service;directory=service._tenant_sessions_dir()</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    try:</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        root=await read_execution_log(directory,row,service.tenant_id)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        events=list(root.events_after(0));result=execution_projection(projects,row,summary,root)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        delegated=await delegated_receipts(projects,row,root)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        unknown=result[&#x27;unknown_effects&#x27;] or delegated.pop(&#x27;unknown_effects&#x27;)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        result[&#x27;artifacts&#x27;].extend(delegated.pop(&#x27;artifacts&#x27;));result.update(delegated)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        control=control_observation(projects,row,root,result)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        admissions=child_admissions(events,row);journals=[journal_basis(root)];blockers=[]</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        for sid in list(admissions)[-400:]:</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            try:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                child=await read_child_log(directory,row,service.tenant_id,sid)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                journals.append(journal_basis(child))</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>                if security_refusal(child.events_after(0)):blockers.append(&#x27;security_refusal&#x27;)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            except PyHError as exc:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                if exc.code!=&#x27;PERS-202&#x27;:raise</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                blockers.append(&#x27;child_journal_unconfirmed&#x27;);unknown=True</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        if len(admissions)&gt;400:blockers.append(&#x27;journal_scope_truncated&#x27;)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        if unknown:blockers.append(&#x27;unknown_effects&#x27;)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        if control[&#x27;execution_owner&#x27;]==&#x27;live&#x27;:blockers.append(&#x27;execution_live&#x27;)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        if result[&#x27;status&#x27;]==&#x27;completed&#x27;:blockers.append(&#x27;execution_completed&#x27;)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        if security_refusal(events) or str(result[&#x27;execution_reason&#x27;] or &#x27;&#x27;).startswith((&#x27;GRD-&#x27;,&#x27;APR-&#x27;)):</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            blockers.append(&#x27;security_refusal&#x27;)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        checkpoints=[e for e in events if e.type==&#x27;execution.checkpoint&#x27;];latest=None</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        if checkpoints:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            e=checkpoints[-1];latest={k:e.payload[k] for k in (&#x27;checkpoint_id&#x27;,&#x27;prefix_seq&#x27;,&#x27;prefix_digest&#x27;,&#x27;materialized_messages_digest&#x27;)};latest[&#x27;source_seq&#x27;]=e.seq</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        else:blockers.append(&#x27;checkpoint_missing&#x27;)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        artifacts=result[&#x27;artifacts&#x27;]</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        if any(a[&#x27;integrity&#x27;]!=&#x27;verified&#x27; for a in artifacts):</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            unknown=True;blockers.append(&#x27;unknown_effects&#x27;)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        if len(artifacts)&gt;1000:blockers.append(&#x27;artifact_scope_truncated&#x27;)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        available=state_available(projects,events,latest)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        if not available:blockers.append(&#x27;restore_state_unavailable&#x27;)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        blockers.append(&#x27;continuation_gate_required&#x27;)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        return sealed_plan(summary,execution_status=result[&#x27;status&#x27;],journals=journals,journals_total=1+len(admissions),journals_truncated=len(admissions)&gt;400,</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            latest_checkpoint=latest,artifacts=[{k:a[k] for k in (&#x27;artifact_id&#x27;,&#x27;session_id&#x27;,&#x27;source_seq&#x27;,&#x27;record_digest&#x27;,&#x27;sha256&#x27;,&#x27;integrity&#x27;)} for a in artifacts[:1000]],</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            artifacts_total=len(artifacts),artifacts_truncated=len(artifacts)&gt;1000,index_observation=index_observation(service,events),</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            unknown_effects=unknown,restore_state_available=available,continuation_blockers=sorted(set(blockers)))</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    except PyHError as exc:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        if exc.code!=&#x27;PERS-202&#x27;:raise</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        return sealed_plan(summary,execution_status=&#x27;unknown&#x27;,journals=[],journals_total=0,journals_truncated=False,</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            latest_checkpoint=None,artifacts=[],artifacts_total=0,artifacts_truncated=False,index_observation=IndexObservation(state=&#x27;unavailable&#x27;,error_code=&#x27;PERS-202&#x27;),</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            unknown_effects=True,continuation_blockers=[&#x27;journal_unconfirmed&#x27;,&#x27;restore_state_unavailable&#x27;,&#x27;continuation_gate_required&#x27;])</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

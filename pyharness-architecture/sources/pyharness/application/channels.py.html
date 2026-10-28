@@ -1,0 +1,231 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/channels.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/channels.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 231 行</span></nav><main class="wrap source-page"><h1>pyharness/application/channels.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：d129c4a42b58d45a8489fab31764806858126818<br>SHA-256（内容校验）：b114d96a1392d45b0ac730ab9ecc219050e7a7b1cc2c18d8c3852d597aea1ce7</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 16 个类、函数与方法</summary><ul><li><a href="#L21">Channels（类） · L21–L231</a><ul><li><a href="#L22">Channels.__init__（方法） · L22–L43</a></li><li><a href="#L45">Channels._local_only（方法） · L45–L47</a></li><li><a href="#L49">Channels.configs（方法） · L49–L50</a></li><li><a href="#L52">Channels.save（方法） · L52–L74</a></li><li><a href="#L76">Channels.status（方法） · L76–L82</a></li><li><a href="#L84">Channels.secrets（方法） · L84–L86</a></li><li><a href="#L88">Channels.deliveries（方法） · L88–L93</a></li><li><a href="#L95">Channels.retry_delivery（方法） · L95–L104</a></li><li><a href="#L106">Channels.receive（异步方法） · L106–L120</a></li><li><a href="#L122">Channels.enqueue（方法） · L122–L127</a></li><li><a href="#L129">Channels.start（方法） · L129–L132</a></li><li><a href="#L134">Channels._work（异步方法） · L134–L148</a></li><li><a href="#L150">Channels._process（异步方法） · L150–L196</a></li><li><a href="#L198">Channels._command（异步方法） · L198–L219</a></li><li><a href="#L221">Channels.close（异步方法） · L221–L231</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Durable channel inbox/delivery state; tasks execute only in the existing queue.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code></code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import asyncio</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import hashlib</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import json</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import sqlite3</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>import time</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import uuid</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from typing import TYPE_CHECKING</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>if TYPE_CHECKING:</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    from pyharness.application.service import ApplicationService</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from pyharness.application.accounts import Accounts, current_actor</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>from pyharness.core.sandbox import fail</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from pyharness.integrations.feishu import FeishuClient, FeishuConfig, verify_event</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>ENDPOINT = &#x27;https://open.feishu.cn/open-apis/&#x27;</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>class Channels:</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    def __init__(self, service: ApplicationService):</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        self.service = service</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        root = service.tenant_root()/&#x27;channels&#x27;</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        root.mkdir(parents=True,exist_ok=True)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        self.db = sqlite3.connect(root/&#x27;inbox.db&#x27;)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        self.db.row_factory = sqlite3.Row</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        self.db.executescript(&#x27;&#x27;&#x27;</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>            CREATE TABLE IF NOT EXISTS sessions (owner TEXT PRIMARY KEY, sid TEXT NOT NULL);</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>            CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, connection TEXT NOT NULL,</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>                owner TEXT NOT NULL, message TEXT NOT NULL, text TEXT NOT NULL,</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>                sid TEXT, run TEXT, state TEXT NOT NULL DEFAULT &#x27;pending&#x27;,</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>                reply TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_try REAL NOT NULL DEFAULT 0,</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                error TEXT, created REAL NOT NULL);</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        &#x27;&#x27;&#x27;)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        if &#x27;context&#x27; not in {r[1] for r in self.db.execute(&#x27;PRAGMA table_info(inbox)&#x27;)}:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>            self.db.execute(&quot;ALTER TABLE inbox ADD COLUMN context TEXT NOT NULL DEFAULT &#x27;{}&#x27;&quot;)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            self.db.commit()</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        self.clients = {}</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        self.worker = None</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        self.closed = False</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        from pyharness.application.wechat_channel import WechatChannel</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        self.wechat = WechatChannel(self)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    def _local_only(self):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        if self.service.tenant_id != &#x27;default&#x27; or current_actor.get() or Accounts.manages_tenant(self.service.storage_root, self.service.tenant_id):</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            fail(&#x27;channel_operator_required&#x27;)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    def configs(self):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        return self.service.platform.store.read()[&#x27;preferences&#x27;].get(&#x27;channels&#x27;,{})</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code></code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    def save(self, body):</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        self._local_only()</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        body = dict(body)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        secrets = body.pop(&#x27;secrets&#x27;, None)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        config = FeishuConfig.model_validate(body)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        old = self.configs().get(config.name, {})</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        config.secret_ref = old.get(&#x27;secret_ref&#x27;,&#x27;&#x27;)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        if secrets is not None:</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            if set(secrets) != {&#x27;app_secret&#x27;,&#x27;encrypt_key&#x27;,&#x27;verification_token&#x27;} or not all(isinstance(v,str) and v for v in secrets.values()):</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                fail(&#x27;channel_secrets_invalid&#x27;)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            config.secret_ref = self.service.credentials.set_service_secret(self.service.tenant_id,</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                &#x27;feishu:&#x27;+config.name, ENDPOINT, json.dumps(secrets,ensure_ascii=False))</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        if config.enabled and not config.secret_ref:</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            fail(&#x27;channel_credentials_missing&#x27;)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        if bool(config.agent_id) != bool(config.agent_version):</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            fail(&#x27;channel_agent_version_required&#x27;)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        if config.agent_id:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            definition = self.service.platform.new_binding_version(config.agent_id,config.agent_version)[&#x27;snapshot&#x27;]</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            from pyharness.application.platform_models import AgentDefinition</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            self.service.platform.validate_execution_policy(AgentDefinition.model_validate(definition))</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        with self.service.platform.store.transaction() as doc:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            doc[&#x27;preferences&#x27;].setdefault(&#x27;channels&#x27;,{})[config.name] = config.model_dump()</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        return self.status()</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    def status(self):</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        configs = self.configs()</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        return {&#x27;feishu&#x27;:[{&#x27;name&#x27;:name,&#x27;enabled&#x27;:c[&#x27;enabled&#x27;], &#x27;app_id&#x27;:c[&#x27;app_id&#x27;],</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            &#x27;has_credentials&#x27;:bool(c[&#x27;secret_ref&#x27;]), &#x27;status&#x27;:&#x27;configured&#x27; if c[&#x27;enabled&#x27;] else &#x27;disabled&#x27;,</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            &#x27;network_tested&#x27;:False, &#x27;callback_path&#x27;:&#x27;/hooks/feishu/&#x27;+name} for name,c in configs.items()],</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            &#x27;delivery&#x27;:[dict(row) for row in self.db.execute(&#x27;SELECT state,COUNT(*) AS count FROM inbox GROUP BY state&#x27;)],</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            &#x27;wechat&#x27;:self.wechat.status()}</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code></code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    def secrets(self, config):</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        return json.loads(self.service.credentials.resolve_service_secret(config.secret_ref,</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            self.service.tenant_id, ENDPOINT))</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    def deliveries(self, *, after=0, limit=100):</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        self._local_only()</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        if type(limit) is not int or not 1&lt;=limit&lt;=100 or type(after) is not int or after&lt;0:</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            fail(&#x27;channel_page_invalid&#x27;)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        rows = [dict(r) for r in self.db.execute(&#x27;SELECT rowid AS cursor,id,connection,sid,run,state,attempts,error,created FROM inbox WHERE rowid&gt;? ORDER BY rowid LIMIT ?&#x27;, (after,limit+1))]</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        return {&#x27;deliveries&#x27;:rows[:limit],&#x27;cursor&#x27;:rows[limit-1][&#x27;cursor&#x27;] if len(rows)&gt;limit else None}</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    def retry_delivery(self, ident):</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        self._local_only()</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        row = self.db.execute(&#x27;SELECT * FROM inbox WHERE id=?&#x27;,(ident,)).fetchone()</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        if not row or row[&#x27;state&#x27;]!=&#x27;feedback_failed&#x27;:</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            fail(&#x27;channel_delivery_not_retryable&#x27;)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        state = &#x27;reply_pending&#x27; if row[&#x27;reply&#x27;] else &#x27;accepted&#x27; if row[&#x27;run&#x27;] else &#x27;pending&#x27;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        with self.db:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            self.db.execute(&#x27;UPDATE inbox SET state=?,attempts=0,next_try=0,error=NULL WHERE id=?&#x27;,(state,ident))</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        self.start()</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        return {&#x27;ok&#x27;:True,&#x27;state&#x27;:state}</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    async def receive(self, name, raw, headers):</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        self.service._ensure_open()</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        config = FeishuConfig.model_validate(self.configs().get(name, {}))</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        if not config.enabled:</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            fail(&#x27;channel_disabled&#x27;)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        event = verify_event(raw, headers, config, self.secrets(config))</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        if &#x27;challenge&#x27; in event or event.get(&#x27;ignored&#x27;):</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            return event</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        owner = hashlib.sha256((name+&#x27;\0&#x27;+event[&#x27;user&#x27;]+&#x27;\0&#x27;+event[&#x27;chat&#x27;]).encode()).hexdigest()</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        ident = hashlib.sha256((name+&#x27;\0&#x27;+event[&#x27;message_id&#x27;]).encode()).hexdigest()</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        # Idempotency is message-based: different event IDs for the same message</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        # cannot create another task. Limits bound disk growth until operator cleanup.</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        self.enqueue(ident,name,owner,event[&#x27;message_id&#x27;],event[&#x27;text&#x27;])</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        self.start()</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        return {&#x27;ok&#x27;:True}</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    def enqueue(self, ident, name, owner, message, text, context=&#x27;{}&#x27;):</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        if self.db.execute(&#x27;SELECT COUNT(*) FROM inbox&#x27;).fetchone()[0] &gt;= 10000 and not self.db.execute(&#x27;SELECT 1 FROM inbox WHERE id=?&#x27;,(ident,)).fetchone():</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            fail(&#x27;channel_inbox_full&#x27;)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        with self.db:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>            self.db.execute(&#x27;INSERT OR IGNORE INTO inbox(id,connection,owner,message,text,created,context) VALUES(?,?,?,?,?,?,?)&#x27;,</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                            (ident,name,owner,message,text,time.time(),context))</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code></code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    def start(self):</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        self.wechat.start()</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        if not self.closed and (self.worker is None or self.worker.done()):</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            self.worker = asyncio.create_task(self._work())</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    async def _work(self):</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        while not self.closed:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            rows = list(self.db.execute(&quot;SELECT * FROM inbox WHERE state IN (&#x27;pending&#x27;,&#x27;accepted&#x27;,&#x27;reply_pending&#x27;) AND next_try&lt;=? ORDER BY created LIMIT 20&quot;,(time.time(),)))</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            for row in rows:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                try:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                    await self._process(dict(row))</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                    raise</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                except Exception as exc:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                    tries = row[&#x27;attempts&#x27;]+1</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                    with self.db:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                        self.db.execute(&#x27;UPDATE inbox SET attempts=?,next_try=?,error=?,state=? WHERE id=?&#x27;,</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                            (tries,time.time()+min(300,2**tries),type(exc).__name__,</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                             &#x27;feedback_failed&#x27; if tries&gt;=6 else row[&#x27;state&#x27;],row[&#x27;id&#x27;]))</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            await asyncio.sleep(1)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code></code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    async def _process(self, row):</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        config = self.wechat.config() if row[&#x27;connection&#x27;].startswith(&#x27;wechat:&#x27;) else FeishuConfig.model_validate(self.configs().get(row[&#x27;connection&#x27;],{}))</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        if not config.enabled:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            return</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        token = current_actor.set(None)  # Identity is the explicit local operator&#x27;s channel allowlist.</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        try:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            if row[&#x27;state&#x27;] == &#x27;pending&#x27;:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                session = self.db.execute(&#x27;SELECT sid FROM sessions WHERE owner=?&#x27;,(row[&#x27;owner&#x27;],)).fetchone()</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                if not session:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                    sid = await self.service.create_session()</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>                    with self.db:</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>                        self.db.execute(&#x27;INSERT INTO sessions(owner,sid) VALUES(?,?)&#x27;,(row[&#x27;owner&#x27;],sid))</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                else:</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                    sid = session[&#x27;sid&#x27;]</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                if row[&#x27;text&#x27;].startswith(&#x27;/&#x27;):</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                    response = await self._command(row,sid,config)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                    with self.db:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>                        self.db.execute(&quot;UPDATE inbox SET sid=?,state=&#x27;reply_pending&#x27;,reply=? WHERE id=?&quot;,(sid,response,row[&#x27;id&#x27;]))</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                else:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                    result = await self.service.platform.start_run({&#x27;text&#x27;:row[&#x27;text&#x27;],&#x27;session_id&#x27;:sid,</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                        &#x27;agent_id&#x27;:config.agent_id,&#x27;agent_version&#x27;:config.agent_version,&#x27;request_id&#x27;:&#x27;channel:&#x27;+row[&#x27;id&#x27;]})</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                    with self.db:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                        self.db.execute(&quot;UPDATE inbox SET sid=?,run=?,state=&#x27;accepted&#x27;,attempts=0 WHERE id=?&quot;,(sid,result[&#x27;run_id&#x27;],row[&#x27;id&#x27;]))</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>            elif row[&#x27;state&#x27;] == &#x27;accepted&#x27;:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                run = await self.service.platform.run(row[&#x27;run&#x27;])</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                if run[&#x27;status&#x27;] not in {&#x27;completed&#x27;,&#x27;failed&#x27;,&#x27;cancelled&#x27;}:</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                    return</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                log = await self.service.require_session(row[&#x27;sid&#x27;])</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                # Exact task ownership, not the last message from a multi-turn session.</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                from pyharness.application.platform_projection import task_events</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                messages = [e.payload[&#x27;content&#x27;] for e in task_events(log.events_after(0),run[&#x27;task_id&#x27;]) if e.type==&#x27;agent.message&#x27;]</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                from pyharness.application.platform_projection import summary</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                text = &#x27;任务 &#x27;+row[&#x27;run&#x27;]+&#x27;：&#x27;+run[&#x27;status&#x27;]+&#x27;\n&#x27;+summary(&#x27;\n&#x27;.join(messages) or run.get(&#x27;error_code&#x27;) or &#x27;&#x27;,10000)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                with self.db:</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                    self.db.execute(&quot;UPDATE inbox SET state=&#x27;reply_pending&#x27;,reply=?,attempts=0 WHERE id=?&quot;,(text,row[&#x27;id&#x27;]))</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>            else:</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                if row[&#x27;connection&#x27;].startswith(&#x27;wechat:&#x27;):</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                    await self.wechat.reply(row)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                else:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                    client = self.clients.get(config.name)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                    if client is None:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                        client = self.clients[config.name] = FeishuClient(config,self.secrets(config))</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                    await client.reply(row[&#x27;message&#x27;],row[&#x27;reply&#x27;],str(uuid.UUID(row[&#x27;id&#x27;][:32])))</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                with self.db:</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                    self.db.execute(&quot;UPDATE inbox SET state=&#x27;delivered&#x27;,error=NULL WHERE id=?&quot;,(row[&#x27;id&#x27;],))</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>        finally:</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>            current_actor.reset(token)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code></code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>    async def _command(self, row, sid, config):</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        parts = row[&#x27;text&#x27;].split()</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        command = parts[0]</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        own = self.db.execute(&#x27;SELECT run FROM inbox WHERE owner=? AND run IS NOT NULL ORDER BY created DESC LIMIT 1&#x27;,(row[&#x27;owner&#x27;],)).fetchone()</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        if command in {&#x27;/status&#x27;,&#x27;/cancel&#x27;}:</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            ident = parts[1] if len(parts)&gt;1 else own[&#x27;run&#x27;] if own else None</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>            if not ident or not self.db.execute(&#x27;SELECT 1 FROM inbox WHERE owner=? AND run=?&#x27;,(row[&#x27;owner&#x27;],ident)).fetchone():</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                return &#x27;没有属于当前用户及聊天的任务。&#x27;</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>            result = await (self.service.platform.cancel(ident) if command==&#x27;/cancel&#x27; else self.service.platform.run(ident))</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>            return json.dumps({k:result[k] for k in (&#x27;run_id&#x27;,&#x27;status&#x27;,&#x27;ok&#x27;,&#x27;error_code&#x27;) if k in result},ensure_ascii=False)</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        if command in {&#x27;/approve&#x27;,&#x27;/reject&#x27;} and config.allow_approvals and len(parts)==2:</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            if not parts[1].isdigit():</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                return &#x27;审批编号无效。&#x27;</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>            pending = await self.service.pending_approvals()</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>            if not any(a[&#x27;session_id&#x27;]==sid and a[&#x27;approval_id&#x27;]==int(parts[1]) for a in pending[&#x27;pending&#x27;]):</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>                return &#x27;当前用户会话没有此待审批请求。&#x27;</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            await self.service.decide_approval(int(parts[1]),&#x27;approve&#x27; if command==&#x27;/approve&#x27; else &#x27;deny&#x27;,sid=sid)</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            return &#x27;审批结果已记录。&#x27;</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        if command==&#x27;/approvals&#x27;:</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            pending = await self.service.pending_approvals()</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>            return json.dumps([a for a in pending[&#x27;pending&#x27;] if a[&#x27;session_id&#x27;]==sid],ensure_ascii=False)[:10000]</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        return &#x27;命令：/status [任务编号]、/cancel [任务编号]、/approvals。人工审批需操作者显式启用后使用 /approve 或 /reject。&#x27;</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code></code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>    async def close(self):</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        if self.closed:</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            return</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        self.closed = True</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        await self.wechat.close()</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        if self.worker:</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>            self.worker.cancel()</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>            await asyncio.gather(self.worker,return_exceptions=True)</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        await asyncio.gather(*(client.close() for client in self.clients.values()))</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        self.clients.clear()</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        self.db.close()</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

@@ -1,0 +1,71 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/permission_observation.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/permission_observation.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 71 行</span></nav><main class="wrap source-page"><h1>pyharness/application/permission_observation.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：213288c329b3a635f6eb2facc64edd974474a9b3<br>SHA-256（内容校验）：3da8eccc77f57bccab6ea3f46003e07c59657a2eb5df8b5f8b70f3f54941f942</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 3 个类、函数与方法</summary><ul><li><a href="#L20">DefinitionRegistry（类） · L20–L23</a><ul><li><a href="#L22">DefinitionRegistry.register_tool（方法） · L22–L23</a></li></ul></li><li><a href="#L26">predict_permission（异步函数） · L26–L71</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Policy-only prediction: original contracts/Guard, no live Scope or Provider.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import os</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import tempfile</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import uuid</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.platform_models import AgentDefinition</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.platform_tool_definitions import configure_file_definitions</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.application.execution_file_runtime import configure_context_reads</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.application.approval_policy import apply_rules</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.core.scope import Scope,ScopePolicy,BudgetLimits</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.core.tools_registry import ToolRegistry</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pyharness.core.tools_guard import ToolCall,from_config</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from pyharness.core.tool_fs import register</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>from pyharness.core.sandbox import safe_path</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from pyharness.engine_policy import _apply_preset</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>class DefinitionRegistry(ToolRegistry):</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    &quot;&quot;&quot;Use real schema compilation, discard every provider before registration.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    def register_tool(self,defn,*,provider=None):</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        return super().register_tool(defn)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>async def predict_permission(snapshot,cfg,materials,name,args):</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    cfg=cfg.model_copy(deep=True);definition=AgentDefinition.model_validate(snapshot)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    registry=DefinitionRegistry();register(registry)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    policy=ScopePolicy()</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    policy.danger_marks=[dict(pattern=d.name,level=d.danger) for d in registry.iter_definitions() if d.danger!=&#x27;none&#x27;]</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    _apply_preset(cfg,policy,registry)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    # Engine uses a per-session root. This disposable namespace is never created,</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    # registered, opened as a workspace or pointed at a SourceGrant host root.</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    policy.workspace_root=os.path.join(tempfile.gettempdir(),&#x27;pyharness-policy-view-&#x27;+uuid.uuid4().hex)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    scope=Scope(policy,BudgetLimits.from_cfg(cfg),&#x27;permission-preview&#x27;)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    spine=SimpleNamespace(tool_registry=registry,scope=scope)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    configure_file_definitions(spine,definition,None)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    configure_context_reads(spine);apply_rules(spine,definition.approval_rules)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    # Unknown tools still inherit explicit prohibitions and the Agent allowlist.</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    policy.deny_tools.update(set([name])-set(definition.allowed_tools))</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    result=dict(schema_version=1,tool_name=name,prediction=&#x27;unknown&#x27;,reason=&#x27;unmodeled_capability&#x27;,</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        guard_ids=[],policy_refs=[],execution_authorized=False,side_effects_executed=False,</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        live_recheck_required=True,scope=&#x27;fixed_selection_policy_only&#x27;,</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        limitations=[&#x27;No live file state, symlink, container availability, runtime budget, plugin or approval decision is certified.&#x27;])</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    if not scope.can_use(name):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        return dict(result,prediction=&#x27;reject&#x27;,reason=&#x27;scope_hidden&#x27;,guard_ids=[&#x27;scope-hidden&#x27;],policy_refs=[&#x27;GRD-401&#x27;])</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    normalized={&#x27;file.read&#x27;:&#x27;fs.read_file&#x27;,&#x27;file.list&#x27;:&#x27;fs.list_dir&#x27;,&#x27;file.write&#x27;:&#x27;fs.write_file&#x27;,&#x27;file.patch&#x27;:&#x27;fs.patch&#x27;}.get(name,name)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    if normalized.startswith((&#x27;fs.&#x27;,&#x27;exec.&#x27;,&#x27;proc.&#x27;)) and definition.sandbox_profile.mode==&#x27;disabled&#x27;:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        return dict(result,prediction=&#x27;reject&#x27;,reason=&#x27;sandbox_disabled&#x27;)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    if not registry.has(name):return result</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    try:checked=registry.validate_args(name,args)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    except PyHError:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        return dict(result,prediction=&#x27;reject&#x27;,reason=&#x27;schema_invalid&#x27;,guard_ids=[&#x27;g-schema&#x27;],policy_refs=[&#x27;TLB-803&#x27;])</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    if normalized in (&#x27;fs.read_file&#x27;,&#x27;fs.list_dir&#x27;,&#x27;fs.write_file&#x27;,&#x27;fs.patch&#x27;):</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        path=checked.get(&#x27;path&#x27;,&#x27;.&#x27;)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        if normalized==&#x27;fs.list_dir&#x27; and path is None:path=&#x27;.&#x27;  # original optional root default</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        try:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            if not (normalized==&#x27;fs.list_dir&#x27; and path in (&#x27;&#x27;,&#x27;.&#x27;)):safe_path(Path(policy.workspace_root),path)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        except PyHError:</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            return dict(result,prediction=&#x27;reject&#x27;,reason=&#x27;invalid_workspace_path&#x27;,guard_ids=[&#x27;platform-file-boundary&#x27;])</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        prefix=&#x27;_pyharness_context&#x27;;roots={f[&#x27;path&#x27;].split(&#x27;/&#x27;)[0].casefold() for f in materials[&#x27;bundle&#x27;][&#x27;files&#x27;]};n=0</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        while prefix.casefold() in roots:n+=1;prefix=&#x27;_pyharness_context_&#x27;+str(n)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        if normalized in (&#x27;fs.write_file&#x27;,&#x27;fs.patch&#x27;) and (path.casefold()==prefix.casefold() or path.casefold().startswith(prefix.casefold()+&#x27;/&#x27;)):</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            return dict(result,prediction=&#x27;reject&#x27;,reason=&#x27;execution_reference_read_only&#x27;,guard_ids=[&#x27;platform-file-boundary&#x27;])</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    paths={os.path.normcase(os.path.normpath(os.path.join(policy.workspace_root,f[&#x27;path&#x27;]))) for f in materials[&#x27;bundle&#x27;][&#x27;files&#x27;]}</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    chain=from_config(cfg,validator=registry.validate_args,approval_channel=True,</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        path_exists=lambda p:os.path.normcase(os.path.normpath(p)) in paths)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    evaluated=await chain.evaluate_detailed(ToolCall(name,raw_args=args,args=checked,defn=registry.lookup(name)),scope)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    # A Guard verdict is a prediction only; never a capability or approval receipt.</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    return dict(result,prediction=evaluated.verdict,reason=&#x27;builtin_policy_prediction&#x27;,</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        guard_ids=list(evaluated.guard_ids),policy_refs=list(evaluated.policy_refs))</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

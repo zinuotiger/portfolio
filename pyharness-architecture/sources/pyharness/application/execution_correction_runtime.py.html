@@ -1,0 +1,104 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/execution_correction_runtime.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/execution_correction_runtime.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 104 行</span></nav><main class="wrap source-page"><h1>pyharness/application/execution_correction_runtime.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：2158cce2afe8a780b4d72d611ef5f09c5d2bb064<br>SHA-256（内容校验）：e47df6179f2f9abad6823517508e5306000fa88f625c93f48b0265a64cb75f7d</p><p><a href="../../../architecture-detailed.html?node=correction">ExecutionCorrection（运行中任务纠偏）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 6 个类、函数与方法</summary><ul><li><a href="#L8">correction_ref（函数） · L8–L10</a></li><li><a href="#L13">supplement（函数） · L13–L16</a></li><li><a href="#L19">trusted_version（函数） · L19–L22</a></li><li><a href="#L25">validate_correction_applications（函数） · L25–L46</a></li><li><a href="#L49">prepare_correction（异步函数） · L49–L75</a></li><li><a href="#L78">materialize_correction（异步函数） · L78–L104</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Apply trusted root supplements only before the next logical context is built.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from pyharness.application.execution_effects import flush_confirmed,confirmed_events</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.execution_delegation import own_lifecycle</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>def correction_ref(row):</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    value=row[&#x27;execution_correction&#x27;]</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    return dict(correction_id=value[&#x27;correction_id&#x27;],revision=value[&#x27;revision&#x27;],digest=row[&#x27;digest&#x27;],source_seq=row[&#x27;source_seq&#x27;])</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>def supplement(row):</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    value=row[&#x27;execution_correction&#x27;]</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    return (&#x27;Trusted task supplement &#x27;+value[&#x27;correction_id&#x27;]+&#x27; revision &#x27;+str(value[&#x27;revision&#x27;])+</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        &#x27;. This revision replaces earlier supplements in this document. It does not change tool, budget, data or access permissions.\n&#x27;+value[&#x27;text&#x27;])</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>def trusted_version(row,reference):</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    found=[r for r in row.get(&#x27;_trusted_corrections&#x27;,[]) if correction_ref(r)==reference]</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    if len(found)!=1:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;correction_control_reference_unavailable&#x27;)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    return found[0]</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>def validate_correction_applications(events,row):</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    value=row[&#x27;execution_authorization&#x27;];task=value[&#x27;task_id&#x27;];reference=dict(execution_id=value[&#x27;execution_id&#x27;],revision=1,digest=row[&#x27;digest&#x27;],source_seq=row[&#x27;source_seq&#x27;])</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    seen=set();previous=0;result={};byseq={e.seq:e for e in events}</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    for i,event in enumerate(events):</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        if event.type!=&#x27;execution.correction_applied&#x27;:continue</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        p=event.payload;life=own_lifecycle(events[:i],event.session_id)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        version=trusted_version(row,p[&#x27;correction_ref&#x27;]);definition=version[&#x27;execution_correction&#x27;];key=(definition[&#x27;correction_id&#x27;],definition[&#x27;revision&#x27;])</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        message=byseq.get(p[&#x27;user_message_seq&#x27;]);text=supplement(version)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        if (event.session_id!=value[&#x27;session_id&#x27;] or event.actor!=&#x27;system&#x27; or event.task_id!=task or</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                not life or life[-1].payload[&#x27;phase&#x27;]!=&#x27;running&#x27; or p[&#x27;execution_id&#x27;]!=value[&#x27;execution_id&#x27;] or</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                p[&#x27;authorization_digest&#x27;]!=row[&#x27;digest&#x27;] or p[&#x27;authorization_seq&#x27;]!=row[&#x27;source_seq&#x27;] or</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>                definition[&#x27;execution_ref&#x27;]!=reference or definition[&#x27;created_by&#x27;]!=value[&#x27;created_by&#x27;] or</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                key in seen or definition[&#x27;revision&#x27;]&lt;=previous or message is None or message.seq&gt;=event.seq or</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>                message.type!=&#x27;user.message&#x27; or message.actor!=&#x27;user&#x27; or message.task_id!=task or</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>                message.payload[&#x27;content&#x27;]!=text or (message.payload.get(&#x27;meta&#x27;) or {}).get(&#x27;product_correction&#x27;)!=p[&#x27;correction_ref&#x27;] or</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                p[&#x27;text_digest&#x27;]!=digest_of(text.encode(&#x27;utf-8&#x27;))):</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            raise_code(&#x27;PERS-202&#x27;,reason=&#x27;execution_correction_application_invalid&#x27;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        checkpoint=next((e for e in events[i+1:] if e.type==&#x27;execution.checkpoint&#x27;),None)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        if checkpoint is not None and checkpoint.payload[&#x27;materialized_messages_digest&#x27;]!=p[&#x27;materialized_messages_digest&#x27;]:</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>            raise_code(&#x27;PERS-202&#x27;,reason=&#x27;execution_correction_context_digest&#x27;)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        seen.add(key);previous=definition[&#x27;revision&#x27;];result[key]=event</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    return result</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>async def prepare_correction(boundary,ctx):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    # Root supplements are deliberately scoped; an in-flight child keeps its</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    # admitted task. Root sees the new supplement at its own next boundary.</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    if hasattr(boundary,&#x27;root&#x27;):return</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    boundary._context(ctx);boundary.checked();receipt=boundary.receipt</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    row,_,versions=await boundary.projects.store.execution_correction_versions(receipt[&#x27;project_id&#x27;],receipt[&#x27;execution_id&#x27;],</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        authorize=lambda:boundary.projects._authorize(write=True))</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    boundary.checked();events=await flush_confirmed(ctx.session)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    applications=validate_correction_applications(events,row)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    boundary._round_correction_ref=None</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    if not versions:return</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    version=row[&#x27;_trusted_corrections&#x27;][-1];reference=correction_ref(version);definition=version[&#x27;execution_correction&#x27;]</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    key=(definition[&#x27;correction_id&#x27;],definition[&#x27;revision&#x27;])</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    if key not in applications:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        matches=[e for e in events if e.type==&#x27;user.message&#x27; and (e.payload.get(&#x27;meta&#x27;) or {}).get(&#x27;product_correction&#x27;)==reference]</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        if len(matches)&gt;1:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;correction_orphan_ambiguous&#x27;)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        text=supplement(version)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        if matches:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            message=matches[0]</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            if message.actor!=&#x27;user&#x27; or message.task_id!=str(ctx.task_id) or message.payload[&#x27;content&#x27;]!=text:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                raise_code(&#x27;PERS-202&#x27;,reason=&#x27;correction_orphan_changed&#x27;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        else:</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            boundary.checked()</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            message=await ctx.session.append(&#x27;user.message&#x27;,dict(content=text,meta=dict(product_correction=reference)),</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                actor=&#x27;user&#x27;,task_id=str(ctx.task_id),sync=True)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            if message not in confirmed_events(ctx.session):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;correction_message_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    boundary._round_correction_ref=reference</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>async def materialize_correction(boundary,ctx,messages):</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    reference=getattr(boundary,&#x27;_round_correction_ref&#x27;,None)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    if reference is None or hasattr(boundary,&#x27;root&#x27;):return messages</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    boundary._context(ctx);boundary.checked();receipt=boundary.receipt</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    row,_,_=await boundary.projects.store.execution_correction_versions(receipt[&#x27;project_id&#x27;],receipt[&#x27;execution_id&#x27;],</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        authorize=lambda:boundary.projects._authorize(write=True))</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    version=trusted_version(row,reference);events=await flush_confirmed(ctx.session)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    applications=validate_correction_applications(events,row)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    text=supplement(version)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    # This is a projection of the confirmed control version and its applied</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    # fact, keeping an active supplement visible after ordinary history trims.</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    if not any(m.get(&#x27;role&#x27;)==&#x27;user&#x27; and m.get(&#x27;content&#x27;)==text for m in messages):</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        messages=[*messages,dict(role=&#x27;user&#x27;,content=text)]</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    boundary.checked()</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    key=(reference[&#x27;correction_id&#x27;],reference[&#x27;revision&#x27;])</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    if key not in applications:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        matches=[e for e in events if e.type==&#x27;user.message&#x27; and (e.payload.get(&#x27;meta&#x27;) or {}).get(&#x27;product_correction&#x27;)==reference]</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        if (len(matches)!=1 or matches[0].actor!=&#x27;user&#x27; or matches[0].task_id!=str(ctx.task_id) or matches[0].payload[&#x27;content&#x27;]!=text):</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            raise_code(&#x27;PERS-202&#x27;,reason=&#x27;correction_context_message_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        event=await ctx.session.append(&#x27;execution.correction_applied&#x27;,dict(schema_version=1,execution_id=receipt[&#x27;execution_id&#x27;],</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            authorization_digest=receipt[&#x27;digest&#x27;],authorization_seq=receipt[&#x27;source_seq&#x27;],correction_ref=reference,</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            user_message_seq=matches[0].seq,text_digest=digest_of(text.encode(&#x27;utf-8&#x27;)),</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            materialized_messages_digest=digest_of(canonical(messages))),actor=&#x27;system&#x27;,task_id=str(ctx.task_id),sync=True)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        actual=confirmed_events(ctx.session)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        if event not in actual:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;correction_application_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        validate_correction_applications(actual,row);boundary.checked()</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    return messages</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

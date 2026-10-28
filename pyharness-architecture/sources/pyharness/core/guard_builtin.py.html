@@ -1,0 +1,67 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/guard_builtin.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/guard_builtin.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 67 行</span></nav><main class="wrap source-page"><h1>pyharness/core/guard_builtin.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：e12fe970b017bbf086bd88d817e30167db93cff0<br>SHA-256（内容校验）：ded9854099c17e56149d66d146ed6ed74f32a2dc179fcd6b4f9f556415c77f8c</p><p><a href="../../../architecture-detailed.html?node=guard">Guard Chain（权限守卫链）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 5 个类、函数与方法</summary><ul><li><a href="#L18">build_builtin_chain（函数） · L18–L47</a></li><li><a href="#L49">_FuncGuard（类） · L49–L64</a><ul><li><a href="#L52">_FuncGuard.__init__（方法） · L52–L58</a></li><li><a href="#L60">_FuncGuard.match（方法） · L60–L61</a></li><li><a href="#L63">_FuncGuard.check（异步方法） · L63–L64</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Guard builtin: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from typing import Any, Callable, Iterable, Optional</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.core.guard_models import Guard</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.core.guard_rules import g_schema_match, g_schema_check, g_danger_match, g_danger_check, g_fs_path_match, g_fs_path_check, g_credential_read_match, g_credential_read_check, g_net_outbound_match, g_net_outbound_check, g_exec_match, g_exec_check, g_overwrite_match, g_overwrite_check</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>_BUILTIN_IDS: tuple[str, ...] = (</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    &quot;g-schema&quot;,            # g1 schema 复查(恒在)</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    &quot;g-fs-path&quot;,           # g3 路径几何</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    &quot;g-credential-read&quot;,   # g4 凭据读拦截</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    &quot;g-exec&quot;,              # g6 exec 约束</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    &quot;g-overwrite&quot;,         # g7 覆写转审批</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    &quot;g-net-outbound&quot;,      # g5 外发域名 allowlist</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    &quot;g-danger&quot;,            # g2 danger 分级(恒在,殿后求值)</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>)</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>def build_builtin_chain(*, credential_paths: Optional[Iterable[str]] = None,</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>                        validator: Optional[Callable[..., dict]] = None,</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>                        approval_channel: Optional[bool] = None,</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>                        path_exists: Optional[Callable[[str], bool]] = None,</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>                        link_resolver: Optional[Callable[[str], str]] = None</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>                        ) -&gt; list[Guard]:</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    &quot;&quot;&quot;装配内置 g1-g7(固定序 = 求值序;DIS-SEAM §2.5 第④步)。</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    g1 恒在首;动作形状 guard(g3/g4/g6/g7/g5)先于危险分级 g-danger 求值,分级</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    只决定是否需要审批、不短路形状拒(见 _BUILTIN_IDS 注释);插件 guard 一律</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    按注册序追加链尾(本函数即固定序源)。validator/credential_paths/</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    approval_channel/path_exists/link_resolver 为注入式依赖(见模块 docstring</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    偏离 1/2/3/5):链实例构造时一次注入,运行期只读(防策略漂移,F021)。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    paths = list(credential_paths) if credential_paths else None</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    return [</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        _FuncGuard(&quot;g-schema&quot;, g_schema_match,</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                   lambda c, s: g_schema_check(c, s, validator=validator)),</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        _FuncGuard(&quot;g-fs-path&quot;, g_fs_path_match,</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                   lambda c, s: g_fs_path_check(c, s, link_resolver=link_resolver)),</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        _FuncGuard(&quot;g-credential-read&quot;, g_credential_read_match,</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>                   lambda c, s: g_credential_read_check(</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                       c, s, credential_paths=paths,</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>                       link_resolver=link_resolver)),</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        _FuncGuard(&quot;g-exec&quot;, g_exec_match, g_exec_check),</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        _FuncGuard(&quot;g-overwrite&quot;, g_overwrite_match,</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>                   lambda c, s: g_overwrite_check(c, s, path_exists=path_exists)),</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        _FuncGuard(&quot;g-net-outbound&quot;, g_net_outbound_match, g_net_outbound_check),</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        _FuncGuard(&quot;g-danger&quot;, g_danger_match, g_danger_check),</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    ]</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>class _FuncGuard(Guard):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    &quot;&quot;&quot;函数对 → Guard 实例适配器(内置 guard 实现即模块函数对,spec 清单)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code></code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    def __init__(self, guard_id: str,</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                 match_fn: Callable[[Any], bool],</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                 check_fn: Callable[[Any, Any],</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                                    Any]) -&gt; None:</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        self.id = guard_id</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        self._match_fn = match_fn</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        self._check_fn = check_fn</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    def match(self, call: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        return bool(self._match_fn(call))</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    async def check(self, call: Any, scope: Any) -&gt; tuple[str, Optional[str]]:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        return await self._check_fn(call, scope)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code></code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>_FuncGuard.__module__ = &#x27;pyharness.core.tools_guard&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

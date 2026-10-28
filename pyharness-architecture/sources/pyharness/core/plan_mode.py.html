@@ -1,0 +1,549 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/plan_mode.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/plan_mode.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 549 行</span></nav><main class="wrap source-page"><h1>pyharness/core/plan_mode.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：530c6059d1136523d19b59c5f623a017963e550f<br>SHA-256（内容校验）：8f088becca40c541740c0c91d83870a55e79202133d2f572b9e8f30184680ec7</p><p><a href="../../../architecture-detailed.html?node=plan">Plan Approval and Execution（计划批准与逐步执行）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 23 个类、函数与方法</summary><ul><li><a href="#L92">PlanManager（类） · L92–L525</a><ul><li><a href="#L105">PlanManager.__init__（方法） · L105–L109</a></li><li><a href="#L112">PlanManager._require_session（方法） · L112–L118</a></li><li><a href="#L120">PlanManager._get（方法） · L120–L127</a></li><li><a href="#L129">PlanManager._scope_marks（方法） · L129–L136</a></li><li><a href="#L138">PlanManager._spawn_exec（方法） · L138–L149</a><ul><li><a href="#L143">PlanManager._spawn_exec._done（方法） · L143–L147</a></li></ul></li><li><a href="#L151">PlanManager._abort（异步方法） · L151–L157</a></li><li><a href="#L159">PlanManager._user_choice（异步方法） · L159–L177</a></li><li><a href="#L180">PlanManager.plan_propose（异步方法） · L180–L250</a></li><li><a href="#L252">PlanManager._json_chat（异步方法） · L252–L266</a></li><li><a href="#L268">PlanManager._classify（方法） · L268–L274</a></li><li><a href="#L276">PlanManager.classify_danger（方法） · L276–L282</a></li><li><a href="#L285">PlanManager.plan_approve（异步方法） · L285–L313</a></li><li><a href="#L315">PlanManager._expire_if_stale（异步方法） · L315–L330</a></li><li><a href="#L332">PlanManager.plan_reject（异步方法） · L332–L348</a></li><li><a href="#L351">PlanManager.plan_revise（异步方法） · L351–L386</a></li><li><a href="#L389">PlanManager.plan_execute（异步方法） · L389–L443</a></li><li><a href="#L446">PlanManager.plan_sweep_expired（异步方法） · L446–L464</a></li><li><a href="#L467">PlanManager.list_plans（方法） · L467–L474</a></li><li><a href="#L476">PlanManager.get（方法） · L476–L478</a></li><li><a href="#L480">PlanManager.rebuild_from_events（方法） · L480–L525</a></li></ul></li><li><a href="#L529">selfcheck_plan（函数） · L529–L542</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/plan_mode.py — 先方案后执行编排 (specs/plan_mode.py.md 契约;阶段 4)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F045(plan 方案生成)· F046(plan 审批与执行切换)· F023(危险分级联动)·</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>F043(执行=逐步入队)。一句话:`/plan &lt;目标&gt;` 只调一次 LLM 产出 ≤8 步方案(动作/</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>工具/预期/风险,危险步标&quot;审批点&quot;),展示待批;approve/reject/单步 edit 裁决后才执行;</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>执行=逐步入队(F043),单步失败用户三选一(跳过/重试/中止),重试 ≤2 次仍败默认中止;</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>plan 状态机:草稿→待批→批准→执行中→完成(终止态:拒绝/中止)。</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>软指导不硬限制:方案批准 ≠ 危险操作批准——批准只定方向,执行中每步仍是普通任务,</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>工具调用独立走 guard/审批链(F014/F015),plan 层不预授权、不改 scope、不解除 deny;</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>步骤失败不机械静默重试,一切经用户裁决;执行中用户可随时插话重定向。</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>本模块为纯编排内核:消费 ctx.session(事件 append)、ctx.llm.json_chat(唯一 LLM</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>出口,INV-02,注入式——本模块不 import 真实 llm)、ctx.task_queue(submit/wait_for,</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>F043)、ctx.approval.user_choice(审批/选择通道,headless → APR-501)、ctx.scope.</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>policy.danger_marks(危险分级表可选覆盖);不 import agent_loop/llm/scope 等外围</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>能力(INV-08)。plan 注册表由 plan.* 事件回放重建(INV-01):plan_id = plan.proposed</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>事件的 seq;approved/rejected/exec.step 引用不存在或已拒绝的 plan → EVT-101/BUSY。</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>偏离说明(契约=specs/plan_mode.py.md;与既有实现/规格冲突处的取舍,均列理由):</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>1. plan.done/plan.aborted 为词表外扩展(PRD 伪代码用词),须按 EVENT-SCHEMA §7 登记</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>   → 已在 pyharness/events/{payload,vocab}.py 登记新 payload 模型与事件类型</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   (llm.retry 同款先例),并同步 tests/unit/test_events.py 词表清单 57→59。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>2. plan.proposed 载荷 steps 按 EVENT-SCHEMA §3.5.2 + events.payload.PlanStep 权威</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   只落 {action,tool,expected,risk}(字段级权威,extra=forbid):intent 是内存执行</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>   意图,事件载荷不带;事件回放重建时由 action/tool/expected 拼装兜底(Step 缺省)。</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>3. plan.proposed 载荷补可选 expires_at、plan.rejected 载荷补可选 reason(§7 只加</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   可选):24h 过期判定(重建后仍需)与修订/过期原因审计(回放可审计)须随事件留痕,</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   spec 伪码载荷即含两字段,events.payload 原模型缺口已按 goal.py 先例补齐。</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>4. 时钟统一 UTC aware(Envelope.ts 口径):伪码 datetime.now() naive 与会话 aware</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>   时间比较会 TypeError;plan_sweep_expired 的 now 缺省 = datetime.now(timezone.utc)。</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>5. rebuild 完成态映射为 &quot;completed&quot;(伪码 rebuild 段误写 &quot;done&quot;;PlanStatus 词表</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   与其余伪码均用 completed,完成事件仍是 plan.done)。</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>6. plan_propose 前置字段预检(每步 action/tool/expected 非空,缺 → EVT-100):</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   伪码靠 selfcheck 软标、但 events.payload.PlanStep(min_length=1,必填)在 append</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>   时仍会拒写——前置给明确错误,零半成品不落盘(与异常表&quot;精简重提;不落盘&quot;一致)。</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>7. 执行中被 plan_reject(允许态:仅终态不可拒)→ 执行循环顶守卫停止后续 exec.step/</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   入队(&quot;拒绝后不再推进&quot;语义,EVENT-SCHEMA §3.5.2),终态已 rejected 不重复落</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>   plan.aborted;approve 后执行协程开跑前被拒的竞态 → plan_execute 入口对 rejected</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>   静默退场(不入队不落事件;仅 pending/其余态误调才 BUSY)。</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>8. 裁决通道 = ctx.approval.user_choice(options)(同步/异步兼容);缺通道/不可调用</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>   → APR-501(单步失败安全默认中止,已落 plan.aborted 后上抛);通道返回词表外值</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>   按&quot;中止&quot;安全默认处理(避免机械静默重试)。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>9. plan_approve 以 asyncio.create_task 启动执行(伪码同款),句柄登记</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>   self._exec_tasks(编排/测试可 gather 等待),done 回调自动清理并记异常日志。</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>10. classify_danger 内置 DANGER_TABLE 与 scope.DEFAULT_DANGER_MARKS 同源</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    (fs.delete_file=critical / exec.*,net.*=high,不 import scope,INV-08);</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    plan_propose 时若 ctx.scope.policy.danger_marks 存在则优先取用(表变更只紧</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    不松由 scope 装配保证),classify_danger 裸调用用内置表。</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>11. plan_revise 后旧 plan 按伪码弹出注册表(事件留痕 rejected);事件回放重建会</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    保留 rejected 旧版——runtime 列表与回放列表在 active_only=False 时存在差异</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    (伪码两处行为不一致,以各自伪码为准);active(未完成)集两者恒一致。</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>12. 执行步骤入队带 meta={&quot;plan_id&quot;,&quot;step_idx&quot;}(task.enqueued 载荷不支持 extra</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    字段 → 事件不带 meta;仅作 Task.meta 内存溯源,供 F044/F058 关联判定;</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    submit 的 task_id 由队列自增 t-N,不伪造溯源)。</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>数据纪律:Plan/Step 为内存编排态;一切状态迁移先 await append 对应 plan.* 事件</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>(落定成功)再对齐内存字段(INV-01,goal.py 同款纪律);executing 为事件派生中间态</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>(exec.step 任一步开跑即 executing,rebuild 同口径)。plan 终态只认事件(S-1)。</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>import asyncio</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>import fnmatch</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>import inspect</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>import logging</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>from dataclasses import asdict, dataclass</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>from datetime import datetime, timedelta, timezone</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>from typing import Any, Literal, Optional</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code># ------------------------------------------------------------------ 常量(F045 边界)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code># LLM 提案提示词(json_chat 强制 JSON:返回 {&quot;steps&quot;: [...]} 或裸数组;每步含</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code># action/tool/expected;risk/intent 由本模块统一打标,LLM 不背危险分级)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code></code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code># 危险分级同源表(F023 同源,与 scope.DEFAULT_DANGER_MARKS 一致;INV-08 不 import</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code># scope——内容复制保同源;critical 本层不可用,high 执行时须独立审批(审批点))</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code># 状态五主态 + 两终止(EVENT-SCHEMA/PRD 词表;draft 为 proposed 落盘前内存态)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code># 未完成集(供 UI/compaction F058 判定不可折叠)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code># ------------------------------------------------------------------ 数据结构</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code># ------------------------------------------------------------------ PlanManager</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>from pyharness.core.plan_models import (log, MAX_STEPS, PLAN_TTL_HOURS, MAX_RETRY, PLAN_PROMPT, DANGER_TABLE, PlanStatus, _ACTIVE_STATUSES, RiskLevel, _utcnow, _iso, _parse_dt, Step, Plan)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>class PlanManager:</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    &quot;&quot;&quot;会话级 plan 注册表与状态机(F045/F046 编排内核)。</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    消费 ctx.session(append 唯一写口)/ctx.llm.json_chat(F045 唯一 LLM 出口)/</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    ctx.task_queue(F043 submit/wait_for)/ctx.approval.user_choice(F046 三选一)/</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    ctx.scope.policy.danger_marks(F023 危险分级可选覆盖);被命令层(/plan、approve/</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    reject/edit)、UI 方案弹窗、compaction(F058 不可折叠集)、agent-loop(expiry</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    sweep 周期驱动)消费。内存态只由事件派生:直接构造(空表)或 rebuild_from_events。</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code></code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    私有字段:_plans(注册表,plan_id=proposed seq)、_danger_marks(内置 F023 表,</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    可被 ctx.scope 运行时覆盖)、_exec_tasks(approve 自动建的执行协程句柄集)。</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    def __init__(self, *, danger_marks: Optional[list[dict]] = None) -&gt; None:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        self._plans: dict[int, Plan] = {}</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        self._danger_marks: list[dict] = list(</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            danger_marks if danger_marks is not None else DANGER_TABLE)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        self._exec_tasks: set[asyncio.Task] = set()</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    # ============================================================ 内部辅助</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    def _require_session(self, ctx: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        &quot;&quot;&quot;写事件前置:ctx.session 未接线 → EVT-100(编排内核不背第二落点)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        sess = getattr(ctx, &quot;session&quot;, None)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        if sess is None or not callable(getattr(sess, &quot;append&quot;, None)):</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;ctx.session 未接线:plan.* 事件无落点&quot;,</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                       advice=&quot;装配层注入 SessionLog 或同型 append 协议对象&quot;)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        return sess</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code></code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    def _get(self, plan_id: Optional[int]) -&gt; Plan:</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        &quot;&quot;&quot;定位方案;不存在 → EVT-101(必先 plan.proposed,事件引用校验)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        p = self._plans.get(plan_id) if plan_id is not None else None</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        if p is None:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            raise_code(&quot;EVT-101&quot;, plan_id=plan_id,</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                       hint=f&quot;方案 {plan_id} 不存在:先 plan_propose 再裁决&quot;,</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                       advice=&quot;先 /plan 提案;核对 plan_id&quot;)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        return p</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code></code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    def _scope_marks(self, ctx: Any) -&gt; list[dict]:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        &quot;&quot;&quot;危险分级表:ctx.scope.policy.danger_marks(装配期已并入 extra 上调,</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        只紧不松)优先;无 scope/空表回落内置同源表。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        policy = getattr(getattr(ctx, &quot;scope&quot;, None), &quot;policy&quot;, None)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        marks = getattr(policy, &quot;danger_marks&quot;, None)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        if isinstance(marks, list) and marks:</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            return list(marks)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        return list(self._danger_marks)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    def _spawn_exec(self, plan_id: int, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        &quot;&quot;&quot;approve 自动建任务(F046 I/O):登记句柄 + done 回调清理/记异常。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        task = asyncio.create_task(self.plan_execute(plan_id, ctx))</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        self._exec_tasks.add(task)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code></code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        def _done(t: asyncio.Task) -&gt; None:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            self._exec_tasks.discard(t)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            if not t.cancelled() and t.exception() is not None:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                # 后台执行协程异常不静默:堆栈仅本地(事件已由 _abort 落 plan.aborted)</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                log.error(&quot;plan %s 执行协程异常: %r&quot;, plan_id, t.exception())</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code></code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        task.add_done_callback(_done)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code></code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    async def _abort(self, p: Plan, ctx: Any, step_idx: int) -&gt; None:</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        &quot;&quot;&quot;中止落账:写 plan.aborted(actor=system,step=中止步)后对齐内存。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        sess = self._require_session(ctx)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        await sess.append(&quot;plan.aborted&quot;,</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                          {&quot;plan_id&quot;: p.id, &quot;step&quot;: step_idx}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        p.status = &quot;aborted&quot;               # 事件落定 → 内存对齐(INV-01)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        p.who = &quot;system&quot;</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code></code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    async def _user_choice(self, options: list[str], ctx: Any) -&gt; str:</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        &quot;&quot;&quot;用户三选一裁决通道(ctx.approval.user_choice;同步/异步兼容)。</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code></code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        无通道/不可调用 → APR-501(安全默认:由调用方直接中止);通道返回词表外</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        值按&quot;中止&quot;安全默认处理——失败不机械静默重试,一切经用户裁决。</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        approval = getattr(ctx, &quot;approval&quot;, None)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        fn = getattr(approval, &quot;user_choice&quot;, None) if approval is not None else None</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        if not callable(fn):</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>            raise_code(&quot;APR-501&quot;,</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                       hint=&quot;无用户裁决通道(ctx.approval.user_choice 未接线)&quot;,</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                       advice=&quot;headless 无审批通道:单步失败直接中止(安全默认)&quot;)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        res = fn(options)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        if inspect.isawaitable(res):</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>            res = await res</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        if res not in options:</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>            log.warning(&quot;plan 裁决通道返回词表外值 %r,按中止安全默认处理&quot;, res)</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            return &quot;中止&quot;</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        return res</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code></code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    # ============================================================ 方案生成(F045)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    async def plan_propose(self, goal: str, ctx: Any, *, steps: Optional[list] = None,</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                           max_steps: int = MAX_STEPS) -&gt; Plan:</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        &quot;&quot;&quot;方案提案主函数:默认只调一次 LLM 产出 ≤max_steps 步 JSON 方案。</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code></code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        steps 显式传入时跳过 LLM(plan_revise 单步编辑复用,零 LLM 重调);逐步</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        危险打标(F023 同源表)+ 字段预检 + 自检;写 plan.proposed(先落后展示,</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        EVENT-SCHEMA §3.5.2)并登记 Plan(id=事件 seq,status=pending,24h TTL)。</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        sess = self._require_session(ctx)</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        if not goal or not str(goal).strip():</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;plan 目标为空&quot;,</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                       advice=&quot;提供 &lt;目标&gt; 后重新提案&quot;)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        if steps is None:                    # 常规路径:只调一次 LLM(F045 边界)</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            raw = await self._json_chat(ctx, goal, max_steps)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            if isinstance(raw, dict):</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                steps = raw.get(&quot;steps&quot;)     # 兼容 {&quot;steps&quot;: [...]} 包装</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>            else:</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>                steps = raw</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            if not isinstance(steps, list):  # LLM 结构不达标(非步骤数组)</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>                raise_code(&quot;LLM-304&quot;,</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>                           hint=&quot;json_chat 未返回 steps 数组,方案不可执行&quot;,</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                           advice=&quot;让模型重出(提示词强制 JSON),或人工给出步骤&quot;)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        if not steps:                        # 空方案(显式 steps 空同样拒)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            raise PyHError(&quot;EVT-100&quot;, ctx={</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                &quot;hint&quot;: f&quot;方案步骤须 1..{max_steps} 步&quot;,</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                &quot;advice&quot;: &quot;精简方案后重新提案&quot;})</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        if len(steps) &gt; max_steps:           # ≤8 步强校验(超限拒写不落盘)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>            raise PyHError(&quot;EVT-100&quot;, ctx={</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                &quot;hint&quot;: f&quot;方案步骤须 1..{max_steps} 步(实际 {len(steps)})&quot;,</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                &quot;advice&quot;: &quot;精简方案后重新提案&quot;})</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        marks = self._scope_marks(ctx)       # F023 表(F045 提案时刻定格)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        # 规范化 + 危险打标 + 执行意图拼装(每步只认五键,杜绝脏键入事件)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        ann: list[dict[str, str]] = []</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        for i, s in enumerate(steps):</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            if not isinstance(s, dict):</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>                raise PyHError(&quot;EVT-100&quot;, ctx={</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                    &quot;hint&quot;: f&quot;步骤 {i + 1} 不是对象&quot;, &quot;advice&quot;: &quot;检查方案结构&quot;})</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            action = str(s.get(&quot;action&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>            tool = str(s.get(&quot;tool&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>            expected = str(s.get(&quot;expected&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>            # 字段预检:缺 action/tool/expected 的步骤 events.payload.PlanStep 必拒</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>            # (min_length=1),此处前置给明确错误——零半成品不落盘(见偏离 6)</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>            if not action or not tool or not expected:</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>                miss = [k for k, v in ((&quot;action&quot;, action), (&quot;tool&quot;, tool),</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>                                       (&quot;expected&quot;, expected)) if not v]</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>                raise PyHError(&quot;EVT-100&quot;, ctx={</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                    &quot;hint&quot;: f&quot;步骤 {i + 1} 缺字段: {&#x27;,&#x27;.join(miss)}(不可执行)&quot;,</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                    &quot;advice&quot;: &quot;补齐 action/tool/expected 后重新提案&quot;})</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>            risk = self._classify(tool, marks)      # F023 同源表打标</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>            intent = str(s.get(&quot;intent&quot;) or &quot;&quot;).strip() or \</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                f&quot;用 {tool} {action}: {expected}&quot;   # 缺省由 action/tool 拼装</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>            ann.append({&quot;action&quot;: action, &quot;tool&quot;: tool, &quot;expected&quot;: expected,</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                        &quot;risk&quot;: risk, &quot;intent&quot;: intent})</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        ok, why = selfcheck_plan(ann)        # 可执行性/依赖自检(纯函数,展示用)</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        created_at = _utcnow()</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        expires_at = created_at + timedelta(hours=PLAN_TTL_HOURS)  # 24h 未确认作废</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        # 事件载荷:steps 只落 events.payload.PlanStep 五字段子集(action/tool/</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        # expected/risk),intent 不随事件(见偏离 2);先落盘后展示(§3.5.2)</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        step_payloads = [{k: d[k] for k in (&quot;action&quot;, &quot;tool&quot;, &quot;expected&quot;, &quot;risk&quot;)}</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                         for d in ann]</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        ev = await sess.append(</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>            &quot;plan.proposed&quot;,</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>            {&quot;goal&quot;: str(goal).strip(), &quot;steps&quot;: step_payloads,</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>             &quot;selfcheck_ok&quot;: ok, &quot;expires_at&quot;: _iso(expires_at)},</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            actor=&quot;agent&quot;)</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        p = Plan(id=ev.seq, goal=str(goal).strip(),</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                 steps=[Step(**d) for d in ann],</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                 selfcheck_ok=ok, why=why, status=&quot;pending&quot;,   # 待批:等用户裁决</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>                 created_at=created_at, expires_at=expires_at)</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        self._plans[p.id] = p                # 注册(plan_id = proposed 事件 seq)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        return p</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code></code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    async def _json_chat(self, ctx: Any, goal: str, max_steps: int) -&gt; Any:</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        &quot;&quot;&quot;LLM 单次调用(注入式):ctx.llm.json_chat 未接线 → CYC-999 装配错误。</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code></code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        只调一次(F045 边界);LLM-3xx 失败由 llm 层上抛,本层零捕获零重试。</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        llm = getattr(ctx, &quot;llm&quot;, None)</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        fn = getattr(llm, &quot;json_chat&quot;, None) if llm is not None else None</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        if not callable(fn):</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>            raise_code(&quot;CYC-999&quot;,</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>                       hint=&quot;ctx.llm.json_chat 未接线(plan 提案需要 LLM)&quot;,</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>                       advice=&quot;装配层注入带 json_chat 的 LLM 门面后再提案&quot;)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        res = fn(prompt=PLAN_PROMPT, goal=goal, max_steps=max_steps)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        if inspect.isawaitable(res):</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>            res = await res</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        return res</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code></code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>    def _classify(self, tool_name: str, marks: list[dict]) -&gt; str:</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        &quot;&quot;&quot;按给定分级表前缀匹配工具名(打标核心,分类结果由调用方落内存)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        for rule in marks:</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            if fnmatch.fnmatch(str(tool_name or &quot;&quot;), str(rule.get(&quot;pattern&quot;) or &quot;&quot;)):</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>                level = str(rule.get(&quot;level&quot;) or &quot;none&quot;)</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>                return level if level in (&quot;none&quot;, &quot;low&quot;, &quot;high&quot;, &quot;critical&quot;) else &quot;none&quot;</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        return &quot;none&quot;</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code></code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>    def classify_danger(self, tool_name: str) -&gt; str:</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        &quot;&quot;&quot;危险分级查表(F023 同源):内置表前缀匹配,返回 none/low/high/critical。</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code></code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        high → 执行时独立审批(&quot;审批点&quot;);critical → guard 本层不可执行(selfcheck</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        软标,展示不阻断);表外默认 none。表变更只紧不松(scope 装配纪律)。</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        return self._classify(tool_name, self._danger_marks)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code></code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>    # ============================================================ 审批裁决(F046)</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>    async def plan_approve(self, plan_id: int, *, who: str = &quot;user&quot;,</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                           ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        &quot;&quot;&quot;审批:批准(F046)。仅 pending 可批——写 plan.approved(who) 并置 approved</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        (方案冻结,steps 不可变),随即启动执行协程(approved 自动建任务,逐步入队);</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        已拒绝/已终态/不存在显式拒;批准前先查 24h 过期(过期自动转 rejected)。</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>        p = self._get(plan_id)               # 不存在 → EVT-101(必先 proposed)</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>        if p.status == &quot;rejected&quot;:           # 拒绝后不再推进(F046 边界)</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                &quot;hint&quot;: f&quot;方案 {plan_id} 已拒绝,不可批准&quot;,</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>                &quot;advice&quot;: &quot;修订后重新提案(reject 重提)&quot;})</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        if p.status in (&quot;completed&quot;, &quot;aborted&quot;):   # 终态不可再裁决</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                &quot;hint&quot;: f&quot;方案 {plan_id} 已{p.status}&quot;,</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                &quot;advice&quot;: &quot;终态不可逆;新需求请重新提案&quot;})</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        if p.status != &quot;pending&quot;:            # 只待批可批(防重复 approve)</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                &quot;hint&quot;: f&quot;方案 {plan_id} 非待批态({p.status})&quot;,</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>                &quot;advice&quot;: &quot;已裁决方案不可重复批准&quot;})</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>        if await self._expire_if_stale(p, ctx):    # 24h 未确认 → 自动 rejected</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                &quot;hint&quot;: &quot;方案已过期(24h 未确认),请重新提案&quot;,</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>                &quot;advice&quot;: &quot;重新 /plan 提案后再批准&quot;})</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        sess = self._require_session(ctx)</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>        await sess.append(&quot;plan.approved&quot;,</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>                          {&quot;plan_id&quot;: plan_id, &quot;who&quot;: who}, actor=&quot;user&quot;)</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        p.status = &quot;approved&quot;                # 事件落定 → 内存对齐(INV-01)</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        p.who = who                          # 批准后 steps 冻结不可变(改=reject 重提)</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        self._spawn_exec(plan_id, ctx)       # approved 自动建任务(F046 I/O)</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code></code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>    async def _expire_if_stale(self, p: Plan, ctx: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        &quot;&quot;&quot;24h 过期即时检查(approve 前置 + sweep 双路复用):过期 → 自动 rejected。</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code></code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        写 plan.rejected(who=system,reason=expired) 后置状态;返回是否已过期。</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        if p.status != &quot;pending&quot; or p.expires_at is None:</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>            return False</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        if p.expires_at &gt; _utcnow():</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>            return False</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        sess = self._require_session(ctx)</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        await sess.append(&quot;plan.rejected&quot;,</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>                          {&quot;plan_id&quot;: p.id, &quot;who&quot;: &quot;system&quot;, &quot;reason&quot;: &quot;expired&quot;},</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>                          actor=&quot;system&quot;)    # who=system 自动态(24h 未确认)</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        p.status = &quot;rejected&quot;                # 自动作废,不执行</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>        p.who = &quot;system&quot;</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        return True</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code></code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>    async def plan_reject(self, plan_id: int, *, who: str = &quot;user&quot;,</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>                          reason: str = &quot;user-rejected&quot;, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        &quot;&quot;&quot;审批:拒绝(F046)。拒绝方案回修订对话——写 plan.rejected(who,reason);</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>        拒绝后不可再 approve/revise/execute;终态(completed/aborted/rejected)</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>        不可再拒绝。执行中被拒 → 执行循环顶守卫停止后续步骤(见偏离 7)。</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>        p = self._get(plan_id)               # 不存在 → EVT-101</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>        if p.status in (&quot;completed&quot;, &quot;aborted&quot;, &quot;rejected&quot;):</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>                &quot;hint&quot;: f&quot;方案 {plan_id} 已终态({p.status})&quot;,</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>                &quot;advice&quot;: &quot;终态不可逆;新需求请重新提案&quot;})</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>        sess = self._require_session(ctx)</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>        await sess.append(&quot;plan.rejected&quot;,</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>                          {&quot;plan_id&quot;: plan_id, &quot;who&quot;: who, &quot;reason&quot;: reason},</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>                          actor=&quot;user&quot;)</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>        p.status = &quot;rejected&quot;                # 事件落定 → 内存对齐(INV-01)</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>        p.who = who</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>        # I/O:rejected 回修订对话(F046)——用户可带反馈重新 plan_propose</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code></code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>    async def plan_revise(self, plan_id: int, step_idx: int, patch: dict,</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>                          ctx: Any) -&gt; Plan:</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        &quot;&quot;&quot;单步编辑(F046):仅 pending 可改——旧方案 rejected(reason=revised)+</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        同目标重提新方案,零 LLM 重调(编辑是本地操作);批准后不可改(改=reject</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>        重提,F046 边界);改动工具时按新工具重打危险标(F023 联动)。</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        p = self._get(plan_id)</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>        if p.status != &quot;pending&quot;:            # 只待批可改(批准后冻结)</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>                &quot;hint&quot;: &quot;仅待批方案可单步修改&quot;,</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>                &quot;advice&quot;: &quot;已批准方案不可变;请 reject 后重新提案&quot;})</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>        if not (0 &lt;= step_idx &lt; len(p.steps)):   # 步下标越界</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>            raise_code(&quot;EVT-100&quot;, plan_id=plan_id, step_idx=step_idx,</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>                       hint=f&quot;step_idx {step_idx} 越界(共 {len(p.steps)} 步)&quot;,</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>                       advice=&quot;核对方案步数(0 起)&quot;)</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>        unknown = set(patch or {}) - {&quot;action&quot;, &quot;tool&quot;, &quot;expected&quot;,</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>                                      &quot;risk&quot;, &quot;intent&quot;}</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>        if unknown:                          # 脏键拒改(防打字错误静默丢字段)</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>            raise_code(&quot;EVT-100&quot;, plan_id=plan_id, step_idx=step_idx,</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>                       hint=f&quot;patch 含未知字段: {&#x27;,&#x27;.join(sorted(unknown))}&quot;,</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>                       advice=&quot;patch 字段 ∈ action/tool/expected/intent&quot;)</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>        new_steps = [s.to_dict() for s in p.steps]  # 值拷贝后单步字段替换</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>        merged = {**new_steps[step_idx], **(patch or {})}</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>        # intent 是 action/tool/expected 的派生态:改了源字段而未显式给 intent →</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>        # 丢弃旧 intent 让重提时按新字段拼装(防修订后执行意图残留旧文案)</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>        if &quot;intent&quot; not in (patch or {}) and any(k in (patch or {})</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>                                                  for k in (&quot;action&quot;, &quot;tool&quot;, &quot;expected&quot;)):</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>            merged.pop(&quot;intent&quot;, None)</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>        new_steps[step_idx] = merged</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>        sess = self._require_session(ctx)</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>        await sess.append(&quot;plan.rejected&quot;, {</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>            &quot;plan_id&quot;: plan_id, &quot;who&quot;: &quot;user&quot;,</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>            &quot;reason&quot;: f&quot;revised:step:{step_idx}&quot;}, actor=&quot;user&quot;)  # 旧版作废</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>        self._plans.pop(plan_id, None)       # 旧 plan 出注册表(事件留痕,偏离 11)</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>        return await self.plan_propose(p.goal, ctx,   # 同目标重提新版,显式 steps</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>                                       steps=new_steps)     # 零 LLM 调用</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code></code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>    # ============================================================ 执行(F043/F046)</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>    async def plan_execute(self, plan_id: int, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>        &quot;&quot;&quot;执行切换:逐步入队。逐 step:写 plan.exec.step → 步骤意图 submit 入队</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>        (F043)并 wait_for;失败用户三选一(跳过/重试/中止),重试 ≤2 次仍败默认</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>        中止;全部成功写 plan.done;中止写 plan.aborted(step=i);headless 无通道</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>        自动中止(APR-501 安全默认)。批准只定方向,每步仍走正常 guard/审批链。</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>        p = self._get(plan_id)</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>        if p.status not in (&quot;approved&quot;, &quot;executing&quot;):  # 硬条件:批准后才执行</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>            if p.status == &quot;rejected&quot;:</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>                # 拒绝后不再推进(EVENT-SCHEMA §3.5.2):已裁决方案不可执行——</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>                # approve 后执行协程开跑前被 plan_reject 的竞态同样落此静默退场</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>                return</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>                &quot;hint&quot;: f&quot;方案 {plan_id} 未批准,禁止执行&quot;,</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>                &quot;advice&quot;: &quot;先 plan_approve 批准方案后再执行&quot;})</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>        sess = self._require_session(ctx)</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>        tq = getattr(ctx, &quot;task_queue&quot;, None)</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>        if (tq is None or not callable(getattr(tq, &quot;submit&quot;, None))</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>                or not callable(getattr(tq, &quot;wait_for&quot;, None))):</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>            raise_code(&quot;CYC-999&quot;,</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>                       hint=&quot;ctx.task_queue 未接线:执行=逐步入队(F043)需要队列&quot;,</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>                       advice=&quot;装配层注入 TaskQueue(runner=agent_loop)后再批准&quot;)</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>        p.status = &quot;executing&quot;               # 批准 → 执行中(事件态由 exec.step 派生)</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>        for i, step in enumerate(p.steps):</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>            if p.status == &quot;rejected&quot;:       # 执行中被拒:停止后续步(偏离 7)</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>                return</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>            await sess.append(&quot;plan.exec.step&quot;, {</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>                &quot;plan_id&quot;: plan_id, &quot;step_idx&quot;: i, &quot;action&quot;: step.action},</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>                actor=&quot;agent&quot;)</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>            tries = 0</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>            while True:                      # 逐步入队:队列单飞,天然串行(F043)</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>                meta = {&quot;plan_id&quot;: plan_id, &quot;step_idx&quot;: i}  # Task.meta 溯源(偏离 12)</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>                tid = await tq.submit(step.intent, meta=meta)</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>                r = await tq.wait_for(tid)</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>                if getattr(r, &quot;ok&quot;, False):</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>                    break                    # 成功 → 下一步</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>                if tries &gt;= MAX_RETRY:       # 重试耗尽 → 默认中止(汇报,F046 边界)</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>                    await self._abort(p, ctx, i)</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>                    return</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>                try:</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>                    choice = await self._user_choice([&quot;跳过&quot;, &quot;重试&quot;, &quot;中止&quot;], ctx)</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>                except PyHError as e:</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>                    if e.code == &quot;APR-501&quot;:  # headless 无通道:直接中止(安全默认)</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>                        await self._abort(p, ctx, i)</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>                        raise</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>                    raise</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>                if choice == &quot;跳过&quot;:</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>                    break                    # 跳过:继续下一步</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>                if choice == &quot;中止&quot;:</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>                    await self._abort(p, ctx, i)</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>                    return</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>                tries += 1                   # 重试:同一步重新入队(重走 guard/审批)</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>        if p.status == &quot;executing&quot;:          # 全部成功(未被中止/拒绝打断)</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>            await sess.append(&quot;plan.done&quot;, {&quot;plan_id&quot;: plan_id}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>            p.status = &quot;completed&quot;           # 事件落定 → 内存对齐(INV-01)</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code></code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>    # ============================================================ 过期清理(F045)</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>    async def plan_sweep_expired(self, ctx: Any, *,</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>                                 now: Optional[datetime] = None) -&gt; int:</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>        &quot;&quot;&quot;过期清理:扫全部 pending 方案,超 24h 未确认自动 rejected(who=system,</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>        reason=expired)并返回清理数;由 agent-loop 周期驱动与 approve 前即时检查</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>        双路调用。now = 测试注入时钟(aware UTC,偏离 4)。</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>        sess = self._require_session(ctx)</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>        now = now or _utcnow()</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>        n = 0</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>        for p in list(self._plans.values()):     # 快照遍历(清理中可安全变更)</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>            if (p.status == &quot;pending&quot; and p.expires_at is not None</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>                    and p.expires_at &lt;= now):    # 24h 未确认(F045 边界)</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>                await sess.append(&quot;plan.rejected&quot;, {</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>                    &quot;plan_id&quot;: p.id, &quot;who&quot;: &quot;system&quot;, &quot;reason&quot;: &quot;expired&quot;},</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>                    actor=&quot;system&quot;)              # who=system 自动态</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>                p.status = &quot;rejected&quot;            # 自动作废,不执行</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>                p.who = &quot;system&quot;</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>                n += 1</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>        return n</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code></code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>    # ============================================================ 查询/重建</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>    def list_plans(self, *, active_only: bool = True) -&gt; list[Plan]:</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code>        &quot;&quot;&quot;按状态过滤列出方案(默认非终态),供 UI/命令层/compaction 判定未完成</code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code>        plan 不可折叠(F058)。返回按 plan_id(proposed seq)升序。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>        plans = sorted(self._plans.values(), key=lambda p: p.id)</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>        if not active_only:</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>            return plans                      # 全量(含 rejected/aborted/completed)</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>        return [p for p in plans</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>                if p.status in _ACTIVE_STATUSES]   # 未完成集 → F058 不可折叠</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code></code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>    def get(self, plan_id: int) -&gt; Optional[Plan]:</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>        &quot;&quot;&quot;按 id 取方案(查询口;不存在返回 None,供 UI/命令层读,不抛)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code>        return self._plans.get(plan_id)</code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code></code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code>    @classmethod</code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>    def rebuild_from_events(cls, events: list[Any]) -&gt; &quot;PlanManager&quot;:</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>        &quot;&quot;&quot;事件溯源重建(INV-01):顺序重放 plan.proposed/approved/rejected/</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>        exec.step/done/aborted 重建注册表与状态——崩溃恢复/会话恢复后内存态 ≡</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>        日志;孤儿引用(approved 前无 proposed)由写入层 EVT-101 拦截,此处防御</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code>        跳过。完成态映射为 completed(偏离 5);steps 从事件载荷重建,缺省 intent</code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>        由 Step.__post_init__ 拼装(偏离 2)。</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code>        m = cls()</code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>        for e in events:                     # seq 升序重放(只读不写回)</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>            t = getattr(e, &quot;type&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code>            p = getattr(e, &quot;payload&quot;, {}) or {}</code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code>            if t == &quot;plan.proposed&quot;:</code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code>                pid = getattr(e, &quot;seq&quot;, 0)   # plan_id = proposed 事件 seq(§3.5.2)</code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code>                created_at = _parse_dt(getattr(e, &quot;ts&quot;, None)) or _utcnow()</code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code>                expires = _parse_dt(p.get(&quot;expires_at&quot;)) or \</code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code>                    (created_at + timedelta(hours=PLAN_TTL_HOURS)</code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code>                     if p.get(&quot;expires_at&quot;) is None else None)</code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code>                if expires is None:          # 旧日志无 ts/expires:按创建时刻兜底</code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code>                    expires = created_at + timedelta(hours=PLAN_TTL_HOURS)</code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>                steps = [Step(**dict(s)) for s in p.get(&quot;steps&quot;, []) or []]</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code>                m._plans[pid] = Plan(</code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code>                    id=pid, goal=p.get(&quot;goal&quot;, &quot;&quot;), steps=steps,</code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>                    selfcheck_ok=bool(p.get(&quot;selfcheck_ok&quot;, True)), why=&quot;&quot;,</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>                    status=&quot;pending&quot;, created_at=created_at, expires_at=expires)</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code>            else:</code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code>                g = m._plans.get(p.get(&quot;plan_id&quot;))</code></div>
+<div class="code-line" id="L507"><a class="line-number" href="#L507">507</a><code>                if g is None:</code></div>
+<div class="code-line" id="L508"><a class="line-number" href="#L508">508</a><code>                    log.warning(&quot;orphan plan event seq=%s type=%s(防御跳过)&quot;,</code></div>
+<div class="code-line" id="L509"><a class="line-number" href="#L509">509</a><code>                                getattr(e, &quot;seq&quot;, &quot;?&quot;), t)</code></div>
+<div class="code-line" id="L510"><a class="line-number" href="#L510">510</a><code>                    continue                 # 孤儿引用:重放不中断</code></div>
+<div class="code-line" id="L511"><a class="line-number" href="#L511">511</a><code>                if t == &quot;plan.approved&quot;:</code></div>
+<div class="code-line" id="L512"><a class="line-number" href="#L512">512</a><code>                    g.status = &quot;approved&quot;</code></div>
+<div class="code-line" id="L513"><a class="line-number" href="#L513">513</a><code>                    g.who = p.get(&quot;who&quot;)</code></div>
+<div class="code-line" id="L514"><a class="line-number" href="#L514">514</a><code>                elif t == &quot;plan.rejected&quot;:</code></div>
+<div class="code-line" id="L515"><a class="line-number" href="#L515">515</a><code>                    g.status = &quot;rejected&quot;    # reason=expired/revised 等不细分</code></div>
+<div class="code-line" id="L516"><a class="line-number" href="#L516">516</a><code>                    g.who = p.get(&quot;who&quot;)</code></div>
+<div class="code-line" id="L517"><a class="line-number" href="#L517">517</a><code>                elif t == &quot;plan.exec.step&quot;:</code></div>
+<div class="code-line" id="L518"><a class="line-number" href="#L518">518</a><code>                    g.status = &quot;executing&quot;   # 任一步开跑即执行中</code></div>
+<div class="code-line" id="L519"><a class="line-number" href="#L519">519</a><code>                elif t == &quot;plan.done&quot;:</code></div>
+<div class="code-line" id="L520"><a class="line-number" href="#L520">520</a><code>                    g.status = &quot;completed&quot;</code></div>
+<div class="code-line" id="L521"><a class="line-number" href="#L521">521</a><code>                    g.who = &quot;system&quot;</code></div>
+<div class="code-line" id="L522"><a class="line-number" href="#L522">522</a><code>                elif t == &quot;plan.aborted&quot;:</code></div>
+<div class="code-line" id="L523"><a class="line-number" href="#L523">523</a><code>                    g.status = &quot;aborted&quot;</code></div>
+<div class="code-line" id="L524"><a class="line-number" href="#L524">524</a><code>                    g.who = &quot;system&quot;</code></div>
+<div class="code-line" id="L525"><a class="line-number" href="#L525">525</a><code>        return m                              # 内存态 ≡ 日志派生态(INV-01)</code></div>
+<div class="code-line" id="L526"><a class="line-number" href="#L526">526</a><code></code></div>
+<div class="code-line" id="L527"><a class="line-number" href="#L527">527</a><code></code></div>
+<div class="code-line" id="L528"><a class="line-number" href="#L528">528</a><code># ------------------------------------------------------------------ 纯函数</code></div>
+<div class="code-line" id="L529"><a class="line-number" href="#L529">529</a><code>def selfcheck_plan(steps: list[dict]) -&gt; tuple[bool, str]:</code></div>
+<div class="code-line" id="L530"><a class="line-number" href="#L530">530</a><code>    &quot;&quot;&quot;方案自检(纯函数,F045):步骤 1..8、每步 action/tool/expected 齐全、</code></div>
+<div class="code-line" id="L531"><a class="line-number" href="#L531">531</a><code>    risk=critical 的工具本层不可用(F014)则标 why;结果只展示不阻断(软指导,</code></div>
+<div class="code-line" id="L532"><a class="line-number" href="#L532">532</a><code>    批准权在用户)。零写副作用,propose 与测试直接调用。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L533"><a class="line-number" href="#L533">533</a><code>    if not steps or len(steps) &gt; MAX_STEPS:  # 空方案/超上限</code></div>
+<div class="code-line" id="L534"><a class="line-number" href="#L534">534</a><code>        return False, &quot;步骤数须为 1..8&quot;</code></div>
+<div class="code-line" id="L535"><a class="line-number" href="#L535">535</a><code>    for i, s in enumerate(steps):            # 逐步字段完整性</code></div>
+<div class="code-line" id="L536"><a class="line-number" href="#L536">536</a><code>        if not s.get(&quot;action&quot;) or not s.get(&quot;tool&quot;):</code></div>
+<div class="code-line" id="L537"><a class="line-number" href="#L537">537</a><code>            return False, f&quot;步骤 {i + 1} 缺 action 或 tool(不可执行)&quot;</code></div>
+<div class="code-line" id="L538"><a class="line-number" href="#L538">538</a><code>        if not s.get(&quot;expected&quot;):</code></div>
+<div class="code-line" id="L539"><a class="line-number" href="#L539">539</a><code>            return False, f&quot;步骤 {i + 1} 缺预期结果 expected(不可核对)&quot;</code></div>
+<div class="code-line" id="L540"><a class="line-number" href="#L540">540</a><code>        if s.get(&quot;risk&quot;) == &quot;critical&quot;:      # critical 工具 guard 层直接不可用</code></div>
+<div class="code-line" id="L541"><a class="line-number" href="#L541">541</a><code>            return False, f&quot;步骤 {i + 1} 工具 {s[&#x27;tool&#x27;]} 为 critical 不可执行,需换招&quot;</code></div>
+<div class="code-line" id="L542"><a class="line-number" href="#L542">542</a><code>    return True, &quot;&quot;                          # 通过(展示 selfcheck_ok=True)</code></div>
+<div class="code-line" id="L543"><a class="line-number" href="#L543">543</a><code></code></div>
+<div class="code-line" id="L544"><a class="line-number" href="#L544">544</a><code></code></div>
+<div class="code-line" id="L545"><a class="line-number" href="#L545">545</a><code>__all__ = [</code></div>
+<div class="code-line" id="L546"><a class="line-number" href="#L546">546</a><code>    &quot;PlanManager&quot;, &quot;Plan&quot;, &quot;Step&quot;, &quot;PlanStatus&quot;, &quot;RiskLevel&quot;,</code></div>
+<div class="code-line" id="L547"><a class="line-number" href="#L547">547</a><code>    &quot;selfcheck_plan&quot;, &quot;MAX_STEPS&quot;, &quot;PLAN_TTL_HOURS&quot;, &quot;MAX_RETRY&quot;,</code></div>
+<div class="code-line" id="L548"><a class="line-number" href="#L548">548</a><code>    &quot;PLAN_PROMPT&quot;, &quot;DANGER_TABLE&quot;,</code></div>
+<div class="code-line" id="L549"><a class="line-number" href="#L549">549</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

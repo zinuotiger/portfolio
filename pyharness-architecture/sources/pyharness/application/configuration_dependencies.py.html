@@ -1,0 +1,83 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/configuration_dependencies.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/configuration_dependencies.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 83 行</span></nav><main class="wrap source-page"><h1>pyharness/application/configuration_dependencies.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：7ff36f7180a3ce002cc876fbd18301323dd08ba3<br>SHA-256（内容校验）：1ce098f094d4eb13d86b828a7ebb883ed838d4f4d315c76bd0287b18841a477a</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 1 个类、函数与方法</summary><ul><li><a href="#L12">dependencies（函数） · L12–L83</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Read declared dependencies under the original platform and model locks.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import hashlib</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from urllib.parse import urlsplit</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.session_access import _session_module</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.config import McpServerCfg</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.core import configuration_revision_contracts as c</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.core.skill import SkillManager</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>def dependencies(platform, data, definition, model_view):</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    service = platform.service</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    cfg = _session_module()._cfg_of(service.ctx)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    result = {&#x27;base_public_fingerprint&#x27;: None, &#x27;models&#x27;: None, &#x27;mcp&#x27;: {},</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>              &#x27;skills&#x27;: {}, &#x27;knowledge&#x27;: {}, &#x27;knowledge_provider&#x27;: None,</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>              &#x27;remote&#x27;: None, &#x27;runtime_checks&#x27;: []}</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    issues = []</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    if definition.executor == &#x27;engine&#x27;:</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        result[&#x27;models&#x27;] = model_view.model(definition.model_connection)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        if result[&#x27;models&#x27;][&#x27;credential_status&#x27;] != &#x27;valid&#x27;:</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>            issues.append(&#x27;model_credential_&#x27;+result[&#x27;models&#x27;][&#x27;credential_status&#x27;])</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    else:</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        # The original Codex host authorization remains a fresh task preflight.</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        # No CLI authentication or process execution is attempted by a preview.</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        result[&#x27;runtime_checks&#x27;].append(&#x27;codex_host_authority_and_authentication&#x27;)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    if definition.sandbox_profile.mode == &#x27;remote&#x27;:</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        record = data[&#x27;preferences&#x27;].get(&#x27;remote_connections&#x27;, {}).get(definition.sandbox_profile.remote_connection)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        result[&#x27;remote&#x27;] = model_view.remote(platform.root, record)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        if result[&#x27;remote&#x27;][&#x27;credential_status&#x27;] != &#x27;valid&#x27;:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            issues.append(&#x27;remote_credential_not_active&#x27;)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        result[&#x27;runtime_checks&#x27;].append(&#x27;remote_sandbox_authentication_and_availability&#x27;)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    for name in definition.mcp_connections:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        row = data[&#x27;connections&#x27;].get(&#x27;mcp:&#x27;+name)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        try:</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            if not row or row.get(&#x27;type&#x27;) != &#x27;mcp&#x27;:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                raise ValueError(&#x27;missing managed connection&#x27;)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            config = McpServerCfg.model_validate(row[&#x27;config&#x27;]).model_dump()</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            if not config[&#x27;enabled&#x27;]:</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                raise ValueError(&#x27;disabled managed connection&#x27;)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            result[&#x27;mcp&#x27;][name] = c.digest(config)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            if &#x27;mcp_process_and_protocol&#x27; not in result[&#x27;runtime_checks&#x27;]:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>                result[&#x27;runtime_checks&#x27;].append(&#x27;mcp_process_and_protocol&#x27;)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        except (ValueError, TypeError, KeyError):</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            issues.append(&#x27;mcp_dependency_unavailable&#x27;)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    if definition.skills:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        try:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            manager = SkillManager([service.skill_catalog_root]).frozen_copy(definition.skills)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            for name in definition.skills:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>                snapshot = manager.snapshot(name)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                result[&#x27;skills&#x27;][name] = {key: snapshot[key] for key in (&#x27;source_sha256&#x27;, &#x27;loaded_sha256&#x27;)}</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        except (PyHError, ValueError, TypeError, OSError):</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>            issues.append(&#x27;skill_dependency_unavailable&#x27;)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    for ident in definition.knowledge_sources:</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        row = data[&#x27;knowledge&#x27;].get(ident)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        if (type(row) is not dict or type(row.get(&#x27;text&#x27;)) is not str</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                or hashlib.sha256(row[&#x27;text&#x27;].encode(&#x27;utf-8&#x27;)).hexdigest() != row.get(&#x27;sha256&#x27;)):</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            issues.append(&#x27;knowledge_dependency_unavailable&#x27;)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        else:</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            result[&#x27;knowledge&#x27;][ident] = {key: row.get(key) for key in (&#x27;source_id&#x27;, &#x27;version&#x27;, &#x27;sha256&#x27;)}</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    if (definition.knowledge_sources or definition.require_evidence or definition.strict_knowledge</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            or any(name.startswith((&#x27;knowledge.&#x27;, &#x27;rag.&#x27;)) for name in definition.allowed_tools)):</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        provider = data[&#x27;preferences&#x27;].get(&#x27;knowledge_provider&#x27;, &#x27;exact_keyword&#x27;)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        result[&#x27;knowledge_provider&#x27;] = {&#x27;provider&#x27;: provider}</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        if provider != &#x27;exact_keyword&#x27;:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            row = data[&#x27;connections&#x27;].get(provider)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            try:</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>                if not row or row.get(&#x27;type&#x27;) != &#x27;remote_rag&#x27; or not row[&#x27;config&#x27;][&#x27;enabled&#x27;]:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                    raise ValueError(&#x27;unavailable knowledge provider&#x27;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                config = row[&#x27;config&#x27;]</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>                url = urlsplit(config[&#x27;endpoint&#x27;])</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                if url.scheme not in (&#x27;http&#x27;, &#x27;https&#x27;) or not url.hostname or url.username or url.password or url.query or url.fragment:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                    raise ValueError(&#x27;invalid knowledge endpoint&#x27;)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                secret = (model_view.service(config[&#x27;secret_ref&#x27;], config[&#x27;endpoint&#x27;])</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                          if config.get(&#x27;secret_ref&#x27;) else {&#x27;credential_status&#x27;: &#x27;not_required&#x27;})</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                if secret[&#x27;credential_status&#x27;] not in (&#x27;valid&#x27;, &#x27;not_required&#x27;):</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                    issues.append(&#x27;knowledge_credential_not_active&#x27;)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                result[&#x27;knowledge_provider&#x27;].update(config_sha256=c.digest(config), credential=secret)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                result[&#x27;runtime_checks&#x27;].append(&#x27;remote_knowledge_authentication_and_availability&#x27;)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            except (ValueError, TypeError, KeyError):</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                issues.append(&#x27;knowledge_provider_not_active&#x27;)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    result[&#x27;base_public_fingerprint&#x27;] = model_view.base_fingerprint(cfg.model_dump(mode=&#x27;json&#x27;))</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    return result, sorted(set(issues))</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

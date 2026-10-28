@@ -1,0 +1,148 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/execution_index_repair_store.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/execution_index_repair_store.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 148 行</span></nav><main class="wrap source-page"><h1>pyharness/application/execution_index_repair_store.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：180ab4fd60fdd82ec01d9e67a3e692e68ffe6d5f<br>SHA-256（内容校验）：5e1d5da88b2268cfc3dd11ab9ef471abf6ff2b182a964626835bcdc62cef2502</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 11 个类、函数与方法</summary><ul><li><a href="#L7">repair_fault（函数） · L7–L10</a></li><li><a href="#L13">ExecutionIndexRepairStore（类） · L13–L148</a><ul><li><a href="#L14">ExecutionIndexRepairStore._index_repair_request（方法） · L14–L17</a></li><li><a href="#L19">ExecutionIndexRepairStore._index_repair_result_request（方法） · L19–L22</a></li><li><a href="#L24">ExecutionIndexRepairStore._index_repair_result_key（方法） · L24–L25</a></li><li><a href="#L27">ExecutionIndexRepairStore._index_repair_rows（方法） · L27–L29</a></li><li><a href="#L31">ExecutionIndexRepairStore._validate_index_repair（方法） · L31–L59</a></li><li><a href="#L61">ExecutionIndexRepairStore._index_repair_summary（方法） · L61–L70</a></li><li><a href="#L72">ExecutionIndexRepairStore.apply_index_repair（异步方法） · L72–L124</a></li><li><a href="#L126">ExecutionIndexRepairStore.index_repair_submission（异步方法） · L126–L136</a></li><li><a href="#L138">ExecutionIndexRepairStore.index_repairs（异步方法） · L138–L148</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Two-attempt repair audit on the sole control owner; never replay old tools.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import asyncio,time</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.index_repair_contracts import IndexRepairRevision,RepairIndex</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.errors import PyHError,raise_code</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code></code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>def repair_fault(plan,scope):</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>    from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    return digest_of(canonical(dict(operation=&#x27;index.repair&#x27;,execution_ref=plan[&#x27;execution_ref&#x27;],</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>        journals=plan[&#x27;journals&#x27;],index_scope_digest=scope)))</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>class ExecutionIndexRepairStore:</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    def _index_repair_request(project,command):</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        return digest_of(canonical(dict(operation=&#x27;execution.index_repair&#x27;,project_id=project,command=command.model_dump())))</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    def _index_repair_result_request(definition):</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        return digest_of(canonical(dict(operation=&#x27;execution.index_repair.result&#x27;,definition=definition.model_dump())))</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    def _index_repair_result_key(ident):return &#x27;index-repair-result-&#x27;+ident</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    def _index_repair_rows(resources,reference):</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        return [r for r in resources.values() if r.get(&#x27;index_repair&#x27;,{}).get(&#x27;command&#x27;,{}).get(&#x27;execution_ref&#x27;)==reference]</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code></code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    def _validate_index_repair(self,definition,resources,previous,event):</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        value=definition.model_dump();actor=value[&#x27;created_by&#x27;];project=value[&#x27;project_id&#x27;];p=event.payload</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        try:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            root=self._cancel_target(resources,project,definition.command.execution_ref,actor)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            if root[&#x27;execution_authorization&#x27;][&#x27;project_revision&#x27;]!=value[&#x27;project_revision&#x27;]:raise ValueError(&#x27;repair project revision&#x27;)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>            self._context_project(resources,project,value[&#x27;project_revision&#x27;])</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            plan=value[&#x27;plan&#x27;];basis={k:v for k,v in plan.items() if k!=&#x27;plan_digest&#x27;}</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            if (digest_of(canonical(basis))!=plan[&#x27;plan_digest&#x27;] or not plan[&#x27;journals&#x27;] or</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                    plan[&#x27;journals&#x27;][0][&#x27;session_id&#x27;]!=root[&#x27;execution_authorization&#x27;][&#x27;session_id&#x27;] or</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>                    repair_fault(plan,value[&#x27;index_scope_digest&#x27;])!=value[&#x27;fault_digest&#x27;] or actor!=p[&#x27;actor_ref&#x27;]):raise ValueError(&#x27;repair basis&#x27;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            if plan[&#x27;unknown_effects&#x27;] or plan[&#x27;journals_truncated&#x27;] or plan[&#x27;artifacts_truncated&#x27;] or any(</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>                    b in plan[&#x27;continuation_blockers&#x27;] for b in (&#x27;execution_live&#x27;,&#x27;security_refusal&#x27;,&#x27;journal_unconfirmed&#x27;,&#x27;child_journal_unconfirmed&#x27;)):</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>                raise ValueError(&#x27;unsafe repair basis&#x27;)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            if value[&#x27;revision&#x27;]==1:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                if previous is not None or p[&#x27;command_id&#x27;]!=value[&#x27;submission_key&#x27;] or self._index_repair_request(project,definition.command)!=p[&#x27;request_digest&#x27;]:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>                    raise ValueError(&#x27;repair start request&#x27;)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>                prior=[r for r in resources.values() if r.get(&#x27;index_repair&#x27;,{}).get(&#x27;fault_digest&#x27;)==value[&#x27;fault_digest&#x27;]]</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>                if len(prior)&gt;=2 or value[&#x27;attempt&#x27;]!=len(prior)+1:raise ValueError(&#x27;repair attempt limit&#x27;)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>                if plan[&#x27;index_observation&#x27;][&#x27;state&#x27;]==&#x27;current&#x27;:raise ValueError(&#x27;index already current&#x27;)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            else:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                if previous is None or previous[&#x27;index_repair&#x27;][&#x27;phase&#x27;]!=&#x27;started&#x27;:raise ValueError(&#x27;repair result predecessor&#x27;)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                old=previous[&#x27;index_repair&#x27;]</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                if any(value[k]!=v for k,v in old.items() if k not in (&#x27;revision&#x27;,&#x27;phase&#x27;,&#x27;index_observation&#x27;,&#x27;error_code&#x27;)):</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                    raise ValueError(&#x27;repair frozen start changed&#x27;)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                if p[&#x27;command_id&#x27;]!=self._index_repair_result_key(value[&#x27;repair_id&#x27;]) or self._index_repair_result_request(definition)!=p[&#x27;request_digest&#x27;]:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                    raise ValueError(&#x27;repair result request&#x27;)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            self._context_quota(resources,&#x27;index_repair&#x27;,project)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        except (ValueError,KeyError,PyHError):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;index_repair_binding&#x27;)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code></code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    def _index_repair_summary(self,resources,row,actor,authorize,started):</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        value=row[&#x27;index_repair&#x27;];project=value[&#x27;project_id&#x27;]</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        self._context_owned({value[&#x27;repair_id&#x27;]:row},value[&#x27;repair_id&#x27;],&#x27;index_repair&#x27;,project,actor)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        root=self._cancel_target(resources,project,value[&#x27;command&#x27;][&#x27;execution_ref&#x27;],actor)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        self._execution_summary(resources,root,actor,authorize,started);self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        return dict(schema_version=1,repair_id=value[&#x27;repair_id&#x27;],revision=value[&#x27;revision&#x27;],phase=value[&#x27;phase&#x27;],attempt=value[&#x27;attempt&#x27;],</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            project_id=project,execution_ref=value[&#x27;command&#x27;][&#x27;execution_ref&#x27;],plan_digest=value[&#x27;command&#x27;][&#x27;plan_digest&#x27;],fault_digest=value[&#x27;fault_digest&#x27;],</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            index_observation=value[&#x27;index_observation&#x27;],error_code=value[&#x27;error_code&#x27;],submission_key=value[&#x27;submission_key&#x27;],</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            digest=row[&#x27;digest&#x27;],source_seq=row[&#x27;source_seq&#x27;],request_digest=self._index_repair_request(project,RepairIndex.model_validate(value[&#x27;command&#x27;])),</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            persisted=True,automatic_dispatch=False,continuation_authorized=False)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    async def apply_index_repair(self,project,command,*,command_id,authorize,inspect,perform):</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        started=time.monotonic();leases=[]</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            actor=authorize();await self._open(initialize=False);resources,commands=self._grant_state()</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            request=self._index_repair_request(project,command)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            self._context_envelope(&#x27;index_repair&#x27;,command.repair_id,1,command_id,actor,request)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            old=commands.get((actor,command_id))</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            if old:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                if old[0]!=request or &#x27;index_repair&#x27; not in old[1]:raise_code(&#x27;EVT-100&#x27;,reason=&#x27;idempotency_conflict&#x27;)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                row=resources[old[1][&#x27;index_repair&#x27;][&#x27;repair_id&#x27;]]</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                return self._index_repair_summary(resources,row,actor,authorize,started)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            if command.repair_id in resources:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;index_repair_id_reserved&#x27;)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            result_key=self._index_repair_result_key(command.repair_id)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            if command_id==result_key or (actor,result_key) in commands:raise_code(&#x27;EVT-100&#x27;,reason=&#x27;index_repair_result_key_reserved&#x27;)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            root=self._cancel_target(resources,project,command.execution_ref,actor)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            summary=self._execution_summary(resources,root,actor,authorize,started)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            context=await inspect(self._execution_read_row(resources,root),summary)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            plan=context[&#x27;plan&#x27;];fault=repair_fault(plan,context[&#x27;scope_digest&#x27;])</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            prior=[r for r in resources.values() if r.get(&#x27;index_repair&#x27;,{}).get(&#x27;fault_digest&#x27;)==fault]</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            if len(prior)&gt;=2:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;index_repair_limit_reached&#x27;)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            if plan[&#x27;plan_digest&#x27;]!=command.plan_digest:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;index_repair_plan_changed&#x27;)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            if (plan[&#x27;unknown_effects&#x27;] or plan[&#x27;journals_truncated&#x27;] or plan[&#x27;artifacts_truncated&#x27;] or</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                    plan[&#x27;index_observation&#x27;][&#x27;state&#x27;]==&#x27;current&#x27; or any(b in plan[&#x27;continuation_blockers&#x27;] for b in</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                    (&#x27;execution_live&#x27;,&#x27;security_refusal&#x27;,&#x27;journal_unconfirmed&#x27;,&#x27;child_journal_unconfirmed&#x27;))):</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                raise_code(&#x27;GRD-403&#x27;,reason=&#x27;index_repair_not_permitted&#x27;)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            try:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                leases=context[&#x27;acquire&#x27;]()</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                context[&#x27;verify&#x27;]()</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                definition=IndexRepairRevision(repair_id=command.repair_id,revision=1,phase=&#x27;started&#x27;,project_id=project,</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                    project_revision=root[&#x27;execution_authorization&#x27;][&#x27;project_revision&#x27;],created_by=actor,submission_key=command_id,</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                    command=command,plan=plan,index_scope_digest=context[&#x27;scope_digest&#x27;],fault_digest=fault,attempt=len(prior)+1)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                def gate():</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                    fresh,_=self._grant_state();target=self._cancel_target(fresh,project,command.execution_ref,actor)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                    self._execution_summary(fresh,target,actor,authorize,started);context[&#x27;verify&#x27;]()</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                    self._context_finish(authorize,actor,fresh)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                gate()</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                resources,row=await self._append_context(definition,&#x27;index_repair&#x27;,command.repair_id,command_id,actor,request,gate)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                # The start is confirmed before any derived-index mutation.</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                gate();error=None;cancelled=None</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                try:after=await perform(context)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                except asyncio.CancelledError as exc:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                    cancelled=exc;error=&#x27;repair_cancelled&#x27;;after=context[&#x27;observe&#x27;]()</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                except Exception:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                    error=&#x27;PERS-202&#x27;;after=context[&#x27;observe&#x27;]()</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                gate()</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                phase=&#x27;unknown&#x27; if cancelled else &#x27;succeeded&#x27; if after.state==&#x27;current&#x27; else &#x27;failed&#x27;</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                result=definition.model_copy(update=dict(revision=2,phase=phase,index_observation=after,error_code=None if phase==&#x27;succeeded&#x27; else error or &#x27;PERS-202&#x27;))</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                result=IndexRepairRevision.model_validate(result.model_dump())</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                resources,row=await self._append_context(result,&#x27;index_repair&#x27;,command.repair_id,result_key,actor,self._index_repair_result_request(result),gate)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                if cancelled is not None:raise cancelled</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                return self._index_repair_summary(resources,row,actor,authorize,started)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            finally:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                for lease in reversed(leases):lease.release()</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code></code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    async def index_repair_submission(self,project,key,*,authorize):</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            actor=authorize();resources,commands,_=await self._execution_read_state();self._context_project(resources,project)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            old=commands.get((actor,key));row=old[1] if old else None</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            if row is not None:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                if not row.get(&#x27;index_repair&#x27;) or row[&#x27;index_repair&#x27;][&#x27;project_id&#x27;]!=project:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;index_repair_submission_unavailable&#x27;)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                row=resources[row[&#x27;index_repair&#x27;][&#x27;repair_id&#x27;]]</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            result=self._index_repair_summary(resources,row,actor,authorize,started) if row else None</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            return dict(schema_version=1,project_id=project,submission_key=key,status=&#x27;committed&#x27; if row else &#x27;not_found&#x27;,repair=result)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    async def index_repairs(self,project,ident,*,authorize):</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            actor=authorize();resources,_,_=await self._execution_read_state()</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            root=self._context_owned(resources,ident,&#x27;execution_authorization&#x27;,project,actor)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            summary=self._execution_summary(resources,root,actor,authorize,started)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            ref={k:summary[k] for k in (&#x27;execution_id&#x27;,&#x27;revision&#x27;,&#x27;digest&#x27;,&#x27;source_seq&#x27;)}</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            rows=sorted(self._index_repair_rows(resources,ref),key=lambda r:r[&#x27;source_seq&#x27;])</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            result=[self._index_repair_summary(resources,r,actor,authorize,started) for r in rows[-200:]]</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            return dict(schema_version=1,project_id=project,execution_ref=ref,repairs=result,total=len(rows),truncated=len(rows)&gt;200)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

@@ -1,0 +1,94 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/bus/registry.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/bus/registry.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 94 行</span></nav><main class="wrap source-page"><h1>pyharness/bus/registry.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：f2e1b2b8ffbb0360f0c749822af8d92e8d47be75<br>SHA-256（内容校验）：6dfa4075c18db4b32a2545e4bb339dd2ace28af596ac1aaef9362b3e8de6a01b</p><p><a href="../../../architecture-detailed.html?node=registry">Capability Registry（能力索引注册表）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 7 个类、函数与方法</summary><ul><li><a href="#L38">Registry（类） · L38–L91</a><ul><li><a href="#L44">Registry.__init__（方法） · L44–L46</a></li><li><a href="#L49">Registry._check_kind（方法） · L49–L52</a></li><li><a href="#L55">Registry.register（方法） · L55–L66</a></li><li><a href="#L68">Registry.lookup（方法） · L68–L76</a></li><li><a href="#L78">Registry.unregister（方法） · L78–L86</a></li><li><a href="#L88">Registry.__contains__（方法） · L88–L91</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/bus/registry.py — 注册表 (specs/bus.py.md Registry 全量契约)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>三类索引(plugin/tool/capability)写入/查重/卸载(F003):</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>- register  : 脊柱八模块 + guard/approval/credentials 子系统名为 plugin 保留名</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>              → BUS-002;同 kind 同 key 重复 → TLB-801(改 = 注销重注册留痕);</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>              成功后广播 registry.updated(op=add,瞬时仅内存事件,F003 留痕)。</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>- lookup    : O(1) 查询;key 不存在不静默返回 None(F003 边界)。</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>- unregister: 摘除索引并广播 registry.updated(op=del);注销不存在 key 不静默。</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>错误码说明(偏离点):spec 伪码中未注册 key 的查询/注销指向 BUS-000——该码属</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>ERR.md §1 预留空洞(BUS-000/001 禁占位登记),errors.py 未登记、表外码即错误;</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>故统一改用已登记码:tool 查询按 spec 用 TLB-802(工具未注册),plugin/capability</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>查询与 unregister-unknown 用 TLB-801 + detail 区分(重复/非法注册同域码,结构化</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>拒绝语义一致,仍不静默返回 None)。kind 越界同样 TLB-801 拒。</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>registry.updated 经 bus.emit_sync 同步投递(瞬时仅内存广播,订阅者为同步刷新器),</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>保证 F003 留痕在同步调用路径上确定可见。</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>from typing import TYPE_CHECKING, Any</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>if TYPE_CHECKING:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    from pyharness.bus.event_bus import EventBus</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code># 保留名:脊柱八模块(PRD §2.2/PARAMETER-ANCHOR,spec 伪码 system-prompt 与</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code># 锚定文档 system_prompt 两种拼写同收)+ guard/approval/credentials 子系统名</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code># (spec 异常表明示);kind=plugin 注册冲突 → BUS-002,脊柱不可换(原则 5)。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>RESERVED: frozenset = frozenset({</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    &quot;agent-loop&quot;, &quot;tools&quot;, &quot;session&quot;, &quot;llm&quot;, &quot;system-prompt&quot;, &quot;system_prompt&quot;,</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    &quot;scope&quot;, &quot;agent&quot;, &quot;persistence&quot;,</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    &quot;guard&quot;, &quot;approval&quot;, &quot;credentials&quot;,</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>})</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>class Registry:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    &quot;&quot;&quot;注册表:三类索引 + 保留名护栏 + registry.updated 留痕(F003)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    RESERVED = RESERVED</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    KINDS: tuple[str, ...] = (&quot;plugin&quot;, &quot;tool&quot;, &quot;capability&quot;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    def __init__(self, bus: &quot;EventBus&quot;):</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        self._index: dict[str, dict[str, Any]] = {k: {} for k in self.KINDS}</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        self._bus = bus</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    # ------------------------------------------------------------ 内部护栏</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    def _check_kind(self, kind: str) -&gt; None:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        &quot;&quot;&quot;kind 越界 → TLB-801(非法注册),禁 KeyError 裸崩。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        if kind not in self.KINDS:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            raise_code(&quot;TLB-801&quot;, kind=kind, detail=&quot;kind 须为 plugin/tool/capability&quot;)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    # ------------------------------------------------------------ 写入</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    def register(self, kind: str, key: str, obj: Any) -&gt; None:</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        &quot;&quot;&quot;三类索引写入(plugin/tool/capability);留痕 registry.updated。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        self._check_kind(kind)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        if kind == &quot;plugin&quot; and key in self.RESERVED:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            raise_code(&quot;BUS-002&quot;, key=key,</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>                       hint=&quot;脊柱八模块/子系统名为保留名,不可注册为插件(原则 5)&quot;)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        if key in self._index[kind]:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            raise_code(&quot;TLB-801&quot;, kind=kind, key=key,</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                       detail=&quot;同 kind 同 key 重复注册(改 = 注销重注册,无脏数据)&quot;)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        self._index[kind][key] = obj</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        self._bus.emit_sync(&quot;registry.updated&quot;,      # F003 瞬时仅内存留痕</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                            {&quot;op&quot;: &quot;add&quot;, &quot;kind&quot;: kind, &quot;key&quot;: key})</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    def lookup(self, kind: str, key: str) -&gt; Any:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        &quot;&quot;&quot;O(1) 查询;key 不存在 → 结构化错误(不静默返回 None, F003 边界)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        self._check_kind(kind)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        if key not in self._index[kind]:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            if kind == &quot;tool&quot;:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                raise_code(&quot;TLB-802&quot;, kind=kind, key=key, hint=&quot;查工具名拼写与注册表&quot;)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            raise_code(&quot;TLB-801&quot;, kind=kind, key=key,</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                       detail=&quot;key 未注册/已卸载(lookup),不静默返回 None&quot;)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        return self._index[kind][key]</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    def unregister(self, kind: str, key: str) -&gt; None:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        &quot;&quot;&quot;摘除索引并广播 registry.updated(op=del);注销不存在 key 不静默。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        self._check_kind(kind)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        if key not in self._index[kind]:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            raise_code(&quot;TLB-801&quot;, kind=kind, key=key,</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                       detail=&quot;unregister-unknown:注销不存在的 key 不静默(幂等由调用方先 lookup)&quot;)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        del self._index[kind][key]</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        self._bus.emit_sync(&quot;registry.updated&quot;,      # op=del 留痕</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                            {&quot;op&quot;: &quot;del&quot;, &quot;kind&quot;: kind, &quot;key&quot;: key})</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    def __contains__(self, pair: tuple[str, str]) -&gt; bool:</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        &quot;&quot;&quot;(kind, key) 成员判定(内部/测试辅助)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        kind, key = pair</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        return kind in self._index and key in self._index[kind]</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>__all__ = [&quot;Registry&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

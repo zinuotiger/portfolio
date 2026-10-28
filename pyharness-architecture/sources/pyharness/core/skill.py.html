@@ -1,0 +1,181 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/skill.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/skill.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 181 行</span></nav><main class="wrap source-page"><h1>pyharness/core/skill.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：f1646f9aaaec7b02eccb6d0f5c6e7f8ae904856c<br>SHA-256（内容校验）：66ab337b790b1f1883492ccf60c29c9e99e1f775ee290c044c840ee35f38bfee</p><p><a href="../../../architecture-detailed.html?node=skills">Skill Catalog（技能目录与内容装载）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 12 个类、函数与方法</summary><ul><li><a href="#L31">_parse_frontmatter（函数） · L31–L43</a></li><li><a href="#L46">SkillManager（类） · L46–L178</a><ul><li><a href="#L52">SkillManager.__init__（方法） · L52–L60</a></li><li><a href="#L63">SkillManager.scan（方法） · L63–L103</a></li><li><a href="#L105">SkillManager.frozen_copy（方法） · L105–L116</a></li><li><a href="#L118">SkillManager.from_loaded_snapshot（方法） · L118–L130</a></li><li><a href="#L132">SkillManager.snapshot（方法） · L132–L140</a></li><li><a href="#L142">SkillManager._strip_front（方法） · L142–L146</a></li><li><a href="#L149">SkillManager.list（方法） · L149–L152</a></li><li><a href="#L154">SkillManager.get（方法） · L154–L155</a></li><li><a href="#L157">SkillManager.load（方法） · L157–L169</a></li><li><a href="#L171">SkillManager.render_catalog（方法） · L171–L178</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/skill.py — 技能系统内核(F073/#31 Phase 1,本地版)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Hermes 同款机制(薄版):技能库根(skills/)下每个技能一个文件夹,内含 SKILL.md</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>(frontmatter: name/description + 正文)。引擎装配时 scan() 建索引 → 目录</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>(名字+一句话)注入 system prompt;agent 判断任务匹配 → 调 skill.load 工具 →</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>正文读入上下文(长正文截断,references 惰性加载属 Phase 2)。</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>事件:skill.load 由 tool_skill 落 skill.used(审计);正文不进事件日志(防刷)。</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>信任模型:本地技能=与插件同级信任(仓库内文本);网络技能源(Phase 2)需 hash 校验。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>import logging</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>import copy</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>import hashlib</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>import json</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>import re</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>log = logging.getLogger(&quot;pyharness.skill&quot;)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>FRONT_RE = re.compile(r&quot;^---\s*\n(.*?)^---\s*$&quot;, re.S | re.M)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>_NAME_RE = re.compile(r&quot;^\s*name:\s*([A-Za-z0-9._-]+)\s*$&quot;, re.M)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>_DESC_RE = re.compile(r&quot;^\s*description:\s*(.+?)\s*$&quot;, re.M)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>_BODY_CAP = 6000          # 单次装载正文上限(超出截断,防上下文爆炸)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code></code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>def _parse_frontmatter(text: str) -&gt; Optional[dict]:</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    &quot;&quot;&quot;取 SKILL.md 头 frontmatter → {name, description};无/坏 → None。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    m = FRONT_RE.search(text)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    if not m:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        return None</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    head = m.group(1)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    nm = _NAME_RE.search(head)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    if not nm:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        return None</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    desc = _DESC_RE.search(head)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    return {&quot;name&quot;: nm.group(1),</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            &quot;description&quot;: (desc.group(1).strip().strip(&#x27;&quot;\&#x27;&#x27;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>                            if desc else &quot;&quot;)}</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>class SkillManager:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    &quot;&quot;&quot;技能库索引/装载器:scan() → list() 目录 / load(name) 正文 / render_catalog()。</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    纯只读文本操作;会话事件(skill.used)由工具面经 session.append 落盘。</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code></code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    def __init__(self, roots, *, session: Any = None, bus: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        self.roots: list[Path] = [Path(r) for r in roots]</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        self._session = session</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        self._bus = bus</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        self._index: dict[str, dict] = {}</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        self._source_hashes: dict[str, str] = {}</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        self._frozen = False</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        self._loaded_views: dict[str, dict] = {}</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        self.scan()</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    # ------------------------------------------------------------ 索引</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    def scan(self) -&gt; int:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        &quot;&quot;&quot;重建索引(启动/热重载调用);格式坏或重复名的技能跳过并记日志。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        if self._frozen:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            return len(self._index)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        from pyharness.core.skill_registry import _safe_under</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        found: dict[str, dict] = {}</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        hashes: dict[str, str] = {}</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        for root in self.roots:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            if not root.exists():</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                continue</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            for md in sorted(root.glob(&quot;*/SKILL.md&quot;)):</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                try:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                    target = _safe_under(root, md.parent.name, &#x27;SKILL.md&#x27;)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                    raw = target.read_bytes()</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                    if _safe_under(root, md.parent.name, &#x27;SKILL.md&#x27;) != target:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                        continue</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                    # Preserve the original read_text universal-newline view;</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                    # retain the physical bytes separately for source identity.</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                    text = raw.decode(&#x27;utf-8&#x27;).replace(&#x27;\r\n&#x27;, &#x27;\n&#x27;).replace(&#x27;\r&#x27;, &#x27;\n&#x27;)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                except (OSError, UnicodeError, PyHError) as e:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                    log.warning(&quot;skill read failed %s: %s&quot;, md, e)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                    continue</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                meta = _parse_frontmatter(text)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                if not meta:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                    log.warning(&quot;skill skip(坏 frontmatter): %s&quot;, md)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                    continue</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                name = meta[&quot;name&quot;]</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                if name in found:</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                    log.warning(&quot;skill 重名跳过: %s (%s)&quot;, name, md)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                    continue</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                found[name] = {</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                    &quot;name&quot;: name,</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                    &quot;description&quot;: meta[&quot;description&quot;],</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                    &quot;dir&quot;: str(md.parent),</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                    &quot;body&quot;: self._strip_front(text),</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                }</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                hashes[name] = hashlib.sha256(raw).hexdigest()</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        self._index = found</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        self._source_hashes = hashes</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        return len(found)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    def frozen_copy(self, names=None):</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        &quot;&quot;&quot;Private loaded index copy; explicit classic scans remain available.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        clone = SkillManager([], session=self._session, bus=self._bus)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        chosen = list(self._index) if names is None else list(names)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        for name in chosen:</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            self.load(name)  # Original unknown-name contract.</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        clone._index = {name: copy.deepcopy(self._index[name]) for name in chosen}</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        clone._source_hashes = {name: self._source_hashes[name] for name in chosen}</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        clone._loaded_views = {name: copy.deepcopy(self._loaded_views[name])</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                               for name in chosen if name in self._loaded_views}</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        clone._frozen = True</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        return clone</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code></code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    @classmethod</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    def from_loaded_snapshot(cls, snapshot):</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        &quot;&quot;&quot;Restore a server-owned bounded load view, without rereading its path.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        clone = cls([])</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        name = snapshot[&#x27;name&#x27;]</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        view = {k: snapshot[k] for k in (&#x27;name&#x27;, &#x27;description&#x27;, &#x27;dir&#x27;, &#x27;body&#x27;)}</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        clone._index[name] = copy.deepcopy(view)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        clone._source_hashes[name] = snapshot[&#x27;source_sha256&#x27;]</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        clone._loaded_views[name] = copy.deepcopy(view)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        clone._frozen = True</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        if clone.snapshot(name)[&#x27;loaded_sha256&#x27;] != snapshot[&#x27;loaded_sha256&#x27;]:</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            raise_code(&#x27;SKL-901&#x27;, name=name, advice=&#x27;固定技能视图校验失败&#x27;)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        return clone</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code></code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    def snapshot(self, name: str) -&gt; dict:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        &quot;&quot;&quot;Describe exact loaded text separately from complete source identity.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        loaded = self.load(name)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        raw = json.dumps({k: loaded[k] for k in (&#x27;name&#x27;, &#x27;description&#x27;, &#x27;body&#x27;)},</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                         ensure_ascii=False, sort_keys=True, separators=(&#x27;,&#x27;, &#x27;:&#x27;)).encode(&#x27;utf-8&#x27;)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        return {**loaded, &#x27;source_sha256&#x27;: self._source_hashes[name],</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                &#x27;loaded_sha256&#x27;: hashlib.sha256(raw).hexdigest(),</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                &#x27;truncated&#x27;: len(self._index[name][&#x27;body&#x27;]) &gt; _BODY_CAP,</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                &#x27;frozen&#x27;: self._frozen}</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code></code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    def _strip_front(text: str) -&gt; str:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        m = FRONT_RE.match(text)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        body = text[m.end():] if m else text</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        return body.strip()</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code></code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    # ------------------------------------------------------------ 读面</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    def list(self) -&gt; list[dict]:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        &quot;&quot;&quot;技能目录(名字+一句话),按名排序;目录注入/工具面共用。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        return [{&quot;name&quot;: m[&quot;name&quot;], &quot;description&quot;: m[&quot;description&quot;]}</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                for m in sorted(self._index.values(), key=lambda x: x[&quot;name&quot;])]</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code></code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    def get(self, name: str) -&gt; Optional[dict]:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        return self._index.get(name)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code></code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>    def load(self, name: str) -&gt; dict:</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        &quot;&quot;&quot;装载技能全文;未知名 → SKL-901(advice 指向 skill.list)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        if name in self._loaded_views:</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            return copy.deepcopy(self._loaded_views[name])</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        m = self._index.get(name)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        if m is None:</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>            raise_code(&quot;SKL-901&quot;, name=name,</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                       advice=&quot;技能未找到;先 skill.list 看可用技能清单&quot;)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        body = m[&quot;body&quot;]</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        if len(body) &gt; _BODY_CAP:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            body = body[:_BODY_CAP] + &quot;\n…(正文超长截断)&quot;</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        return {&quot;name&quot;: m[&quot;name&quot;], &quot;description&quot;: m[&quot;description&quot;],</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                &quot;dir&quot;: m[&quot;dir&quot;], &quot;body&quot;: body}</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code></code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    def render_catalog(self) -&gt; str:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        &quot;&quot;&quot;目录段文本(system prompt 注入;空技能库返回空串零开销)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        rows = [f&quot;- {m[&#x27;name&#x27;]}: {m[&#x27;description&#x27;]}&quot;</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                for m in self.list()]</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        if not rows:</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            return &quot;&quot;</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        return (&quot;可用技能目录(任务匹配某技能时,调 skill.load 装载后按技能执行):\n&quot;</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                + &quot;\n&quot;.join(rows))</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code></code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code></code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>__all__ = [&quot;SkillManager&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

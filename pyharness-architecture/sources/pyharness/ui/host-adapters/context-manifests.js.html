@@ -1,0 +1,184 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/ui/host-adapters/context-manifests.js · GitHub 源码预览</title><link rel="stylesheet" href="../../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/ui/host-adapters/context-manifests.js">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 184 行</span></nav><main class="wrap source-page"><h1>pyharness/ui/host-adapters/context-manifests.js</h1><p class="muted">完整文件预览。Git blob（文件对象）：10b0c7ff279c7a09453f056db98cc310e521e703<br>SHA-256（内容校验）：989522060a4f27c7351761d329dd0b545182588e4341ef9b9990bb61bcd709be</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 0 个类、函数与方法</summary><p>此文件没有 Python 定义目录；下方完整内容与行号均可直接阅读。</p></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>/* Explicit immutable context references. No task execution or automatic command replay. */</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>(function (global) {</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>  &#x27;use strict&#x27;;</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>  const hash = v =&gt; typeof v === &#x27;string&#x27; &amp;&amp; /^[0-9a-f]{64}$/.test(v);</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>  const integer = (v, min=1, max=Number.MAX_SAFE_INTEGER) =&gt; Number.isSafeInteger(v) &amp;&amp; v &gt;= min &amp;&amp; v &lt;= max;</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>  const canonical = v =&gt; JSON.stringify(v, (_, x) =&gt; x &amp;&amp; typeof x === &#x27;object&#x27; &amp;&amp; !Array.isArray(x)</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>    ? Object.fromEntries(Object.entries(x).sort(([a],[b]) =&gt; a.localeCompare(b))) : x);</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>  const id = prefix =&gt; prefix + crypto.randomUUID().replaceAll(&#x27;-&#x27;, &#x27;&#x27;).slice(0,16);</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>  const ref = task =&gt; task ? Object.fromEntries([&#x27;product_task_id&#x27;,&#x27;revision&#x27;,&#x27;digest&#x27;,&#x27;source_seq&#x27;].map(k =&gt; [k,task[k]])) : null;</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>  global.PyharnessContextManifests = {</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    create({main, api}) {</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>      let binding=null, projectRevision=null, tasks=[], selected=null, pending=null, commandBusy=false;</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>      let epoch=0, lifecycle=0, trigger=null;</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>      const uncertainCommands=new WeakSet();</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>      const owned=global.PyharnessOwnedInputs?.create({main,api,contextKind:&#x27;selected&#x27;});</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>      let inputSelection=null;</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>      const dialog=()=&gt;main.querySelector(&#x27;#contextManifestDialog&#x27;);</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>      const node=s=&gt;dialog()?.querySelector(s);</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>      const text=(s,t)=&gt;{const n=node(s);if(n)n.textContent=t;};</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>      const live=(el,e,l)=&gt;el?.isConnected &amp;&amp; el.open &amp;&amp; epoch===e &amp;&amp; lifecycle===l;</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>      const commandLive=(el,l)=&gt;el?.isConnected &amp;&amp; el.open &amp;&amp; lifecycle===l;</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>      function invalidate() {</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        owned?.invalidate();inputSelection=null;</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        epoch++;lifecycle++;projectRevision=null;tasks=[];selected=null;</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        dialog()?.close();dialog()?.remove();</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>      }</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>      function clearView() {</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        owned?.invalidate();inputSelection=null;if(node(&#x27;[data-cm-action=inputs]&#x27;))node(&#x27;[data-cm-action=inputs]&#x27;).disabled=true;</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        epoch++;text(&#x27;[data-cm-result]&#x27;,&#x27;&#x27;);text(&#x27;[data-cm-status]&#x27;,pending?&#x27;原命令尚未确认；只可核对或显式同键重试。&#x27;:&#x27;观察已失效；保存时以当前版本为准。&#x27;);</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>      }</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>      function validTask(t) {</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        return t &amp;&amp; t.schema_version===1 &amp;&amp; t.mode===&#x27;context_reference_only&#x27; &amp;&amp; t.project_id===binding.project</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>          &amp;&amp; /^pt-[0-9a-f]{16}$/.test(t.product_task_id) &amp;&amp; integer(t.revision,1,200) &amp;&amp; integer(t.project_revision)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>          &amp;&amp; typeof t.title===&#x27;string&#x27; &amp;&amp; typeof t.retired===&#x27;boolean&#x27; &amp;&amp; hash(t.digest) &amp;&amp; integer(t.source_seq)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>          &amp;&amp; t.executable===false &amp;&amp; [&#x27;current&#x27;,&#x27;stale&#x27;,&#x27;retired&#x27;].includes(t.status) &amp;&amp; Number.isFinite(Date.parse(t.created_at));</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>      }</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>      function validManifest(m, items=true) {</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        if (!(m &amp;&amp; m.schema_version===1 &amp;&amp; /^cm-[0-9a-f]{16}$/.test(m.manifest_id) &amp;&amp; integer(m.revision,1,200)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>          &amp;&amp; m.project_id===binding.project &amp;&amp; integer(m.project_revision) &amp;&amp; /^sg-[0-9a-f]{16}$/.test(m.grant_id)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>          &amp;&amp; integer(m.grant_revision) &amp;&amp; /^ss-[0-9a-f]{16}$/.test(m.snapshot_id) &amp;&amp; m.snapshot_revision===1</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>          &amp;&amp; hash(m.snapshot_digest) &amp;&amp; integer(m.snapshot_source_seq) &amp;&amp; hash(m.digest) &amp;&amp; integer(m.source_seq,m.snapshot_source_seq+1)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>          &amp;&amp; integer(m.file_count,1,200) &amp;&amp; integer(m.total_size_bytes,0,10485760) &amp;&amp; m.policy===&#x27;reject-secrets-utf8-v1&#x27;</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>          &amp;&amp; m.executable===false &amp;&amp; [&#x27;current&#x27;,&#x27;stale&#x27;].includes(m.status) &amp;&amp; Number.isFinite(Date.parse(m.created_at))</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>          &amp;&amp; Array.isArray(m.stale_reasons) &amp;&amp; m.stale_reasons.every(r=&gt;[&#x27;project_revision_changed&#x27;,&#x27;task_revision_changed&#x27;,&#x27;manifest_revision_superseded&#x27;].includes(r))</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>          &amp;&amp; (m.status===&#x27;current&#x27;)===(m.stale_reasons.length===0))) return false;</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        if(m.task_ref!==null &amp;&amp; !(m.task_ref &amp;&amp; /^pt-[0-9a-f]{16}$/.test(m.task_ref.product_task_id)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>          &amp;&amp; integer(m.task_ref.revision) &amp;&amp; hash(m.task_ref.digest) &amp;&amp; integer(m.task_ref.source_seq)))return false;</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        if(m.binding_mode!==(m.task_ref?&#x27;context_task_reference&#x27;:&#x27;project_only&#x27;))return false;</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        if(!items)return !Object.hasOwn(m,&#x27;items&#x27;);</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        if(!Array.isArray(m.items))return false;</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        if(m.status===&#x27;stale&#x27;)return m.items.length===0;</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        return m.items.length===m.file_count &amp;&amp; m.items.every((i,index)=&gt;i.input_index===index &amp;&amp; typeof i.path===&#x27;string&#x27;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>          &amp;&amp; i.path.length&gt;0 &amp;&amp; i.path.length&lt;=1024 &amp;&amp; integer(i.size_bytes,0,10485760) &amp;&amp; hash(i.content_digest))</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>          &amp;&amp; new Set(m.items.map(i=&gt;i.path.toLowerCase())).size===m.file_count</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>          &amp;&amp; m.items.reduce((sum,i)=&gt;sum+i.size_bytes,0)===m.total_size_bytes;</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>      }</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>      function matches(m, command) {</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        const b=JSON.parse(command.body),s=command.source;</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        if(command.kind===&#x27;task&#x27;)return validTask(m) &amp;&amp; m.product_task_id===b.product_task_id</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>          &amp;&amp; m.revision===b.expected_revision+1 &amp;&amp; m.project_revision===b.project_revision &amp;&amp; m.title===b.title &amp;&amp; m.retired===b.retired;</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        return validManifest(m) &amp;&amp; m.manifest_id===b.manifest_id &amp;&amp; m.revision===b.expected_revision+1</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>          &amp;&amp; m.project_revision===b.project_revision &amp;&amp; m.grant_id===b.grant_id &amp;&amp; m.grant_revision===b.grant_revision</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>          &amp;&amp; m.snapshot_id===b.snapshot_id &amp;&amp; m.snapshot_digest===b.snapshot_digest &amp;&amp; canonical(m.task_ref)===canonical(b.task_ref)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>          &amp;&amp; m.file_count===s.fileCount &amp;&amp; m.total_size_bytes===s.totalSize &amp;&amp; m.snapshot_source_seq===s.sourceSeq;</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>      }</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>      function show(m, kind) {</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        text(&#x27;[data-cm-status]&#x27;, m.status===&#x27;current&#x27; ? &#x27;持久确认 · 已精确读回；仅引用，不执行任务。&#x27; : &#x27;已读回持久记录，但已过期或退役，不能用作当前上下文。&#x27;);</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        text(&#x27;[data-cm-result]&#x27;,JSON.stringify(m,null,2));</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        if(kind===&#x27;manifest&#x27;){selected=m;inputSelection=m;if(node(&#x27;[data-cm-action=inputs]&#x27;))node(&#x27;[data-cm-action=inputs]&#x27;).disabled=!owned;}</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>      }</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>      async function observe() {</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        owned?.invalidate();inputSelection=null;if(node(&#x27;[data-cm-action=inputs]&#x27;))node(&#x27;[data-cm-action=inputs]&#x27;).disabled=true;</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        const el=dialog(),e=++epoch,l=lifecycle;</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        projectRevision=null;tasks=[];selected=null;text(&#x27;[data-cm-result]&#x27;,&#x27;&#x27;);text(&#x27;[data-cm-status]&#x27;,&#x27;正在读取当前版本和持久引用…&#x27;);</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        node(&#x27;[data-cm-rows]&#x27;)?.replaceChildren();node(&#x27;[data-cm-target]&#x27;)?.replaceChildren(new Option(&#x27;仅绑定项目版本&#x27;,&#x27;&#x27;));</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        try {</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>          const base=`/api/v1/projects/${binding.project}`;</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>          const [p,t,m]=await Promise.all([api(&#x27;/api/v1/projects&#x27;),api(base+&#x27;/context-task-references&#x27;),api(base+&#x27;/context-manifests&#x27;)]);</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>          if(!live(el,e,l))return;</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>          const parent=p.projects?.find(r=&gt;r.project?.project_id===binding.project)?.project;</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>          if(!parent || parent.archived || !integer(parent.revision) || !Array.isArray(t.task_references)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            || t.total!==t.task_references.length || t.total&gt;200 || !t.task_references.every(validTask)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            || !Array.isArray(m.manifests) || m.total!==m.manifests.length || m.total&gt;200 || !m.manifests.every(row=&gt;validManifest(row,false))</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            || new Set(t.task_references.map(r=&gt;r.product_task_id)).size!==t.total || new Set(m.manifests.map(r=&gt;r.manifest_id)).size!==m.total)throw Error(&#x27;invalid context version listing&#x27;);</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>          projectRevision=parent.revision;tasks=t.task_references;</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>          tasks.filter(t=&gt;!t.retired).forEach(t=&gt;node(&#x27;[data-cm-target]&#x27;).append(new Option(`${t.title} · r${t.revision} · ${t.status}`,t.product_task_id)));</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>          m.manifests.filter(r=&gt;r.snapshot_id===binding.snapshotId).forEach(row=&gt;{</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            const b=document.createElement(&#x27;button&#x27;);b.textContent=`读取 ${row.manifest_id} · r${row.revision} · ${row.status}`;</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            b.addEventListener(&#x27;click&#x27;,()=&gt;read(row));node(&#x27;[data-cm-rows]&#x27;).append(b);</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>          });</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>          text(&#x27;[data-cm-version]&#x27;,`项目 r${projectRevision} · 快照 ${binding.snapshotId} · ${binding.fileCount} 文件 / ${binding.totalSize} 字节。`);</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>          text(&#x27;[data-cm-status]&#x27;,pending?&#x27;原命令结果未确认；保留原键和原正文，不会自动重发。&#x27;:&#x27;当前版本已读取；请显式保存或读取已有清单。&#x27;);</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        }catch(error){if(live(el,e,l)){projectRevision=null;text(&#x27;[data-cm-status]&#x27;,`读取被拒绝或未确认（${error.status||&#x27;未知&#x27;}）；未启动执行。`);}}</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>      }</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>      async function read(row) {</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        owned?.invalidate();inputSelection=null;if(node(&#x27;[data-cm-action=inputs]&#x27;))node(&#x27;[data-cm-action=inputs]&#x27;).disabled=true;</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        selected=null;</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        const el=dialog(),e=++epoch,l=lifecycle;text(&#x27;[data-cm-result]&#x27;,&#x27;&#x27;);text(&#x27;[data-cm-status]&#x27;,&#x27;正在精确读回持久版本…&#x27;);</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        try {</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>          const m=await api(`/api/v1/projects/${binding.project}/context-manifests/${row.manifest_id}/revisions/${row.revision}`);</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>          if(!live(el,e,l))return;</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>          const summary={...m};delete summary.items;</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>          if(!validManifest(m) || canonical(summary)!==canonical(row))throw Error(&#x27;context readback mismatch&#x27;);</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>          node(&#x27;[data-cm-target]&#x27;).value=m.task_ref?.product_task_id||&#x27;&#x27;;show(m,&#x27;manifest&#x27;);</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        }catch(error){if(live(el,e,l))text(&#x27;[data-cm-status]&#x27;,`读回被拒绝或未确认（${error.status||&#x27;未知&#x27;}），没有可用清单。`);}</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>      }</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>      async function reconcile(command, receipt=null) {</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        const b=JSON.parse(command.body);</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        const value=command.kind===&#x27;manifest&#x27; ? await api(`${command.url}/${b.manifest_id}/revisions/${b.expected_revision+1}`)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>          : await api(`${command.url}/${b.product_task_id}/revisions/${b.expected_revision+1}`);</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        if(!matches(value,command) || (receipt &amp;&amp; canonical(value)!==canonical(receipt)))throw Error(&#x27;exact context readback mismatch&#x27;);</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        return value;</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>      }</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>      async function send(command, readOnly=false) {</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        if(commandBusy)return;</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        commandBusy=true;pending=command;</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        let postAccepted=readOnly || uncertainCommands.has(command);</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        const el=dialog(),e=epoch,l=lifecycle;text(&#x27;[data-cm-result]&#x27;,&#x27;&#x27;);text(&#x27;[data-cm-status]&#x27;,readOnly?&#x27;正在核对原命令…&#x27;:&#x27;正在提交并精确读回…&#x27;);</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        try {</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>          const receipt=readOnly?null:await api(command.url,{method:&#x27;POST&#x27;,body:command.body,headers:{&#x27;Idempotency-Key&#x27;:command.key}});</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>          postAccepted=true;</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>          if(receipt &amp;&amp; !matches(receipt,command))throw Error(&#x27;invalid context receipt&#x27;);</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>          const value=await reconcile(command,receipt);</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>          pending=null;</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>          if(commandLive(el,l)) {</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>            if(epoch===e)show(value,command.kind);</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>            else text(&#x27;[data-cm-status]&#x27;,`原命令已精确读回 · ${value.manifest_id||value.product_task_id} r${value.revision} · ${value.status}；当前观察已失效，请刷新。`);</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>          }</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        }catch(error){</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>          if(!postAccepted &amp;&amp; [401,403,409,422].includes(error.status))pending=null;</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>          else uncertainCommands.add(command);</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>          if(commandLive(el,l))text(&#x27;[data-cm-status]&#x27;,pending</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            ? `提交被拒绝或结果未确认（${error.status||&#x27;未知&#x27;}）；保留原key/body，可核对或显式同键重试，不会自动重发。`</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            : `提交明确拒绝（${error.status}）；未创建，请刷新当前版本后纠正输入。`);</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        }</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        finally{commandBusy=false;}</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>      }</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>      function save(kind, retired=false) {</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        if(pending){text(&#x27;[data-cm-status]&#x27;,&#x27;原命令尚未确认；先核对或同键重试。&#x27;);return;}</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        if(commandBusy || !projectRevision){text(&#x27;[data-cm-status]&#x27;,&#x27;请先刷新并成功读取当前版本。&#x27;);return;}</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        const task=tasks.find(t=&gt;t.product_task_id===node(&#x27;[data-cm-target]&#x27;).value);</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        let body;</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        if(kind===&#x27;task&#x27;){</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>          const title=node(&#x27;[data-cm-title]&#x27;).value;</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>          if(!title.trim() || title.length&gt;100 || (retired &amp;&amp; !task)){text(&#x27;[data-cm-status]&#x27;,&#x27;请填写有界引用名称；退役须先选已有引用。&#x27;);return;}</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>          body={schema_version:1,product_task_id:task?.product_task_id||id(&#x27;pt-&#x27;),expected_revision:task?.revision||0,project_revision:projectRevision,title,retired};</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        }else{</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>          body={schema_version:1,manifest_id:selected?.manifest_id||id(&#x27;cm-&#x27;),expected_revision:selected?.revision||0,project_revision:projectRevision,</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>            grant_id:binding.grant,grant_revision:binding.grantRevision,snapshot_id:binding.snapshotId,snapshot_digest:binding.snapshotDigest,task_ref:ref(task)};</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        }</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        send(Object.freeze({kind,url:`/api/v1/projects/${binding.project}/`+(kind===&#x27;task&#x27;?&#x27;context-task-references&#x27;:&#x27;context-manifests&#x27;),</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>          key:crypto.randomUUID().replaceAll(&#x27;-&#x27;,&#x27;&#x27;),body:JSON.stringify(body),source:Object.freeze({...binding})}));</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>      }</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>      return {</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        invalidate,</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        async open(source, button) {</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>          if(pending &amp;&amp; canonical(pending.source)!==canonical(source)){button.textContent=&#x27;请先核对原快照上下文命令&#x27;;return;}</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>          invalidate();binding={...source};trigger=button;</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>          const el=document.createElement(&#x27;dialog&#x27;);el.id=&#x27;contextManifestDialog&#x27;;el.setAttribute(&#x27;aria-label&#x27;,&#x27;持久上下文清单&#x27;);</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>          el.style.cssText=&#x27;width:min(800px,calc(100vw - 32px));max-height:85vh;box-sizing:border-box;overflow:auto;overflow-wrap:anywhere&#x27;;</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>          // Static controls only. All API/user content below uses textContent/Option.</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>          el.innerHTML=&#x27;&lt;h2&gt;持久上下文清单&lt;/h2&gt;&lt;button data-cm-action=&quot;close&quot;&gt;关闭清单&lt;/button&gt;&lt;p&gt;绑定确切项目版本和可选任务引用；不执行任务、不注入模型。刷新旧清单会创建新版本。任务引用不是任务收件箱。&lt;/p&gt;&lt;p data-cm-version&gt;&lt;/p&gt;&lt;p&gt;&lt;label&gt;上下文目标 &lt;select data-cm-target&gt;&lt;option value=&quot;&quot;&gt;仅绑定项目版本&lt;/option&gt;&lt;/select&gt;&lt;/label&gt;&lt;/p&gt;&lt;p&gt;&lt;label&gt;任务引用名称 &lt;input data-cm-title maxlength=&quot;100&quot; autocomplete=&quot;off&quot;&gt;&lt;/label&gt;&lt;button data-cm-action=&quot;task&quot;&gt;保存引用新版本&lt;/button&gt;&lt;button data-cm-action=&quot;retire&quot;&gt;退役所选引用（不可恢复）&lt;/button&gt;&lt;/p&gt;&lt;p&gt;&lt;button data-cm-action=&quot;save&quot;&gt;保存清单新版本&lt;/button&gt;&lt;button data-cm-action=&quot;refresh&quot;&gt;刷新当前版本&lt;/button&gt;&lt;button data-cm-action=&quot;reconcile&quot;&gt;仅核对原命令&lt;/button&gt;&lt;button data-cm-action=&quot;retry&quot;&gt;同键重试原命令&lt;/button&gt;&lt;/p&gt;&lt;p data-cm-status role=&quot;status&quot; aria-live=&quot;polite&quot;&gt;&lt;/p&gt;&lt;div data-cm-rows&gt;&lt;/div&gt;&lt;pre data-cm-result style=&quot;white-space:pre-wrap;overflow-wrap:anywhere&quot;&gt;&lt;/pre&gt;&#x27;;</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>          main.append(el);</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>          const inputButton=document.createElement(&#x27;button&#x27;);inputButton.dataset.cmAction=&#x27;inputs&#x27;;inputButton.textContent=&#x27;准备所选文件的私有输入&#x27;;inputButton.disabled=true;</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>          el.querySelector(&#x27;[data-cm-rows]&#x27;).before(inputButton);</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>          el.addEventListener(&#x27;input&#x27;,clearView);</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>          el.querySelector(&#x27;[data-cm-target]&#x27;).addEventListener(&#x27;change&#x27;,()=&gt;{selected=null;const t=tasks.find(t=&gt;t.product_task_id===node(&#x27;[data-cm-target]&#x27;).value);node(&#x27;[data-cm-title]&#x27;).value=t?.title||&#x27;&#x27;;clearView();});</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>          el.addEventListener(&#x27;click&#x27;,event=&gt;{</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            const action=event.target.closest(&#x27;[data-cm-action]&#x27;)?.dataset.cmAction;</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>            if(action===&#x27;close&#x27;){invalidate();trigger?.focus();}</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>            if(action===&#x27;refresh&#x27;)observe();</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            if(action===&#x27;save&#x27;)save(&#x27;manifest&#x27;);</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>            if(action===&#x27;task&#x27;)save(&#x27;task&#x27;);</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            if(action===&#x27;retire&#x27;)save(&#x27;task&#x27;,true);</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>            if(action===&#x27;retry&#x27; &amp;&amp; pending)send(pending);</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            if(action===&#x27;reconcile&#x27; &amp;&amp; pending)send(pending,true);</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>            if(action===&#x27;inputs&#x27;&amp;&amp;owned&amp;&amp;inputSelection){const cm=inputSelection;clearView();owned.open(binding,cm);}</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>          });</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>          el.oncancel=event=&gt;{event.preventDefault();invalidate();trigger?.focus();};el.showModal();await observe();</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        }</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>      };</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>    }</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>  };</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>})(window);</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../../assets/views/source-return.js"></script></body></html>

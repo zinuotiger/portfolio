@@ -1,0 +1,262 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/repair_recovery.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/repair_recovery.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 262 行</span></nav><main class="wrap source-page"><h1>pyharness/repair_recovery.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：4ddb7b770ea6b15e6644e56b00f16b00ffbbc330<br>SHA-256（内容校验）：17867185b4cdd7447449643162d7e1cf26dc328ee5961276b2da2a1affe4cfd0</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 9 个类、函数与方法</summary><ul><li><a href="#L15">backup_file（函数） · L15–L36</a></li><li><a href="#L41">locate_holes（函数） · L41–L56</a></li><li><a href="#L58">_index_handle（函数） · L58–L86</a></li><li><a href="#L88">rebuild_derived_views（异步函数） · L88–L173</a></li><li><a href="#L175">declare_recovered（异步函数） · L175–L226</a></li><li><a href="#L228">_DirectBus（类） · L228–L239</a><ul><li><a href="#L233">_DirectBus.__init__（方法） · L233–L234</a></li><li><a href="#L236">_DirectBus.emit（异步方法） · L236–L239</a></li></ul></li><li><a href="#L241">_dropped_seqs（函数） · L241–L259</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Repair recovery: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import inspect</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import json</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import os</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import re</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import shutil</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.persistence import flush_kwargs_of, open_store</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pyharness.repair_scan import QuarantineEntry, RepairPolicy, SessionHealth, _QUARANTINE_RAW_CAP, _TAIL_SEQ_PROBE, _db_path_of, _iter_bytes, _iter_text, _log_last_seq, _session_content_last, _sessions_dir, log, now_ts</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>def backup_file(path: Path, *, _clock=now_ts, _sync_directory) -&gt; Path:</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    &quot;&quot;&quot;修复前强制备份:copy2 整文件 → `{sid}.corrupt-{utc_ms}.jsonl`(PRD F060 命名)。</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    同 ts 备份已存在(重试/并发)→ 直接返回(幂等,不重复备份);备份权限 600</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    (Windows NTFS chmod 尽力而为,失败只记日志不阻断——权限收紧非修复动作)。</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    异常:OSError → PERS-202(备份优先于一切修复动作,备份失败 = 修复中止)。</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    dst = path.with_name(f&quot;{path.stem}.corrupt-{_clock()}.jsonl&quot;)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    if dst.exists():</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        return dst</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    try:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        shutil.copy2(path, dst)            # 元数据一并保留</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    except OSError as e:</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        raise_code(&quot;PERS-202&quot;, op=&quot;backup&quot;, path=str(path), why=str(e),</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>                   advice=&quot;备份失败,修复中止(备份优先于一切修复动作);查磁盘/权限&quot;)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    try:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        os.chmod(dst, 0o600)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    except OSError as e:</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        log.warning(&quot;repair: 备份文件权限 600 收紧失败(尽力而为) dst=%s why=%s&quot;,</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                    dst, e)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    log.info(&quot;repair: 修复前备份 %s&quot;, dst)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    return dst</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code></code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code></code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>def locate_holes(health: SessionHealth) -&gt; list[int]:</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    &quot;&quot;&quot;seq 空洞定位(声明合法化,纯函数):holes 已被 compacted/recovered 声明</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    覆盖 = 合法(压缩/修复事实)不告警;未声明空洞 → 告警并触发 F031 深查线索</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    (不自动补 seq,append 永远 max+1)。scan 已滤声明,此处按 spec 语义再防御一遍。</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    if not health.holes:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        return []</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    undeclared = []</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    for h in health.holes:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        if any(lo &lt;= h &lt;= hi for lo, hi in health.holes_declared):</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            continue</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        undeclared.append(h)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    if undeclared:</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        log.warning(&quot;repair: 未声明 seq 空洞 %s → F031 深查线索(不回填,append &quot;</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                    &quot;恒 max+1) sid=%s&quot;, undeclared, health.sid)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    return undeclared</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>def _index_handle(ctx: Any) -&gt; tuple[Any, bool]:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    &quot;&quot;&quot;FTS 派生视图句柄解析(**唯一入口**):返回 (句柄, 是否本函数自查构造)。</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code></code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    解析序(鸭子类型,逐级兜底):</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>      ① ``ctx.session_query``(装配注入面;引擎**只注入在 agent ctx** 上);</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>      ② 兄弟形态 ``ctx.fts`` / ``ctx.engine_spine.fts``(engine 的 spine 自带);</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>      ③ 由 ``cfg.storage.db_path`` **惰性构造**(repair 只需&quot;库在哪&quot; —— 与 R11-2</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>         的 `read_max_seq` 同款思路,自有句柄由调用方 detach 收尾)。</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    2026-09-21 R14-1 修:此前只认 ①,而 repair 的调用方(CLI 命令 / 桌面)传的是</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    **外壳 ctx**(无 `session_query`)⇒ &quot;⑤派生视图整体重建&quot;步骤**不可达** ⇒ repair</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    修完仍 `index_stale=True`(不收敛)。同 PIT-19(&quot;约定被读 ≠ 被注入&quot;)。</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    sq = getattr(ctx, &quot;session_query&quot;, None)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    if sq is not None and callable(getattr(sq, &quot;rebuild&quot;, None)):</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        return sq, False</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    for holder in (ctx, getattr(ctx, &quot;engine_spine&quot;, None)):</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        cand = getattr(holder, &quot;fts&quot;, None) if holder is not None else None</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        if cand is not None and callable(getattr(cand, &quot;rebuild&quot;, None)):</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            return cand, False</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    db_path = _db_path_of(ctx)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    if not db_path:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        return None, False</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    try:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        from pyharness.core.session_query import SessionQueryIndex</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        return SessionQueryIndex(db_path=db_path), True</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    except Exception as e:                           # noqa: BLE001 构造失败=未装配</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        log.warning(&quot;repair: 构造 FTS 句柄失败(%s):视图重建跳过 sid=?&quot;, e)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        return None, False</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>async def rebuild_derived_views(ctx: Any, sid: str) -&gt; bool:</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    &quot;&quot;&quot;派生视图整体重建(原则 1):FTS 与 storage KV 全部丢弃重建(重放,非增量修补)。</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    句柄经 ``_index_handle`` 解析(装配注入面 → 兄弟形态 → cfg 惰性构造;R14-1);</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    视图未装配 → 日志降级返回 False(派生可弃,装配后自动生效);重建后对账(视图</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    暴露 max_seq(sid) 时):日志末 seq != 视图末 seq → PERS-201(视图落后不静默)。</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    索引写失败 → PERS-202(原日志不受影响,索引=派生可再建)。</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    sq, owned = _index_handle(ctx)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    if owned and sq is not None:                 # 自建句柄须先装载(R14-1)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        try:</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            await sq.enter(ctx)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        except Exception as e:                   # noqa: BLE001 装载失败=视图不可用</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            log.warning(&quot;repair: 自建 FTS 句柄装载失败(%s):视图重建跳过 sid=%s&quot;,</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                        type(e).__name__, sid)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            sq, owned = None, False</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    rebuild = getattr(sq, &quot;rebuild&quot;, None) if sq is not None else None</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    storage = getattr(ctx, &quot;storage&quot;, None)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    kv = None</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    if storage is not None:</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        cand = getattr(storage, &quot;kv_rebuild&quot;, None)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        kv = cand if callable(cand) else None</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    if rebuild is None and kv is None:</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        log.info(&quot;repair: 派生视图(FTS/storage)未装配,整体重建跳过 sid=%s&quot;, sid)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        return False</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    store = None</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    view_last: Optional[int] = None</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    try:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        if rebuild is not None:              # FTS 重放源:修复后的主文件</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            store = open_store(</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                sid, dir=_sessions_dir(ctx),</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                **flush_kwargs_of(getattr(ctx, &quot;config&quot;, None)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                                  or getattr(ctx, &quot;settings&quot;, None)))</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            attach = getattr(sq, &quot;attach_source&quot;, None)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            if callable(attach):</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                attach(sid, store)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            try:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                await rebuild(session_id=sid)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>            except OSError as e:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                raise_code(&quot;PERS-202&quot;, op=&quot;views-rebuild&quot;, sid=sid, why=str(e),</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>                           advice=&quot;索引为派生副本可再建;真源不受影响,重跑 repair&quot;)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            log.info(&quot;repair: FTS 派生视图重建完成 sid=%s&quot;, sid)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        if kv is not None:                   # storage KV 派生缓存重建(鸭子面)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            try:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                kv(sid)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            except OSError as e:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                raise_code(&quot;PERS-202&quot;, op=&quot;kv_rebuild&quot;, sid=sid, why=str(e),</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                           advice=&quot;KV 派生缓存可再建;真源不受影响&quot;)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        # 对账读数**必须在句柄有效期内**取(R14-1 二阶):自建句柄在 finally 里</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        # detach 关库(``_db=None``),此后 ``max_seq`` 恒返 0 ⇒ 与日志水位不等 ⇒</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        # **假 PERS-201**(修复自身引出的缺陷:重建明明成功却被判不一致)。</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        mx = getattr(sq, &quot;max_seq&quot;, None) if sq is not None else None</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        if callable(mx):</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            try:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                view_last = mx(sid)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            except Exception:                # noqa: BLE001 — 提供者故障降级</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                log.warning(&quot;repair: 视图 max_seq(%s) 查询失败,对账跳过&quot;, sid)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    finally:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        if store is not None:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            try:</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                store.close()                # 只读回放源句柄收尾</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>            except Exception:                # noqa: BLE001 — 清理不阻断</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                log.debug(&quot;repair: FTS 回放源 close 失败&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        if owned and sq is not None:         # 本函数自建的句柄:摘除并关库(R14-1)</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            try:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>                det = getattr(sq, &quot;detach&quot;, None)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                if callable(det):</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                    r = det(None)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                    if inspect.isawaitable(r):</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                        await r</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            except Exception:                # noqa: BLE001 — 清理不阻断</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                log.debug(&quot;repair: 自建 FTS 句柄 detach 失败&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>    # 对账判定:日志末 seq == 视图末 seq(读数已在句柄有效期内取得;不一致 → PERS-201)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    if view_last is not None:</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        # 对账口径:与索引 max_seq 同口径 = **可索引事件**(内容型 insert)末 seq——</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        # 排除 session.recovered 声明(不索引)与一切非内容事件(created/finished/</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        # llm.request/guard.* 等,不产索引行);否则尾部非内容即误抛 PERS-201。</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        # 水位是**会话级**的(R14-1 二阶):重建源 replay 合并读轮转段 ⇒ 对账也须跨段</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        # 取 max(与 scan_session 单源),否则主文件被截空时假 PERS-201。</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        log_last = _session_content_last(_sessions_dir(ctx) / f&quot;{sid}.jsonl&quot;)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        if log_last != view_last:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            raise_code(&quot;PERS-201&quot;, op=&quot;view-reconcile&quot;, sid=sid,</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                       log_last=log_last, view_last=view_last,</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                       advice=&quot;索引对账不一致(视图落后不静默);重跑 repair &quot;</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                              &quot;或手动重建派生视图&quot;)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    return True</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code></code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>async def declare_recovered(ctx: Any, sid: str, fixed: list[str],</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                            lost: Optional[list[int]] = None,</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                            kept: Optional[list[QuarantineEntry]] = None,</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                            backup: Optional[Path] = None) -&gt; Optional[int]:</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    &quot;&quot;&quot;recovered 事件声明(修复是事件不是抹除):actor=system 强同步 append 到目标</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    会话日志;声明是修复的审计落点与&quot;空洞合法化&quot;依据(persistence._declared_by_</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    compaction 消费 fixed seq-holes/lost,后续 replay 不再告警)。</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code></code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>    载荷按注册词表 SessionRecoveredPayload(fixed 非空/backup/lost,偏离 1):</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>    fixed 为空(无修复动作,含&quot;用户保留原地&quot;)→ 不追加(幂等,注册载荷 min_length=1);</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    目标会话已终态(finished)/空文件未 created → append 语义 EVT-104/106 不允许,</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>    声明跳过(日志 + 报告 recovered_seq=None;审计由备份 + RepairReport 承担);</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    其余 PyHError(PERS-202 落盘失败)→ 上抛(文件已修,声明可下次 repair 补,幂等</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>    保证不重复动作)。返回 recovered 事件 seq。</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    if not fixed:                            # 无修复动作:不声明(偏离 3)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        return None</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    payload: dict[str, Any] = {&quot;fixed&quot;: fixed}</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>    if backup is not None:</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        payload[&quot;backup&quot;] = str(backup)</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>    if lost:</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        payload[&quot;lost&quot;] = [int(x) for x in lost]</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    from pyharness.core.session import open_session   # 惰性:避免装配期硬依赖</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>    store = open_store(  # 修复先于 open(CLI 序)→ 自开</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        sid, dir=_sessions_dir(ctx),</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        **flush_kwargs_of(getattr(ctx, &quot;config&quot;, None)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                          or getattr(ctx, &quot;settings&quot;, None)))</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>    primary = None</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    try:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        log_ = await open_session(sid, store)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        log_._bus = _DirectBus(store)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        env = await log_.append(&quot;session.recovered&quot;, payload,</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                                actor=&quot;system&quot;, sync=True)</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>    except PyHError as e:</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        primary = e</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        if e.code in (&quot;EVT-104&quot;, &quot;EVT-106&quot;):  # 终态/未 created:声明不适用</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>            primary = None  # suppressed contract result must not suppress cleanup errors</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>            log.warning(&quot;repair: recovered 声明跳过(session=%s %s,审计以备份+&quot;</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>                        &quot;报告为准) fixed=%s&quot;, sid, e.code, fixed)</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            return None</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        raise                                  # PERS-202 等:上抛(声明可下次补)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    except BaseException as exc:</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        primary = exc</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        raise</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>    finally:</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        try: store.close()</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        except BaseException as exc:</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>            if primary is None: raise</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            primary.add_note(f&quot;repair close failed: {type(exc).__name__}&quot;)</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>    log.info(&quot;repair: session.recovered 声明 sid=%s seq=%d fixed=%s lost=%s&quot;,</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>             sid, env.seq, fixed, lost or [])</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    return env.seq</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code></code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>class _DirectBus:</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>    &quot;&quot;&quot;SessionLog 直连落盘总线:等价 cli._attach_log_persistence 的 bus→store 订阅</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>    (INV-08 无回边:事件经注入 store.append 物理落盘,不自造信封)。仅服务本模块</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    recovered 声明的单次落盘,不依赖全局装配。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code></code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>    def __init__(self, store: Any) -&gt; None:</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        self._store = store</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code></code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    async def emit(self, type_: str, payload: Any, mode: str = &quot;sequential&quot;</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>                   ) -&gt; None:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        env = payload                        # SessionLog._dispatch 以 Envelope 为载荷</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        await self._store.append(env, sync=True)</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code></code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>def _dropped_seqs(path: Path, offset: Optional[int]) -&gt; list[int]:</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>    &quot;&quot;&quot;尾部半行含未完成事件候选 seq(0/1 个):信封序列化 seq 字段最先落,半行内</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>    常可探测;探测不到则取&quot;最后完整 seq + 1&quot;(append 恒 max+1 分配的事实口径)。</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>    offset 为 None/文件空/剩余为空 → []。</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>    if offset is None:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        return []</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>    try:</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        data = path.read_bytes()[offset:]</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>    except OSError:</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        return []</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    if not data.strip():</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        return []</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>    probe = data[:_TAIL_SEQ_PROBE]</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>    m = re.search(rb&#x27;&quot;seq&quot;\s*:\s*(\d+)&#x27;, probe)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>    if m:</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        return [int(m.group(1))]</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>    last = _log_last_seq(path)               # 整文件半行且无 seq 可探:无完整事件</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>    return [last + 1] if last else []</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code></code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>_DirectBus.__module__ = &#x27;pyharness.repair&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

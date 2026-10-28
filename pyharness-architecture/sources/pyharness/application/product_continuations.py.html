@@ -1,0 +1,103 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/product_continuations.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/product_continuations.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 103 行</span></nav><main class="wrap source-page"><h1>pyharness/application/product_continuations.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：704055825d41edbae99bf27c93b3307b7eaa9308<br>SHA-256（内容校验）：67d1905e02090ffdb52d3559b5b26a5c055e028f497cb35ad87f2e0b1798e1ad</p><p><a href="../../../architecture-detailed.html?node=continuation">ExecutionContinuation（重新授权续行）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 6 个类、函数与方法</summary><ul><li><a href="#L23">ProductContinuations（类） · L23–L103</a><ul><li><a href="#L24">ProductContinuations._continuation_context（异步方法） · L24–L81</a><ul><li><a href="#L50">ProductContinuations._continuation_context.verify（方法） · L50–L65</a></li><li><a href="#L66">ProductContinuations._continuation_context.acquire（方法） · L66–L78</a></li></ul></li><li><a href="#L83">ProductContinuations.continue_execution（异步方法） · L83–L98</a></li><li><a href="#L100">ProductContinuations.continuation_submission（异步方法） · L100–L103</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Explicit continuation admission; cold reads never create an execution owner.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import time</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.continuation_execution_contracts import ContinueExecution</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.execution_contracts import ExecutionId,AgentVersionReference</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.execution_configuration import describe_execution</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.execution_continuation_plan import observe_continuation_plan</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.execution_materials import captured_materials</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.application.execution_recovery_plan import journal_basis</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.application.execution_state_reader import read_state_snapshot</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.application.execution_state_capture import state_regular</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.application.execution_correction_runtime import correction_ref</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pyharness.application.product_execution_sessions import read_execution_log</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from pyharness.application.run_attempt_contracts import SubmissionKey</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>from pyharness.application.workspace_contracts import ProjectId</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from pyharness.application.workspace_store import digest_of</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>from pyharness.core.lifecycle import admitted</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from pyharness.core.sandbox import safe_path</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>from pyharness.persistence import session_data_paths,session_lock_path,session_lock_held,_FileLock</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>class ProductContinuations:</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    async def _continuation_context(self,row,summary):</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        store=self.store;service=self.service;directory=service._tenant_sessions_dir()</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        plan=await observe_continuation_plan(self,row,summary)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        if not plan[&#x27;can_continue&#x27;] or plan[&#x27;blockers&#x27;]:return dict(plan=plan)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        await self._execution_ready(SimpleNamespace(agent_ref=AgentVersionReference.model_validate(summary[&#x27;agent_ref&#x27;])))</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        root=await read_execution_log(directory,row,service.tenant_id);events=list(root.events_after(0))</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        if len(plan[&#x27;journals&#x27;])!=1 or journal_basis(root)!=plan[&#x27;journals&#x27;][0]:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_journal_changed&#x27;)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        if plan[&#x27;state&#x27;] is None:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_state_unavailable&#x27;)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        fact=next(e for e in events if e.seq==plan[&#x27;state&#x27;][&#x27;state_source_seq&#x27;])</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        cp=next(e for e in events if e.seq==fact.payload[&#x27;checkpoint_seq&#x27;]);body=read_state_snapshot(service.platform,fact,cp)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        from pyharness.application.continuation_ancestry import read_continuation_ancestors</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        ancestors=await read_continuation_ancestors(self,row)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        if [a[&#x27;journal&#x27;] for a in ancestors]!=plan[&#x27;lineage_journals&#x27;]:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_lineage_changed&#x27;)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        journals=[*plan[&#x27;journals&#x27;],*plan[&#x27;lineage_journals&#x27;]]</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        states=[dict(fact=fact,checkpoint=cp,body=body),*ancestors]</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        files={};total=0</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        for journal in journals:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            for path in session_data_paths(safe_path(directory,journal[&#x27;session_id&#x27;]+&#x27;.jsonl&#x27;)):</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>                raw,_=state_regular(safe_path(directory,path.name),32*1048576);total+=len(raw)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>                if total&gt;64*1048576 or len(files)&gt;=256:raise_code(&#x27;EVT-100&#x27;,reason=&#x27;continuation_journal_limit&#x27;)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>                files[path]=digest_of(raw)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        actor=self._authorize(write=True);resources,_,_=await store._execution_read_state();started=time.monotonic()</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        origin=store._execution_attempt(resources,summary[&#x27;project_id&#x27;],row[&#x27;execution_authorization&#x27;][&#x27;selection&#x27;][&#x27;attempt_ref&#x27;],actor)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        materials=captured_materials(store,resources,origin,actor,lambda:self._authorize(write=True),started)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        if materials[&#x27;materials_digest&#x27;]!=body.materials_digest:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_materials_binding&#x27;)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        corrections=[correction_ref(r) for r in row.get(&#x27;_trusted_corrections&#x27;,[])]</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        def verify():</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            for path,digest in files.items():</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                raw,_=state_regular(safe_path(directory,path.name),32*1048576)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                if digest_of(raw)!=digest:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_journal_changed&#x27;)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            for state in states:</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                actual=read_state_snapshot(service.platform,state[&#x27;fact&#x27;],state[&#x27;checkpoint&#x27;])</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                if actual!=state[&#x27;body&#x27;]:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_state_changed&#x27;)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            current,_=store._project(store._strict_control_events())</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            target=store._cancel_target(current,summary[&#x27;project_id&#x27;],plan[&#x27;execution_ref&#x27;],self._authorize(write=True))</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            store._execution_summary(current,target,actor,lambda:self._authorize(write=True),time.monotonic())</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            if [correction_ref(r) for r in store._correction_history(current,target)]!=corrections:</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                raise_code(&#x27;EVT-101&#x27;,reason=&#x27;continuation_correction_changed&#x27;)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            for ancestor in ancestors:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                reference={k:ancestor[&#x27;summary&#x27;][k] for k in (&#x27;execution_id&#x27;,&#x27;revision&#x27;,&#x27;digest&#x27;,&#x27;source_seq&#x27;)}</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                target=store._cancel_target(current,summary[&#x27;project_id&#x27;],reference,actor)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                store._execution_summary(current,target,actor,lambda:self._authorize(write=True),time.monotonic())</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        def acquire():</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            leases=[]</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            try:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                for journal in sorted(journals,key=lambda j:j[&#x27;session_id&#x27;]):</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                    path=session_lock_path(safe_path(directory,journal[&#x27;session_id&#x27;]+&#x27;.jsonl&#x27;))</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>                    if session_lock_held(path):raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_journal_writer_active&#x27;)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                    lease=_FileLock(path)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                    if not lease.try_acquire():raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_journal_lease_unavailable&#x27;)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                    leases.append(lease)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                return leases</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            except BaseException:</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                for lease in reversed(leases):lease.release()</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                raise</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        verify()</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        return dict(plan=plan,body=body,events=events,replay_events=[*events,*(e for a in ancestors for e in a[&#x27;events&#x27;])],</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            old_materials=materials,row=row,verify=verify,acquire=acquire)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    @admitted</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    async def continue_execution(self,project,ident,body,command_id):</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        self._authorize(write=True);project=self._workspace_id(project,ProjectId);ident=self._workspace_id(ident,ExecutionId)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        command=ContinueExecution.model_validate(body);key=self._workspace_id(command_id,SubmissionKey)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        if command.execution_ref.execution_id!=ident:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;continuation_execution_reference&#x27;)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        describe=lambda ref:describe_execution(self,AgentVersionReference.model_validate(ref))</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        receipt,first,materials,context=await self.store.authorize_continuation(project,command,command_id=key,</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            authorize=lambda:self._authorize(write=True),inspect=self._continuation_context,describe=describe)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        if first:</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            pending=self.service.__dict__.setdefault(&#x27;_continuation_launches&#x27;,{})</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            pending[receipt[&#x27;execution_id&#x27;]]=context</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            try:await self._launch_product_execution(receipt,materials)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            finally:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                pending.pop(receipt[&#x27;execution_id&#x27;],None)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                for lease in reversed(context[&#x27;leases&#x27;]):lease.release()</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        return await self.execution(project,receipt[&#x27;execution_id&#x27;])</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code></code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    @admitted</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    async def continuation_submission(self,project,key):</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        self._authorize(write=True);project=self._workspace_id(project,ProjectId);key=self._workspace_id(key,SubmissionKey)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        return await self.store.continuation_submission(project,key,authorize=lambda:self._authorize(write=True))</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

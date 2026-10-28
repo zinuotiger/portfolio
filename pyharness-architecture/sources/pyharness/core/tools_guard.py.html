@@ -1,0 +1,591 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/tools_guard.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/tools_guard.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 591 行</span></nav><main class="wrap source-page"><h1>pyharness/core/tools_guard.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：16d0159f3d2d340c12332493918ba39d58e78e22<br>SHA-256（内容校验）：8b1c56691ce61f859da60118505dacd830a744e6e03588d9bf1a009cbddb1adf</p><p><a href="../../../architecture-detailed.html?node=guard">Guard Chain（权限守卫链）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 20 个类、函数与方法</summary><ul><li><a href="#L161">GuardChain（类） · L161–L471</a><ul><li><a href="#L178">GuardChain.__init__（方法） · L178–L213</a></li><li><a href="#L216">GuardChain._evaluate_full（异步方法） · L216–L280</a></li><li><a href="#L282">GuardChain.evaluate（异步方法） · L282–L290</a></li><li><a href="#L292">GuardChain.evaluate_detailed（异步方法） · L292–L311</a></li><li><a href="#L314">GuardChain.register_plugin_guard（方法） · L314–L335</a></li><li><a href="#L338">GuardChain.disable（方法） · L338–L355</a></li><li><a href="#L358">GuardChain.enabled_guard_ids（方法） · L358–L360</a></li><li><a href="#L362">GuardChain.chain_version（方法） · L362–L364</a></li><li><a href="#L366">GuardChain.__getattr__（方法） · L366–L373</a></li><li><a href="#L376">GuardChain._audit（异步方法） · L376–L394</a></li><li><a href="#L396">GuardChain._append_rejected（异步方法） · L396–L413</a></li><li><a href="#L415">GuardChain._append（异步方法） · L415–L430</a></li><li><a href="#L432">GuardChain._record（方法） · L432–L454</a></li><li><a href="#L456">GuardChain._safe_record（异步方法） · L456–L460</a></li><li><a href="#L462">GuardChain._emit_bus（方法） · L462–L471</a></li></ul></li><li><a href="#L480">register_guard_hook（函数） · L480–L486</a></li><li><a href="#L489">unregister_guard_hook（函数） · L489–L497</a></li><li><a href="#L500">match_guard_by_hook（函数） · L500–L515</a></li><li><a href="#L518">from_config（函数） · L518–L555</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/tools_guard.py — 工具安全闸:guard 单调拒绝链 (specs/tools_guard.py.md 契约)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F014(guard 单调链核心)· F023(内置危险 guard g1-g7)· 联动 F026(g1</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>schema 复查)/F015(approval 交接)。</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>权威口径:specs/tools_guard.py.md(编码契约)、DIS-SEAM §5(决策模型/链求值伪代码/</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>g1-g7 表)、ERR.md §2.5(GRD-401)/§2.11(POL-*)、SECURITY.md §4(L0-L4 单调策略面);</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>冲突以 PRD-Core 为准(本模块未见冲突,偏离均为事件载荷适配,见下)。</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>职责一句话:工具执行前的单调安全求值器——Guard 接口 + GuardChain(按注册序</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>waterfall,任一 guard 可拒绝且拒绝不可被后续覆盖)+ g1-g7 内置 guard + danger</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>分级(L0-L4)默认策略;决策三值 allow/reject/approval(**无 bypass 值**,不存在</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>&quot;跳过 guard&quot;标记位);每个 reject 必出强同步 guard.rejected,审计可证&quot;拦了且</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>没执行&quot;(INV-05)。guard 只有拒绝和请示两条非放行路径,**永远没有&quot;放行&quot;</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>API**——全链 allow 只是&quot;本 guard 不反对&quot;,最终执行权在 executor 管道</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>(DIS-CORE §7.3.2 关3 Provider)。</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>单调性三层结构防线(原则 3 / INV-04):</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>1. waterfall 短路:evaluate 按注册序求值,首个非 allow 即终局返回,后续 guard</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>   不再求值(测试断言短路后链尾 guard.check 零调用);</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>2. 无续跑/回翻 API:拒绝后本模块不提供任何把 reject 翻回 allow 的通道(无</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>   override/bypass/force-allow/execute 方法;审批重入 = 重新 evaluate 一次,</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>   新决策以新策略为准,单调性高于人类即时意志,GRD-403 语义);</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>3. 链只增:register_plugin_guard 只追加链尾(TLB-801 重名拒/BUSY 已禁用拒),</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   无移除/重排 API;单个内置 guard 关闭须 config 显式声明(disable,CFG-601</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   兜底),g-schema/g-danger 恒在不可关。</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>偏离说明(相对 spec 伪码;契约=spec,偏离均列理由,scope.py 偏离注同款先例):</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>1. **guard.evaluated/rejected 载荷字段以已落地的 events 词表模型为准**</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   (events/payload.py 的 GuardEvaluatedPayload/GuardRejectedPayload,</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   extra=&quot;forbid&quot; 拒多余字段,74 类型已锁定;实测:超字段 append → EVT-100):</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>   - evaluated 载荷 = {tool, decision, guard_ids, reasons};spec 伪码的</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>     policy_ref 字段在该模型不存在 → policy_ref 并入 reasons(模型同义字段);</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>     decision 词表为 allow|deny|need_approval(deny≡reject、need_approval≡</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>     approval,spec 明示别名口径),内部 Decision 三值经 _AUDIT_WORD 映射落盘;</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   - rejected 载荷 = {tool, guard_id, reason, policy_ref}:spec 伪码的 call_id</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>     字段模型不允许 → 经 Envelope.trace={&quot;call_id&quot;: …} 携带(信封 trace 为自由</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>     dict,不触发载荷校验),回放按 trace/事件序与 tool.call(含 call_id)配对;</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   - guard.disabled 未入 74 词表(实测 append → EVT-102)→ 经注入 session</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>     尽力而为留痕(scope.py 偏离 4 同款:真实 SessionLog 拒写属 events 模块</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>     后续阶段门,测试全替身覆盖)。</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>2. **g1 g-schema 的 registry 依赖注入式装配**:tools_registry(F026)本阶段未</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>   实现 → GuardChain 经 validator 回调注入(签名 validator(name, raw_args) -&gt;</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>   dict,校验失败抛 TLB-803);validator=None(未装配)时 g1 视为入口 F026 已验</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>   直接 allow,待 registry 落地后由装配层注入(链内复查防内层直调,INV-04)。</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>3. **approval 通道(has_channel)注入式装配**:danger_default_policy(high →</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>   has_channel ? approval : reject,headless=R8)是 SECURITY §4.2 机器表达;</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>   链在 evaluate 层统一把 approval 决策降级(无通道 → reject,policy_ref</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>   APR-501;critical → reject,POL-DGR-1 不可审批)。通道状态由装配层注入</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>   (GuardChain(approval_channel=…)),None = 未接线视同有通道(guard 只出决策,</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>   headless 终拦归 approval 模块 APR-501,R8——偏离:伪码未显式处理通道位)。</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>4. **BUSY 未登记码直构 PyHError(&quot;BUSY&quot;)**(scope.py 偏离 6 同款先例:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>   raise_code 会把未登记码改写为 CYC-999,语义不符);已登记码(TLB-801/</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>   CFG-601/GRD-4xx)全走 raise_code(全系统唯一抛出入口纪律)。</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>5. **g3/g4/g7 路径单点解析在 guard 内自含**:F055 单点 resolve 属 tool_fs 模块</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>   (resolve_in_workspace,F034 第二道闸,本阶段未实现)→ guard 先实现几何判定</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>   (绝对越界/.. 逃逸/symlink-junction 终解析越界),语义与 tool_fs 规格同码</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>   (POL-FS-1/2/3);workspace 根取自 scope.policy.workspace_root;read_extra_dirs</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>   只读例外是工具层(F034)纵深设施,guard 层不消费(只紧不松)。</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>6. **exec &quot;scope 显式授权&quot;判定 = 沙箱级别**:strict 沙箱下 exec.* 域外不可见</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>   (scope.can_use 前置已拦,见 scope.py 偏离 7)→ g6 对 strict 兜底直拒</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>   (POL-EXEC-1,双保险);basic/off 下无 shell=True 且 cwd 不越界才 allow。</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>7. 签名差异:spec 伪码 evaluate/check 混用 Decision 枚举与字符串三值——落地为</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>   Decision(StrEnum,ALLOW/REJECT/APPROVAL,与字符串 &quot;reject&quot; 等值可比较,</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>   executor 伪码 `d == &quot;reject&quot;` 直接可用)+ check 返回 (decision_str,</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>   policy_ref) 二元组(spec 伪代码权威);&quot;其余函数速览&quot;表内 enabled_guard_ids/</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>   chain_version/match_guard_by_hook 以链实例方法/模块函数形式落地(表为速览,</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>   装配/审计消费按实例)。</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>8. g5 域名匹配为**字面 hostname 精确匹配**(归一化后;子域/IP/混淆不隐含放行,</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>   须显式列入 allowed_domains),通配 &quot;*&quot; 视为越权不构成放行(config 层已拒,</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>   此处纵深兜底)。</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>依赖方向(单向,禁止反向):errors.raise_code(F020)← session.append(注入)←</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>scope(Scope.can_use 前置 + ScopePolicy 策略面)← config(装配只读);credentials/</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>workspace 解析均经构造注入;不 import Provider/executor/approval(反向依赖禁止)。</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>import asyncio</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>import inspect</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>import logging</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>import os</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>import stat</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>from enum import StrEnum</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>from typing import Any, Callable, Iterable, Optional</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>from urllib.parse import urlsplit</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code># ====================================================================== 常量</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code># guard 决策三值(内部唯一字面量;无 bypass 值——不存在第四态/跳过标记)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code># 审计事件 decision 词表(events GuardEvaluatedPayload 锁定:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code># allow|deny|need_approval;deny≡reject、need_approval≡approval,spec 别名口径)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code># 危险分级 L0-L4(scope/config 同源表;rank 仅供匹配比较)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code># 五内置可关 guard(config.py BUILTIN_GUARDS 同源:F023 五内置真子集);</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code># g-schema/g-danger 恒在不可关(disable → CFG-601)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code></code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code># g3 文件域工具名前缀(与 scope.WORKSPACE_DOMAINS 同源;fs./workspace.)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code># g5 外发域工具名前缀(与 scope.ALLOWLIST_DOMAINS 同源;web./net.)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code># 读路径类工具前缀(g4 match:读凭据文件风险面;list_dir 只列名不读内容)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code># 写类工具前缀(g7 match:覆写转审批;fs.write_file 等)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code># exec 类工具前缀(g6 match:exec.subprocess/exec.pty 等)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code># 凭据文件默认清单项(config security.credentials.file 同源;g4 兜底)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code># 凭据型文件名(清单外纵深:任何位置命中该名 = 凭据文件形态,拒读)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code># ==================================================================== 决策</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code></code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code></code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code># ================================================================= ToolCall</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code></code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code></code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code># ==================================================================== Guard</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code></code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code># ------------------------------------------------------------------ 路径几何</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code></code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code># ============================================================ g1 g-schema</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code></code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code></code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code># ============================================================== g2 g-danger</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code></code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code></code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code># ============================================================== g3 g-fs-path</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code></code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code># ======================================================== g4 g-credential-read</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code></code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code># ============================================================ g5 g-net-outbound</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code></code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code></code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code># ================================================================ g6 g-exec</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code></code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code></code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code># ============================================================= g7 g-overwrite</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code></code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code></code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code># ================================================================ 内置链装配</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code># 求值序 = 动作形状 guard(g3 路径/g4 凭据/g6 exec 约束/g7 覆写)先行,危险分级</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code># (g2)殿后——分级只决定&quot;是否需要人类审批&quot;,不短路形状 guard 求值:exec(high)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code># 的 shell/cwd/strict 约束与写工具的覆写审批在任何一次人类批准前已被强制求值</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code># (修复前 g-danger 在 g2 短路,使 g6/g7 对 high 工具恒为死代码)。</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>from pyharness.core.guard_models import (log, _DECISIONS, _AUDIT_WORD, DANGER_LEVELS, FORCED_GUARDS, FS_DOMAINS, NET_DOMAINS, _READ_PREFIXES, _WRITE_PREFIXES, _EXEC_PREFIXES, DEFAULT_CREDENTIAL_FILES, _CRED_BASENAMES, Decision, danger_default_policy, ToolCall, Guard, _policy_of, _danger_of, _is_domain)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>from pyharness.core.guard_paths import (_normcase_path, _inside_workspace, _norm_target, _path_from_args, _fs_target, _has_dotdot, _final_realpath, _is_linkish, _in_read_extra, _resolve_geometry)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>from pyharness.core.guard_rules import (g_schema_match, g_schema_check, g_danger_match, g_danger_check, g_fs_path_match, g_fs_path_check, g_credential_read_match, g_credential_read_check, g_net_outbound_match, _normalize_domain, g_net_outbound_check, g_exec_match, g_exec_check, g_overwrite_match, g_overwrite_check)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>from pyharness.core.guard_descriptors import (_RULE_POLICY_REFS, RuleDescriptor, describe_rules)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code></code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code></code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code># ================================================================ GuardChain</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>from pyharness.core.guard_builtin import (_BUILTIN_IDS, build_builtin_chain, _FuncGuard)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code></code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>class GuardChain:</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    &quot;&quot;&quot;guard 单调拒绝链(原则 3 落地;L3 调用裁决层)。</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code></code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    结构不可变纪律:chain 注册序 = 求值序,只增不改(插件追加链尾);disabled</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    仅经 disable()(config 显式声明 + guard.disabled 留痕)写入;运行期无任何</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    API 可移除/重排/回翻一次拒绝(INV-04,测试钉死方法面)。唯一状态 = 链装配</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    (chain/disabled/_snapshot_seq),求值本身无状态残留(取消/重入语义 = 重新</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    evaluate 一次,以新策略为准,GRD-403)。</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code></code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    # 无 bypass/放行/执行类方法面(测试断言 AttributeError;executor 才持有</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    # Provider 执行权——guard 永远只是&quot;拒绝或请示&quot;的裁决器)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    _FORBIDDEN_API: tuple[str, ...] = (</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        &quot;override&quot;, &quot;bypass&quot;, &quot;force_allow&quot;, &quot;set_allow&quot;, &quot;allow&quot;, &quot;execute&quot;,</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        &quot;run&quot;, &quot;mark_allowed&quot;, &quot;clear_reject&quot;, &quot;release_decision&quot;,</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>    )</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code></code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>    def __init__(self, chain: Optional[list[Guard]] = None, *,</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                 session: Any = None, disabled: Optional[Iterable[str]] = None,</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                 credential_paths: Optional[Iterable[str]] = None,</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                 validator: Optional[Callable[..., dict]] = None,</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                 approval_channel: Optional[bool] = None,</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                 path_exists: Optional[Callable[[str], bool]] = None,</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                 link_resolver: Optional[Callable[[str], str]] = None,</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                 bus: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        &quot;&quot;&quot;构造链:chain 缺省 = 内置 g1-g7(固定序);session/bus 注入式装配。</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code></code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        session = 事件落点(SessionLog.append 同型:append(type, payload, *,</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        actor=…, sync=…, trace=…));None = 未接线(evaluated/rejected 日志降级,</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        但 rejected 强同步语义要求装配层注入真实 session——单测以替身覆盖)。</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        approval_channel = 审批通道在位与否(偏离 3;None 视同有通道)。</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        built = chain if chain is not None else build_builtin_chain(</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            credential_paths=credential_paths, validator=validator,</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            approval_channel=approval_channel, path_exists=path_exists,</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>            link_resolver=link_resolver)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        ids = [g.id for g in built]</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        if len(set(ids)) != len(ids):</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            raise_code(&quot;TLB-801&quot;, guard=&quot;chain&quot;,</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>                       advice=&quot;guard id 全链唯一(重复装配被拒)&quot;)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        self.chain: list[Guard] = list(built)    # 注册序 = 求值序(只增不改)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        self.disabled: set[str] = set(disabled or ())</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        bad = self.disabled - set(ids)</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        if bad or self.disabled &amp; FORCED_GUARDS:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            raise_code(&quot;CFG-601&quot;, reason=&quot;越权&quot;,</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>                       fields=[f&quot;guards.disabled:{sorted(bad or self.disabled)}&quot;],</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                       detail=&quot;仅五内置可关且须 config 声明;g-schema/g-danger &quot;</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                              &quot;强制恒在&quot;)</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        self._session: Any = session              # 事件落点(注入)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        self._bus: Any = bus                      # registry.updated 尽力出口</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        self._approval_channel: Optional[bool] = approval_channel</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        self._snapshot_seq: int = 1               # 装配版本(审批重入复核)</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        self._tasks: set[asyncio.Task] = set()    # fire-and-forget 任务登记</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code></code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>    # ------------------------------------------------------ 单调链求值主函数</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    async def _evaluate_full(self, call: Any, scope: Any, *,</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>                             session: Any = None</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>                             ) -&gt; tuple[Decision, tuple[str, ...], tuple[str, ...]]:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        &quot;&quot;&quot;**唯一** waterfall 求值实现(S3-2-1;B1)。</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code></code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        返回 ``(verdict, guard_ids, policy_refs)``——三者来自**同一次**实际求值:</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        verdict 与命中面在同一循环迭代内产生并同时返回,**不重跑、不缓存、不读</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        历史事件**(S3-2-1 明令)。</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code></code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        规则(spec 伪代码权威):</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        - scope 前置:can_use 不可见 → 终局 REJECT(guard_id=scope-hidden,</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>          policy_ref=GRD-401;executor 关2a 已先行拦截,此处兜底直调消费方);</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        - 命中 guard 逐个 check;首个非 allow 即短路返回(reject/approval 都到</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>          此为止,后续 guard 不再求值 = 单调拒绝的求值面保证);</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        - approval 降级两闸(统一在 evaluate 层,插件 approval 也覆盖):</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>          danger=critical → 强制转 reject(POL-DGR-1,不可审批,F014);</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>          无审批通道 → 转 reject(APR-501,headless=R8,偏离 3);</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        - 每次求值恰好一条 guard.evaluated(INV-04:执行前必有;缺 = 非法执行);</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>          reject 再强同步 guard.rejected(sync=True,崩溃不丢拦截事实,INV-05);</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        - 全链 allow 才返回 ALLOW——guard 无放行权,执行权归 executor 关3。</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        异常:append 强同步失败按 PERS-202/EVT-1xx 语义上抛(拒绝事实必须落地,</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        调用方 fail-closed:缺 evaluated/rejected 不进入 Provider)。</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code></code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        **事件汇点按调用解析(ADR-021)**:``session`` 缺省(None)= 沿用装配期</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        ``self._session``(主路径**逐字不变**);治理层经 ``authorize()`` 显式传入</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        ``ctx.session`` ⇒ 子 Agent 的 ``guard.evaluated``/``guard.rejected`` 与</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        同 ``call_id`` 的 ``tool.call``/``tool.result`` **落同一会话**。链对象仍</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        **唯一**(``spine.guard is policy.chain``),变的是汇点而非链。</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        sess = session if session is not None else self._session</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        can_use = getattr(scope, &quot;can_use&quot;, None)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        if can_use is None:</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>            raise_code(&quot;GRD-401&quot;, hint=&quot;evaluate 需要会话 Scope(can_use 前置 &quot;</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                       &quot;不可缺);直接传 ScopePolicy 违反调用契约&quot;)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        if not can_use(call.name):                # scope 前置:不可见 → 终局</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>            await self._audit(call, Decision.REJECT, &quot;scope-hidden&quot;, &quot;GRD-401&quot;,</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>                              session=sess)</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>            await self._append_rejected(call, &quot;scope-hidden&quot;, &quot;GRD-401&quot;,</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                                        session=sess)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>            return Decision.REJECT, (&quot;scope-hidden&quot;,), (&quot;GRD-401&quot;,)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        enabled = self.enabled_guard_ids()</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        for g in self.chain:                      # 按注册序 waterfall</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            if g.id in self.disabled:</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>                continue                          # 仅 config 显式关闭(留过事件)</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>            if not g.match(call):</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>                continue                          # 非本 guard 管辖 → 看下一个</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>            d_str, policy = await g.check(call, scope)   # (allow/reject/approval)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            if d_str not in _DECISIONS:</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>                raise_code(&quot;CYC-999&quot;, guard=g.id, decision=d_str,</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>                           hint=&quot;guard.check 只能返回 allow/reject/approval&quot;</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>                                &quot;(插件契约违规=bug 证据)&quot;)</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>            d = Decision(d_str)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>            if d is Decision.APPROVAL:            # approval 降级两闸(统一兜底)</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>                if _danger_of(call) == &quot;critical&quot;:</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>                    d, policy = Decision.REJECT, &quot;POL-DGR-1&quot;  # 不可审批(F014)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>                elif self._approval_channel is False:</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>                    d, policy = Decision.REJECT, &quot;APR-501&quot;    # 无通道(R8)</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>            if d is not Decision.ALLOW:           # 首个非 allow 即短路(waterfall)</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>                await self._audit(call, d, g.id, policy, session=sess)</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>                if d is Decision.REJECT:          # 强同步:拦了且没执行(INV-05)</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>                    await self._append_rejected(call, g.id, policy,</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>                                                session=sess)</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>                return d, (g.id,), ((policy,) if policy else ())  # reject/approval 到此为止</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        await self._audit(call, Decision.ALLOW, enabled, None, session=sess)</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        return Decision.ALLOW, tuple(enabled), ()  # 全链 allow → executor 关3</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code></code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>    async def evaluate(self, call: Any, scope: Any, *,</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>                       session: Any = None) -&gt; Decision:</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        &quot;&quot;&quot;兼容 wrapper(位置参数/返回类型/求值语义不变;仅新增可选 kwarg)。</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code></code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        返回 ``Decision``(StrEnum;executor 伪码 ``d == &quot;reject&quot;`` 直接可比较)。</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        实现是 ``_evaluate_full`` 的**视图**,不是第二套求值。</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        ``session``(ADR-021)同 ``_evaluate_full``:缺省 None = 沿用装配期会话。</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        return (await self._evaluate_full(call, scope, session=session))[0]</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code></code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>    async def evaluate_detailed(self, call: Any, scope: Any, *,</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>                                session: Any = None) -&gt; Any:</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>        &quot;&quot;&quot;rich result API(S3-2-1;B1):同一次求值的结构化投影。</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code></code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        返回 ``governance.decision.EvaluationResult``(verdict + guard_ids +</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        policy_refs),供治理层装配 ``Decision``。**不重跑求值、不缓存上次结果、</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        不读历史事件**——直接复用 ``_evaluate_full`` 的返回值。</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code></code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        ``session``(ADR-021):治理层经 ``authorize()`` 传 ``ctx.session``,使</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>        ``guard.evaluated``/``guard.rejected`` 落在**发起该调用**的会话;缺省</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        None = 沿用装配期会话(主路径不变)。</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code></code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>        ``EvaluationResult`` 经**函数内**延迟 import 取得,避免给 ``core`` 增加</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>        模块级治理依赖(import 图不变)。</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        from pyharness.governance.decision import EvaluationResult</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        d, guard_ids, policy_refs = await self._evaluate_full(</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            call, scope, session=session)</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        return EvaluationResult(verdict=str(d), guard_ids=tuple(guard_ids),</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>                                policy_refs=tuple(policy_refs))</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code></code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>    # ------------------------------------------------------------ 插件挂载</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>    def register_plugin_guard(self, guard: Guard) -&gt; None:</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        &quot;&quot;&quot;插件 guard 只加严挂载:追加链尾(单调;只增拒绝面)。</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code></code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        拒绝面:①重名(TLB-801,guard id 全链唯一);②已禁用 guard(BUSY,须先</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        config 启用再挂)。成功 → 链尾 + 装配版本 +1(审批重入复核策略是否已</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        变)+ registry.updated 总线广播(尽力而为)。无任何移除/重排 API。</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>        if not isinstance(guard, Guard):</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>            raise_code(&quot;TLB-801&quot;, guard=type(guard).__name__,</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>                       advice=&quot;插件 guard 须继承 Guard(契约:id/match/check)&quot;)</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        ids = [g.id for g in self.chain]</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        if guard.id in ids:</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>            raise_code(&quot;TLB-801&quot;, guard=guard.id,</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>                       advice=&quot;guard id 全链唯一(重复挂载被拒)&quot;)</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        if guard.id in self.disabled:</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>            # BUSY 未登记码直构(见偏离 4:raise_code 会改写为 CYC-999)</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={&quot;guard&quot;: guard.id,</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>                                        &quot;advice&quot;: &quot;先启用(config)再挂载&quot;})</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>        self.chain.append(guard)                  # 恒在链尾(单调)</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        self._snapshot_seq += 1</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        self._emit_bus(&quot;registry.updated&quot;,</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>                       {&quot;op&quot;: &quot;add&quot;, &quot;kind&quot;: &quot;guard&quot;, &quot;key&quot;: guard.id})</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code></code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>    # ------------------------------------------------------------ 显式降级口</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>    def disable(self, guard_id: str, *, config_ref: str) -&gt; None:</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>        &quot;&quot;&quot;单个内置 guard 关闭(只可收严的反面特例;SECURITY §4.1)。</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code></code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>        必须 config 显式声明(config_ref 指明出处留痕),默认拒绝:</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        - g-schema/g-danger(强制恒在)或不在链上的 id → CFG-601;</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>        - 五内置之一且 config 声明 → 关 + guard.disabled 事件(谁在何时放松</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>          安全,永远可审计;事件词表外 → 尽力而为留痕,见偏离 1)。</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>        if guard_id in FORCED_GUARDS or guard_id not in {g.id for g in self.chain}:</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>            raise_code(&quot;CFG-601&quot;, guard=guard_id,</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>                       why=&quot;g-schema/g-danger 强制恒在;其余须 config 声明&quot;,</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>                       fields=[f&quot;guards.disabled:{guard_id}&quot;])</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>        if guard_id in self.disabled:</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>            return                                 # 幂等:已关不重复留痕</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>        self.disabled.add(guard_id)</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        self._snapshot_seq += 1</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        self._record(&quot;guard.disabled&quot;,</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>                     {&quot;guard_id&quot;: guard_id, &quot;config_ref&quot;: config_ref})</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code></code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>    # ------------------------------------------------------------ 只读审计面</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>    def enabled_guard_ids(self) -&gt; list[str]:</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>        &quot;&quot;&quot;当前生效链 id(审计/自检 F031;排除 config 显式关闭项)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>        return [g.id for g in self.chain if g.id not in self.disabled]</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code></code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>    def chain_version(self) -&gt; int:</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        &quot;&quot;&quot;装配版本号(审批重入复核:策略装配是否已变;单调 +1)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        return self._snapshot_seq</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code></code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>    def __getattr__(self, name: str) -&gt; Any:</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>        &quot;&quot;&quot;结构防线:禁 bypass/放行/执行类方法面(INV-04 测试钉死)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>        if name in self._FORBIDDEN_API:</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>            raise AttributeError(</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>                f&quot;GuardChain 无 {name} API:guard 只有拒绝和请示,永远没有&quot;</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>                f&quot;放行/执行路径(单调拒绝,INV-04);执行权归 executor 关3&quot;)</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>        raise AttributeError(f&quot;{type(self).__name__!r} object has no &quot;</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>                             f&quot;attribute {name!r}&quot;)</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code></code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>    # ------------------------------------------------------------ 事件出口</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>    async def _audit(self, call: Any, decision: Decision, guard_ids: Any,</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>                     policy_ref: Optional[str], *,</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>                     session: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>        &quot;&quot;&quot;evaluated 审计点(INV-04):每次求值恰一条,决策落词表词。</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code></code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>        payload 适配已落地 GuardEvaluatedPayload(偏离 1):decision ∈</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        allow|deny|need_approval(内部 Decision 映射);policy_ref 并入 reasons;</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>        call_id 经 trace 携带(与 tool.call 配对回放)。普通异步落盘。</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>        ``session``(ADR-021):None = 沿用装配期会话;治理层传 ``ctx.session``。</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>        await self._append(</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>            &quot;guard.evaluated&quot;,</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>            {&quot;tool&quot;: call.name,</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>             &quot;decision&quot;: _AUDIT_WORD[decision.value],</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>             &quot;guard_ids&quot;: ([guard_ids] if isinstance(guard_ids, str)</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>                           else list(guard_ids or [])),</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>             &quot;reasons&quot;: ([policy_ref] if policy_ref else None)},</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>            actor=&quot;tool&quot;, trace={&quot;call_id&quot;: getattr(call, &quot;call_id&quot;, &quot;&quot;)},</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>            session=session)</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code></code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>    async def _append_rejected(self, call: Any, guard_id: str, policy_ref: str,</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>                               *, session: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>        &quot;&quot;&quot;拒绝强同步留痕:guard.rejected 唯一事件出口(INV-05 审计证据)。</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code></code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>        sync=True:落盘成功才返回(崩溃不丢&quot;拦了&quot;事实);失败(PERS-202/EVT-1xx)</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>        上抛——调用方 fail-closed,绝不带着未落盘的拒绝继续(审计不能撒谎)。</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>        policy_ref 不含参数原文(防凭据入审计,SECURITY §6.4)。</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>        ``session``(ADR-021):与 ``_audit`` **同源**——成功与拒绝必须同归一会话,</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>        否则同一条链的两个出口分属两处(语义自相矛盾)。</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>        await self._append(</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>            &quot;guard.rejected&quot;,</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>            {&quot;tool&quot;: call.name, &quot;guard_id&quot;: guard_id,</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>             &quot;reason&quot;: policy_ref or &quot;GRD-401&quot;,</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>             &quot;policy_ref&quot;: policy_ref or &quot;GRD-401&quot;},</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>            actor=&quot;tool&quot;, sync=True,</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>            trace={&quot;call_id&quot;: getattr(call, &quot;call_id&quot;, &quot;&quot;)},</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>            session=session)</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code></code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>    async def _append(self, type_: str, payload: dict, *, actor: str,</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>                      sync: bool = False,</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>                      trace: Optional[dict] = None,</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>                      session: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>        &quot;&quot;&quot;append 统一封装:兼容同步替身/异步 SessionLog(await 实际返回)。</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code></code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>        **唯一解析点**(ADR-021):``session is None`` → 沿用装配期 ``self._session``</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>        (主路径逐字不变);显式传入 → 该事件落调用方指定会话。</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>        sess = session if session is not None else self._session</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>        if sess is None:</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>            log.debug(&quot;guard 未接线事件出口,%s 未记录(sync=%s)&quot;, type_, sync)</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>            return</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>        r = sess.append(type_, payload, actor=actor, sync=sync, trace=trace)</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>        if inspect.isawaitable(r):</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>            await r</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code></code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>    def _record(self, type_: str, payload: dict) -&gt; None:</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>        &quot;&quot;&quot;词表外事件(guard.disabled)尽力而为留痕(偏离 1;scope.py 同款)。</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code></code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>        真实 SessionLog 现会 EVT-102 拒写(词表 57 锁定,后续阶段门扩展);</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>        未接线/失败只记日志,不阻断策略主路径(与 scope._record 一致)。</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>        sess = self._session</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>        if sess is None:</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>            log.debug(&quot;guard 未接线事件出口,%s 未记录&quot;, type_)</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>            return</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>        try:</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>            r = sess.append(type_, payload, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>        except Exception as exc:                   # noqa: BLE001 尽力而为</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>            log.warning(&quot;guard append %s 失败: %s&quot;, type_, exc)</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>            return</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>        if inspect.isawaitable(r):</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>            try:</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>                asyncio.get_running_loop()</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>            except RuntimeError:</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code>                return</code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>            task = asyncio.create_task(self._safe_record(r, type_))</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>            self._tasks.add(task)</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>            task.add_done_callback(self._tasks.discard)</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code></code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>    async def _safe_record(self, coro: Any, type_: str) -&gt; None:</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>        try:</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>            await coro</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>        except Exception as exc:                    # noqa: BLE001 EVT-102 等</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>            log.warning(&quot;guard append %s 异步失败: %s&quot;, type_, exc)</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code></code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>    def _emit_bus(self, type_: str, payload: dict) -&gt; None:</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>        &quot;&quot;&quot;总线尽力而为出口(registry.updated 瞬时事件,仅总线无载荷模型)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>        bus = self._bus</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>        if bus is None:</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>            return</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>        from pyharness.bus import schedule_emit</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code>        try:</code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code>            schedule_emit(bus, type_, payload)</code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>        except Exception as exc:                    # noqa: BLE001 未注册类型等</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>            log.warning(&quot;guard emit %s 失败: %s&quot;, type_, exc)</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code></code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code></code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code># ================================================================= 模块函数</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code># 插件 guard 钩子注册表(hook 名 → Guard 实例;capability 经 Definition</code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code># guard_hooks 声明后由 match_guard_by_hook 解析,announce 时挂链尾,F023)</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>_PLUGIN_HOOKS: dict[str, Guard] = {}</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code></code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code></code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code>def register_guard_hook(hook: str, guard: Guard) -&gt; None:</code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>    &quot;&quot;&quot;登记插件 guard 钩子名(能力包启动期调用;重名/非 Guard → TLB-801)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>    if not isinstance(guard, Guard):</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>        raise_code(&quot;TLB-801&quot;, hook=hook, advice=&quot;插件 guard 须继承 Guard&quot;)</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>    if hook in _PLUGIN_HOOKS:</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code>        raise_code(&quot;TLB-801&quot;, hook=hook, advice=&quot;guard hook 名全库唯一&quot;)</code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>    _PLUGIN_HOOKS[hook] = guard</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code></code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code></code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>def unregister_guard_hook(hook: str) -&gt; bool:</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>    &quot;&quot;&quot;注销插件 guard 钩子名(幂等;返回是否真的摘除)。</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code></code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code>    2026-09-21 补:此前**只有注册没有注销**,而 ``PluginManager.uninstall`` 的</code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code>    docstring 明写&quot;支持重装(F004)&quot; —— 含 guard 钩子的插件重装时会在</code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code>    ``register_guard_hook`` 处撞 TLB-801&quot;名全库唯一&quot;,即**该声明对这类插件为假**;</code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code>    且卸载后陈旧 Guard 仍留在表里,``match_guard_by_hook`` 仍会把它挂到新声明上。</code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code>    return _PLUGIN_HOOKS.pop(str(hook), None) is not None</code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code></code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code></code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>def match_guard_by_hook(defn: Any) -&gt; list[Guard]:</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code>    &quot;&quot;&quot;按 Definition.guard_hooks 名字解析出 Guard 实例(announce 时挂载用)。</code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code></code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>    guard_hooks 中未登记的钩子 = 声明了不存在的 guard(非法注册证据)→</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>    TLB-801 拒(能力须先 register_guard_hook 再声明)。返回实例按 hooks 声明序。</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code>    hooks = tuple(getattr(defn, &quot;guard_hooks&quot;, ()) or ())</code></div>
+<div class="code-line" id="L507"><a class="line-number" href="#L507">507</a><code>    out: list[Guard] = []</code></div>
+<div class="code-line" id="L508"><a class="line-number" href="#L508">508</a><code>    for name in hooks:</code></div>
+<div class="code-line" id="L509"><a class="line-number" href="#L509">509</a><code>        g = _PLUGIN_HOOKS.get(str(name))</code></div>
+<div class="code-line" id="L510"><a class="line-number" href="#L510">510</a><code>        if g is None:</code></div>
+<div class="code-line" id="L511"><a class="line-number" href="#L511">511</a><code>            raise_code(&quot;TLB-801&quot;, hook=str(name),</code></div>
+<div class="code-line" id="L512"><a class="line-number" href="#L512">512</a><code>                       advice=&quot;guard_hooks 声明了未登记的 guard:先 &quot;</code></div>
+<div class="code-line" id="L513"><a class="line-number" href="#L513">513</a><code>                              &quot;register_guard_hook 再挂载&quot;)</code></div>
+<div class="code-line" id="L514"><a class="line-number" href="#L514">514</a><code>        out.append(g)</code></div>
+<div class="code-line" id="L515"><a class="line-number" href="#L515">515</a><code>    return out</code></div>
+<div class="code-line" id="L516"><a class="line-number" href="#L516">516</a><code></code></div>
+<div class="code-line" id="L517"><a class="line-number" href="#L517">517</a><code></code></div>
+<div class="code-line" id="L518"><a class="line-number" href="#L518">518</a><code>def from_config(cfg: Any, *, credentials: Any = None,</code></div>
+<div class="code-line" id="L519"><a class="line-number" href="#L519">519</a><code>                workspace: Any = None, session: Any = None,</code></div>
+<div class="code-line" id="L520"><a class="line-number" href="#L520">520</a><code>                bus: Any = None,</code></div>
+<div class="code-line" id="L521"><a class="line-number" href="#L521">521</a><code>                approval_channel: Optional[bool] = None,</code></div>
+<div class="code-line" id="L522"><a class="line-number" href="#L522">522</a><code>                validator: Optional[Callable[..., dict]] = None,</code></div>
+<div class="code-line" id="L523"><a class="line-number" href="#L523">523</a><code>                path_exists: Optional[Callable[[str], bool]] = None,</code></div>
+<div class="code-line" id="L524"><a class="line-number" href="#L524">524</a><code>                link_resolver: Optional[Callable[[str], str]] = None) -&gt; GuardChain:</code></div>
+<div class="code-line" id="L525"><a class="line-number" href="#L525">525</a><code>    &quot;&quot;&quot;启动第④步装配:内置 g1-g7(固定序)+ config 显式禁用项(DIS-SEAM §2.5)。</code></div>
+<div class="code-line" id="L526"><a class="line-number" href="#L526">526</a><code></code></div>
+<div class="code-line" id="L527"><a class="line-number" href="#L527">527</a><code>    读取:cfg.security.guards.disabled(五内置真子集,越权在 config 层已拒</code></div>
+<div class="code-line" id="L528"><a class="line-number" href="#L528">528</a><code>    CFG-601,此处 disable() 复核兜底,逐个写 guard.disabled 事件);</code></div>
+<div class="code-line" id="L529"><a class="line-number" href="#L529">529</a><code>    cfg.security.credentials.file(默认 ~/.pyharness/credentials.yaml)→ g4</code></div>
+<div class="code-line" id="L530"><a class="line-number" href="#L530">530</a><code>    凭据清单;approval_channel 由外壳装配注入(headless=False,偏离 3)。</code></div>
+<div class="code-line" id="L531"><a class="line-number" href="#L531">531</a><code>    签名差异(spec 伪码含 scope 参数):链按 call 绑定 scope,装配不消费 scope</code></div>
+<div class="code-line" id="L532"><a class="line-number" href="#L532">532</a><code>    → 移除;credentials/workspace 参数保留为注入位(见偏离 5/7)。</code></div>
+<div class="code-line" id="L533"><a class="line-number" href="#L533">533</a><code>    异常:CFG-601(装配序违反/非法禁用项)、TLB-801(链装配重名)。</code></div>
+<div class="code-line" id="L534"><a class="line-number" href="#L534">534</a><code></code></div>
+<div class="code-line" id="L535"><a class="line-number" href="#L535">535</a><code>    注入位(2026-09-14 S1-01 补齐):validator/path_exists/link_resolver 原经</code></div>
+<div class="code-line" id="L536"><a class="line-number" href="#L536">536</a><code>    GuardChain 构造注入,但本工厂此前不透传 → 装配层若改用本入口,则 g1 的</code></div>
+<div class="code-line" id="L537"><a class="line-number" href="#L537">537</a><code>    validator 恒 None(g-schema 空转,INV-04 的内层复查失效)、g4 落到兜底清单、</code></div>
+<div class="code-line" id="L538"><a class="line-number" href="#L538">538</a><code>    g7 用默认 os.path.exists。现全部透传(关键字可选,缺省 None = 既有行为,</code></div>
+<div class="code-line" id="L539"><a class="line-number" href="#L539">539</a><code>    API 向后兼容);validator 生产值 = registry.validate_args(engine 装配注入)。</code></div>
+<div class="code-line" id="L540"><a class="line-number" href="#L540">540</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L541"><a class="line-number" href="#L541">541</a><code>    cred_paths: list[str] = []</code></div>
+<div class="code-line" id="L542"><a class="line-number" href="#L542">542</a><code>    if credentials is not None:</code></div>
+<div class="code-line" id="L543"><a class="line-number" href="#L543">543</a><code>        paths = getattr(credentials, &quot;paths&quot;, credentials)</code></div>
+<div class="code-line" id="L544"><a class="line-number" href="#L544">544</a><code>        cred_paths = [str(p) for p in (paths or ())]</code></div>
+<div class="code-line" id="L545"><a class="line-number" href="#L545">545</a><code>    else:</code></div>
+<div class="code-line" id="L546"><a class="line-number" href="#L546">546</a><code>        f = getattr(getattr(cfg, &quot;security&quot;, None), &quot;credentials&quot;, None)</code></div>
+<div class="code-line" id="L547"><a class="line-number" href="#L547">547</a><code>        cred_paths = [str(getattr(f, &quot;file&quot;, DEFAULT_CREDENTIAL_FILES[0]))]</code></div>
+<div class="code-line" id="L548"><a class="line-number" href="#L548">548</a><code>    chain = GuardChain(</code></div>
+<div class="code-line" id="L549"><a class="line-number" href="#L549">549</a><code>        credential_paths=cred_paths, session=session, bus=bus,</code></div>
+<div class="code-line" id="L550"><a class="line-number" href="#L550">550</a><code>        approval_channel=approval_channel, validator=validator,</code></div>
+<div class="code-line" id="L551"><a class="line-number" href="#L551">551</a><code>        path_exists=path_exists, link_resolver=link_resolver)</code></div>
+<div class="code-line" id="L552"><a class="line-number" href="#L552">552</a><code>    for gid in (getattr(getattr(cfg, &quot;security&quot;, None), &quot;guards&quot;, None)</code></div>
+<div class="code-line" id="L553"><a class="line-number" href="#L553">553</a><code>                and getattr(cfg.security.guards, &quot;disabled&quot;, None)) or []:</code></div>
+<div class="code-line" id="L554"><a class="line-number" href="#L554">554</a><code>        chain.disable(str(gid), config_ref=&quot;security.guards.disabled&quot;)</code></div>
+<div class="code-line" id="L555"><a class="line-number" href="#L555">555</a><code>    return chain</code></div>
+<div class="code-line" id="L556"><a class="line-number" href="#L556">556</a><code></code></div>
+<div class="code-line" id="L557"><a class="line-number" href="#L557">557</a><code></code></div>
+<div class="code-line" id="L558"><a class="line-number" href="#L558">558</a><code># ============================================ 规则声明式描述(2026-09-14 S2-1)</code></div>
+<div class="code-line" id="L559"><a class="line-number" href="#L559">559</a><code># 供治理层 PolicyEngine 装配消费的**只读描述**面(pyharness/governance/)。</code></div>
+<div class="code-line" id="L560"><a class="line-number" href="#L560">560</a><code># 纪律:① **不改 g1-g7 判定逻辑**(G-3 规则实现冻结;本段只读既有 chain 构造);</code></div>
+<div class="code-line" id="L561"><a class="line-number" href="#L561">561</a><code>#       ② **不 import governance**(反向依赖禁止,ADR-018);</code></div>
+<div class="code-line" id="L562"><a class="line-number" href="#L562">562</a><code>#       ③ 描述符只含声明与可调用对象引用,不含判定本身。</code></div>
+<div class="code-line" id="L563"><a class="line-number" href="#L563">563</a><code></code></div>
+<div class="code-line" id="L564"><a class="line-number" href="#L564">564</a><code># rule_id → 该规则可能产出的策略引用(policy_ref)。来源 = 各 g*_check 的返回</code></div>
+<div class="code-line" id="L565"><a class="line-number" href="#L565">565</a><code># 字面量;本表是**声明**,不参与判定——判定仍以 check 函数返回为准(只读投影)。</code></div>
+<div class="code-line" id="L566"><a class="line-number" href="#L566">566</a><code></code></div>
+<div class="code-line" id="L567"><a class="line-number" href="#L567">567</a><code></code></div>
+<div class="code-line" id="L568"><a class="line-number" href="#L568">568</a><code># 目录不存在/被误当包 import 时的告警(防装配静默失败;正常 import 无输出)</code></div>
+<div class="code-line" id="L569"><a class="line-number" href="#L569">569</a><code>_log_ready = log.getEffectiveLevel()</code></div>
+<div class="code-line" id="L570"><a class="line-number" href="#L570">570</a><code></code></div>
+<div class="code-line" id="L571"><a class="line-number" href="#L571">571</a><code>__all__ = [</code></div>
+<div class="code-line" id="L572"><a class="line-number" href="#L572">572</a><code>    # 决策</code></div>
+<div class="code-line" id="L573"><a class="line-number" href="#L573">573</a><code>    &quot;Decision&quot;, &quot;danger_default_policy&quot;,</code></div>
+<div class="code-line" id="L574"><a class="line-number" href="#L574">574</a><code>    # 契约</code></div>
+<div class="code-line" id="L575"><a class="line-number" href="#L575">575</a><code>    &quot;Guard&quot;, &quot;GuardChain&quot;, &quot;ToolCall&quot;,</code></div>
+<div class="code-line" id="L576"><a class="line-number" href="#L576">576</a><code>    # 内置 guard 函数对(F023;match/check 分离,spec 清单)</code></div>
+<div class="code-line" id="L577"><a class="line-number" href="#L577">577</a><code>    &quot;g_schema_match&quot;, &quot;g_schema_check&quot;,</code></div>
+<div class="code-line" id="L578"><a class="line-number" href="#L578">578</a><code>    &quot;g_danger_match&quot;, &quot;g_danger_check&quot;,</code></div>
+<div class="code-line" id="L579"><a class="line-number" href="#L579">579</a><code>    &quot;g_fs_path_match&quot;, &quot;g_fs_path_check&quot;,</code></div>
+<div class="code-line" id="L580"><a class="line-number" href="#L580">580</a><code>    &quot;g_credential_read_match&quot;, &quot;g_credential_read_check&quot;,</code></div>
+<div class="code-line" id="L581"><a class="line-number" href="#L581">581</a><code>    &quot;g_net_outbound_match&quot;, &quot;g_net_outbound_check&quot;,</code></div>
+<div class="code-line" id="L582"><a class="line-number" href="#L582">582</a><code>    &quot;g_exec_match&quot;, &quot;g_exec_check&quot;,</code></div>
+<div class="code-line" id="L583"><a class="line-number" href="#L583">583</a><code>    &quot;g_overwrite_match&quot;, &quot;g_overwrite_check&quot;,</code></div>
+<div class="code-line" id="L584"><a class="line-number" href="#L584">584</a><code>    # 装配/工厂</code></div>
+<div class="code-line" id="L585"><a class="line-number" href="#L585">585</a><code>    &quot;build_builtin_chain&quot;, &quot;from_config&quot;,</code></div>
+<div class="code-line" id="L586"><a class="line-number" href="#L586">586</a><code>    &quot;register_guard_hook&quot;, &quot;unregister_guard_hook&quot;, &quot;match_guard_by_hook&quot;,</code></div>
+<div class="code-line" id="L587"><a class="line-number" href="#L587">587</a><code>    # 声明式描述(S2-1;治理层装配消费面——只读,不改判定)</code></div>
+<div class="code-line" id="L588"><a class="line-number" href="#L588">588</a><code>    &quot;RuleDescriptor&quot;, &quot;describe_rules&quot;,</code></div>
+<div class="code-line" id="L589"><a class="line-number" href="#L589">589</a><code>    # 常量(审计/测试锚点)</code></div>
+<div class="code-line" id="L590"><a class="line-number" href="#L590">590</a><code>    &quot;FORCED_GUARDS&quot;, &quot;DANGER_LEVELS&quot;, &quot;_BUILTIN_IDS&quot;,</code></div>
+<div class="code-line" id="L591"><a class="line-number" href="#L591">591</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

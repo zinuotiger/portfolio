@@ -1,0 +1,212 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/errors.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/errors.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 212 行</span></nav><main class="wrap source-page"><h1>pyharness/errors.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：a20d55493320ba0a95dfb8cc124190a439982b41<br>SHA-256（内容校验）：057d9f7f90e3e18178b1b22b8ad24a948100b6d25236cb3053e94bd6990061e5</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 22 个类、函数与方法</summary><ul><li><a href="#L18">ErrorSpec（类） · L18–L27</a></li><li><a href="#L34">register（函数） · L34–L39</a></li><li><a href="#L42">register_default_codes（函数） · L42–L98</a></li><li><a href="#L102">_domain_class（函数） · L102–L104</a></li><li><a href="#L107">raise_code（函数） · L107–L120</a></li><li><a href="#L124">PyHError（类） · L124–L169</a><ul><li><a href="#L130">PyHError.__init__（方法） · L130–L139</a></li><li><a href="#L141">PyHError.to_event（方法） · L141–L146</a></li><li><a href="#L148">PyHError.to_model_message（方法） · L148–L165</a></li><li><a href="#L167">PyHError.to_user_message（方法） · L167–L169</a></li></ul></li><li><a href="#L173">EventError（类） · L173–L173</a></li><li><a href="#L174">BusError（类） · L174–L174</a></li><li><a href="#L175">PersistenceError（类） · L175–L175</a></li><li><a href="#L176">LLMError（类） · L176–L176</a></li><li><a href="#L177">GuardError（类） · L177–L177</a></li><li><a href="#L178">ApprovalError（类） · L178–L178</a></li><li><a href="#L179">ConfigError（类） · L179–L179</a></li><li><a href="#L180">CredentialError（类） · L180–L180</a></li><li><a href="#L181">ToolError（类） · L181–L181</a></li><li><a href="#L182">CycleError（类） · L182–L182</a></li><li><a href="#L197">struct_error（函数） · L197–L201</a></li><li><a href="#L204">wrap_unexpected（函数） · L204–L208</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/errors.py — 全系统唯一失败语义层 (specs/errors.py.md)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>ErrorSpec 注册表 + PyHError 异常树 + 唯一抛出入口 raise_code</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>+ 三消费者转换 (to_model_message/to_user_message/to_event)。</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>错误码契约以 ERR.md 为登记册;禁止裸 raise str、无码异常跨边界、现场造码。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import logging</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import traceback</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from dataclasses import dataclass</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from typing import Any, NoReturn, Optional</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>log = logging.getLogger(&quot;pyharness.errors&quot;)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code># ---------------------------------------------------------------- ErrorSpec</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>class ErrorSpec:</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    &quot;&quot;&quot;错误码注册表条目:code/name/advice 必填 + 三轴分类 (ERR §1.3)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    code: str</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    name: str</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    advice: str</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    retryable: str = &quot;N&quot;        # R=自动退避 / F=修复后重试 / N=不可重试</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    action: str = &quot;拒写&quot;        # 拒写|回喂|降级|暂停|终态|隔离</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    fatal: bool = False</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code># ------------------------------------------------------------------ 注册表</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>ERRORS: dict[str, ErrorSpec] = {}</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>def register(code: str, name: str, advice: str, *,</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>             retryable: str = &quot;N&quot;, action: str = &quot;拒写&quot;, fatal: bool = False) -&gt; None:</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    &quot;&quot;&quot;登记单码;重复登记拒绝 (码一经发布不改含义,禁覆盖)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    if code in ERRORS:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        raise ValueError(f&quot;错误码重复登记:{code}&quot;)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    ERRORS[code] = ErrorSpec(code, name, advice, retryable, action, fatal)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>def register_default_codes() -&gt; None:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    &quot;&quot;&quot;发布码全量入册 (ERR.md §2 全量目录权威;与 ERR.md/EVENT-SCHEMA 同步)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    # ===== BUS 域 =====</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    register(&quot;BUS-002&quot;, &quot;保留名冲突(注册/卸载脊柱八模块或 spine 子系统)&quot;, &quot;拒绝,不改注册表,registry.updated 留痕&quot;)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    register(&quot;BUS-003&quot;, &quot;非法状态迁移&quot;, &quot;拒绝,状态机层抛(F006)&quot;)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    # ===== EVT 域 =====</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    register(&quot;EVT-100&quot;, &quot;信封/载荷非法&quot;, &quot;拒写,返字段明细,修正后重试&quot;)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    register(&quot;EVT-101&quot;, &quot;seq 不连续/重复&quot;, &quot;拒写;疑丢事件跑 repair&quot;)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    register(&quot;EVT-102&quot;, &quot;类型未注册&quot;, &quot;拒写;先注册 schema 才能 emit&quot;)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    register(&quot;EVT-103&quot;, &quot;订阅者异常&quot;, &quot;封装隔离,不中断其他订阅者&quot;)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    register(&quot;EVT-104&quot;, &quot;终态写违规&quot;, &quot;拒写;查绕过路径(INV-01)&quot;)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    register(&quot;EVT-105&quot;, &quot;未知斜杠命令&quot;, &quot;system.error 回显,会话继续,零 LLM&quot;)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    register(&quot;EVT-106&quot;, &quot;先于 created&quot;, &quot;拒写&quot;)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    # ===== PERS 域 =====</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    register(&quot;PERS-201&quot;, &quot;回放坏行&quot;, &quot;记跳+隔离,不中断回放;删否经 repair&quot;)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    register(&quot;PERS-202&quot;, &quot;落盘失败&quot;, &quot;强同步抛错;异步→system.error+会话暂停(拒新不丢旧),repair 恢复&quot;)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    register(&quot;PERS-221&quot;, &quot;spill 写失败&quot;, &quot;结构化错误+tool.error 回喂&quot;)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    register(&quot;PERS-222&quot;, &quot;spill 越权读&quot;, &quot;拒绝零读取,回喂&quot;)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    register(&quot;PERS-223&quot;, &quot;spill 超限拒写&quot;, &quot;拒写,回喂&quot;)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    # ===== LLM 域 =====</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    register(&quot;LLM-301&quot;, &quot;超时&quot;, &quot;R 退避≤4(落 llm.retry)→降级&quot;)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    register(&quot;LLM-302&quot;, &quot;认证失败&quot;, &quot;不重试直接降级,带 degraded_from;查 CRED-701&quot;)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    register(&quot;LLM-303&quot;, &quot;可重试上游错&quot;, &quot;R 退避≤4,耗尽降级;可取消&quot;)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    register(&quot;LLM-304&quot;, &quot;业务性失败&quot;, &quot;不重试不降级上抛;agent-loop 收 reason=error&quot;)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    register(&quot;LLM-305&quot;, &quot;预算超限&quot;, &quot;任务成本超预算,中止循环(reason=budget)&quot;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    register(&quot;LLM-310&quot;, &quot;链尾全败&quot;, &quot;终止任务(reason=error);降级&gt;5 次/会话告警&quot;)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    register(&quot;LLM-399&quot;, &quot;模型域未预期&quot;, &quot;非 PyHError 异常兜底归因;按 bug 提单,禁重试&quot;)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    # ===== GRD 域 =====</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    register(&quot;GRD-401&quot;, &quot;调用被拒&quot;, &quot;终局:guard.rejected 强同步,Provider 零执行,无 tool.result&quot;)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    register(&quot;GRD-402&quot;, &quot;重放已拒调用&quot;, &quot;拒绝+system.error 防重放&quot;)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    register(&quot;GRD-403&quot;, &quot;批准后被新拒&quot;, &quot;以新决策为准(非错误),单调性高于批准&quot;)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    # ===== APR 域 =====</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    register(&quot;APR-501&quot;, &quot;无审批通道&quot;, &quot;直接拒;不发 approval.requested,无等待&quot;)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    register(&quot;APR-502&quot;, &quot;等待被取消&quot;, &quot;denied,无悬挂 Future&quot;)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    register(&quot;APR-503&quot;, &quot;裁决重放/未知 id&quot;, &quot;system.error,不重复执行&quot;)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    # ===== CFG 域 =====</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    register(&quot;CFG-601&quot;, &quot;配置非法/越权&quot;, &quot;拒绝启动会话,列非法字段;HARDENED 只紧不松&quot;)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    register(&quot;CFG-602&quot;, &quot;模板缺变量&quot;, &quot;结构化错误,会话继续&quot;)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    register(&quot;CFG-603&quot;, &quot;护栏段构建失败&quot;, &quot;拒绝本次 LLM 调用(缺护栏不发请求)&quot;)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    register(&quot;CFG-607&quot;, &quot;未知配置键/白名单外 env&quot;, &quot;结构化错误;核对 CFG §4.3 白名单与键拼写&quot;)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    register(&quot;CFG-608&quot;, &quot;热更只读键被拒&quot;, &quot;策略/预算类键需重启生效;拒热更&quot;)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    # ===== CRED 域 =====</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    register(&quot;CRED-701&quot;, &quot;凭据缺失&quot;, &quot;拒绝(结构化错误),绝不空串/None 续跑&quot;)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    register(&quot;CRED-702&quot;, &quot;权限过宽(&gt;600)&quot;, &quot;启动拒载&quot;)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    register(&quot;CRED-703&quot;, &quot;疑似密钥外泄&quot;, &quot;system.error 告警+打码放行&quot;)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    # ===== TLB 域 =====</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    register(&quot;TLB-801&quot;, &quot;重复/非法注册&quot;, &quot;拒绝并提示注销重注册;无脏数据&quot;)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    register(&quot;TLB-802&quot;, &quot;工具未注册&quot;, &quot;tool.error 回喂 LLM 自查,不静默&quot;)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    register(&quot;TLB-803&quot;, &quot;参数校验失败&quot;, &quot;回喂明细零执行(INV-06);连败 2 次终止轮&quot;)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    register(&quot;TLB-805&quot;, &quot;执行超时/异常&quot;, &quot;tool.error 回喂,重试性由 LLM 判断&quot;)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    register(&quot;TLB-806&quot;, &quot;二进制拒读&quot;, &quot;结构化错误,提示换工具&quot;)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    register(&quot;TLB-807&quot;, &quot;PTY 不可用&quot;, &quot;当前平台/系统不支持伪终端(ConPTY);&quot;</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                                     &quot;提示改用 exec.shell_run 行式执行&quot;)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    # ===== SKL 域(F073 技能系统)=====</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    register(&quot;SKL-901&quot;, &quot;技能未找到&quot;, &quot;skill.load 回喂 LLM 自查(skill.list 看目录)&quot;)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    # ===== CYC 域 =====</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    register(&quot;CYC-999&quot;, &quot;未预期异常&quot;, &quot;system.error+终态 reason=error;堆栈仅本地 debug&quot;)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code></code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code></code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code># ------------------------------------------------------------ 唯一抛出入口</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>def _domain_class(code: str) -&gt; type[PyHError]:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    prefix = code.split(&quot;-&quot;, 1)[0] if &quot;-&quot; in code else &quot;&quot;</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    return _DOMAIN_CLASSES.get(prefix, PyHError)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code></code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>def raise_code(code: str, **ctx: Any) -&gt; NoReturn:</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    &quot;&quot;&quot;全系统唯一抛出入口:查表→按码域抛对应域类;未登记码兜底 CYC-999。</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    双落纪律:每次 raise_code ≥1 行日志 (code=xxx key=value)。</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    ctx 只放脱敏结构化现场;secret 原文永不出凭据模块。</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    spec = ERRORS.get(code)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    if spec is None:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        spec = ERRORS.get(&quot;CYC-999&quot;, ErrorSpec(&quot;CYC-999&quot;, &quot;未知内部错误&quot;, &quot;查日志归因&quot;))</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        ctx = {**ctx, &quot;unknown_code&quot;: code}</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        code = &quot;CYC-999&quot;</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    log.error(&quot;code=%s name=%s %s&quot;, code, spec.name,</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>              &quot; &quot;.join(f&quot;{k}={v}&quot; for k, v in ctx.items()))</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    raise _domain_class(code)(code, ctx=ctx, spec=spec)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code></code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code># ---------------------------------------------------------------- PyHError</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>class PyHError(Exception):</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    &quot;&quot;&quot;结构化错误基类:code/message/retryable/cause/context 五要素。</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    str() 只含 [code] name,不吐 ctx 敏感值。</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code></code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    def __init__(self, code: str, *, ctx: Optional[dict] = None,</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                 spec: Optional[ErrorSpec] = None):</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        self.code = code</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        self.ctx = dict(ctx or {})</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        self.cause = self.ctx.pop(&quot;cause&quot;, None)      # 底层异常仅本地,不外泄文案</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        self.spec = spec or ERRORS.get(code) or ERRORS.get(</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            &quot;CYC-999&quot;, ErrorSpec(&quot;CYC-999&quot;, &quot;未知内部错误&quot;, &quot;查日志归因&quot;))</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        self.retryable = self.spec.retryable</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        self.message = self.spec.name</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        super().__init__(f&quot;[{self.code}] {self.message}&quot;)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code></code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    def to_event(self) -&gt; dict:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        &quot;&quot;&quot;事件化:system.error payload;堆栈永不进事件。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        return {&quot;type&quot;: &quot;system.error&quot;, &quot;actor&quot;: &quot;system&quot;,</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                &quot;payload&quot;: {&quot;code&quot;: self.code,</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                            &quot;hint&quot;: f&quot;{self.message}:{self.spec.advice}&quot;,</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                            &quot;ctx&quot;: self.ctx}}</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code></code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    def to_model_message(self) -&gt; str:</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        &quot;&quot;&quot;给 LLM 的可行动文本:≤2000 字符,含 [code]+name+建议。</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code></code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        建议的**取值优先级**(2026-09-21 修,O-2):</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>          ``ctx[&quot;advice&quot;]``(调用点现场最贴切的指引)→ ``ctx[&quot;hint&quot;]``(调用点自查提示)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>          → ``spec.advice``(错误码表的&quot;处置&quot;列)。</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        此前恒用 ``spec.advice``,而该列是**运维处置话术**(如 TLB-802 的</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        &quot;tool.error 回喂 LLM 自查,不静默&quot;),对模型毫无可行动性,且把调用点已经</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        写好的正确指引(如&quot;目录不存在…先 list_dir 父目录侦查&quot;)整条丢弃 ——</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        实测:``fs.list_dir`` 读不存在目录时 LLM 收到的是那句运维话术。</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        advice = str(self.ctx.get(&quot;advice&quot;) or self.ctx.get(&quot;hint&quot;)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>                     or self.spec.advice)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        msg = f&quot;错误[{self.code}]:{self.message}。建议:{advice}&quot;</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        tip = self.ctx.get(&quot;detail&quot;) or self.ctx.get(&quot;hint&quot;)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        if tip and str(tip) != advice:               # 已作建议的不重复进明细</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>            msg += f&quot;明细:{str(tip)[:200]}&quot;</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        return msg[:2000]</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code></code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    def to_user_message(self) -&gt; str:</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        &quot;&quot;&quot;给用户/远端:只含 code+advice,绝不吐 ctx 明细。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        return f&quot;{self.code}:{self.spec.advice}&quot;</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code></code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code></code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code># ------------------------------------------------------------ 域错误类族</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>class EventError(PyHError): ...        # EVT-1xx 事件域</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>class BusError(PyHError): ...          # BUS-0xx 总线/注册表/生命周期</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>class PersistenceError(PyHError): ...  # PERS-2xx JSONL 真源</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>class LLMError(PyHError): ...          # LLM-3xx 模型域</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>class GuardError(PyHError): ...        # GRD-4xx 单调链</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>class ApprovalError(PyHError): ...     # APR-5xx 审批流</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>class ConfigError(PyHError): ...       # CFG-6xx 配置</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>class CredentialError(PyHError): ...   # CRED-7xx 凭据</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>class ToolError(PyHError): ...         # TLB-8xx 工具管道</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>class CycleError(PyHError): ...        # CYC-9xx 主循环/兜底</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code></code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code># 语义别名(供调用点可读;raise_code 仍是唯一造错口)</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>UnknownCode = CycleError</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code></code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code># 错误码域前缀 → 域异常类映射(raise_code 按码域抛对应类,支持 isinstance 归类)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>_DOMAIN_CLASSES = {</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    &quot;EVT&quot;: EventError, &quot;BUS&quot;: BusError, &quot;PERS&quot;: PersistenceError,</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    &quot;LLM&quot;: LLMError, &quot;GRD&quot;: GuardError, &quot;APR&quot;: ApprovalError,</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    &quot;CFG&quot;: ConfigError, &quot;CRED&quot;: CredentialError, &quot;TLB&quot;: ToolError,</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    &quot;CYC&quot;: CycleError,</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>}</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code></code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code></code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code># ------------------------------------------------------------- 工具函数</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>def struct_error(code: str, **kv: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>    &quot;&quot;&quot;日志单行结构化:含 code/name/retryable + 调用点补充字段。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    spec = ERRORS.get(code) or ERRORS.get(</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        &quot;CYC-999&quot;, ErrorSpec(&quot;CYC-999&quot;, &quot;未知内部错误&quot;, &quot;查日志归因&quot;))</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>    return {&quot;code&quot;: code, &quot;name&quot;: spec.name, &quot;retryable&quot;: spec.retryable, **kv}</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code></code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code></code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>def wrap_unexpected(e: Exception, module: str) -&gt; PyHError:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>    &quot;&quot;&quot;非 PyHError 未预期异常兜底:归 CYC-999;堆栈仅本地 debug。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>    log.debug(&quot;unexpected error in %s:\n%s&quot;, module, traceback.format_exc())</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    return PyHError(&quot;CYC-999&quot;, ctx={&quot;module&quot;: module,</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                                    &quot;cause&quot;: e, &quot;type&quot;: type(e).__name__})</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code></code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code># import 时全量入册(幂等:重复 import 不重复登记)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>register_default_codes()</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

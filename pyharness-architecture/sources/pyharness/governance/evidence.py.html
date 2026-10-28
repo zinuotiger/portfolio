@@ -1,0 +1,337 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/governance/evidence.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/governance/evidence.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 337 行</span></nav><main class="wrap source-page"><h1>pyharness/governance/evidence.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：268fe8e6e6cb3d99153b9a6e072ec7844246b3a4<br>SHA-256（内容校验）：95db412677a7f6b42fec5988a8a189fa5b4ed7c624d1af129a898c9645533f29</p><p><a href="../../../architecture-detailed.html?node=evidence">Governance Evidence（治理证据引用归档）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 16 个类、函数与方法</summary><ul><li><a href="#L45">_utc_now（函数） · L45–L46</a></li><li><a href="#L49">EvidenceRef（类） · L49–L63</a></li><li><a href="#L66">Evidence（类） · L66–L86</a><ul><li><a href="#L81">Evidence.to_payload（方法） · L81–L86</a></li></ul></li><li><a href="#L89">_coerce_refs（函数） · L89–L102</a></li><li><a href="#L105">EvidenceCollector（类） · L105–L331</a><ul><li><a href="#L112">EvidenceCollector.__init__（方法） · L112–L124</a></li><li><a href="#L127">EvidenceCollector._resolve（方法） · L127–L156</a></li><li><a href="#L159">EvidenceCollector.archive（异步方法） · L159–L201</a></li><li><a href="#L204">EvidenceCollector.on_event（异步方法） · L204–L244</a></li><li><a href="#L246">EvidenceCollector.from_log（异步方法） · L246–L252</a></li><li><a href="#L254">EvidenceCollector._evidence_of（方法） · L254–L268</a></li><li><a href="#L270">EvidenceCollector._task_at（方法） · L270–L292</a></li><li><a href="#L294">EvidenceCollector._tasks_of（方法） · L294–L314</a></li><li><a href="#L316">EvidenceCollector.collect_for_task（方法） · L316–L327</a></li><li><a href="#L329">EvidenceCollector.evidence_count（方法） · L329–L331</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/governance/evidence.py — 证据工件与归档入口(S5-1)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>一句话职责:把「支持某个 claim 的**引用集合** + 脱敏摘要」升格为一等对象,并以</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>``evidence.archived`` 事件留痕。**核心纪律(INV-G4 / INV-E1):只存引用,绝不复制</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>事件内容** —— 事件日志仍是唯一真源,Evidence 只是**索引**。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>依赖方向(ADR-018:308,强制):本模块只 import 标准库、``pyharness.errors`` 与本包;</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>**禁止** ``pyharness.core.*`` / ``engine`` / ``bus`` / ``persistence``。会话经</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>``ctx.session``/构造注入**鸭子类型**只读使用(与 ``receipt.py`` 同型)。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>**边界**:</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>- **S5-1**:数据契约 + ``archive()``(唯一写点)。</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>- **S5-2a**:``on_event()``(**只读**索引) + ``from_log()``(日志重建) +</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>  ``collect_for_task()``(段锚聚合)——**索引只是派生缓存,可由事件日志完全重建**</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>  (``from_log``),**不是事实源**(INV-E3);``on_event`` 体内**零 ``append``**。</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>  订阅面 5 类:``evidence.archived`` / ``segment.start`` / ``segment.end`` /</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>  ``decision.issued`` / ``receipt.emitted``;**不订阅** ``tool.result``(属工具执行</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>  因果关系,由 S5-3 Audit 承担)。</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>- **S5-2b**:``engine`` 装配 + 订阅 + 注入 ``GovernanceContext.evidence``。</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>- **S7**:``TraceabilityMatrix``。</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>INV-E2(引用可解析):``archive()`` 在发射前校验每条 ``EvidenceRef.locator`` 指向</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>**真实存在**的真源锚(seq / decision_id / receipt_id / segment);不可解析则</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>``CYC-999`` fail-closed。``kind=&quot;test&quot;`` 是**外部**引用(测试路径),不做运行时校验。</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>from dataclasses import dataclass</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>from typing import Any, Callable, Iterable, Optional</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>from uuid import uuid4</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>from pyharness.governance.receipt import _read_events</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code># 引用种类(冻结设计 §3.5)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>REF_KINDS: tuple[str, ...] = (&quot;seq&quot;, &quot;decision_id&quot;, &quot;receipt_id&quot;, &quot;segment&quot;, &quot;test&quot;)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code># 需要**运行时存在性校验**的种类(&quot;test&quot; 是外部引用,不校验)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>_RESOLVABLE_KINDS: tuple[str, ...] = (&quot;seq&quot;, &quot;decision_id&quot;, &quot;receipt_id&quot;, &quot;segment&quot;)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>EVENT_EVIDENCE_ARCHIVED = &quot;evidence.archived&quot;</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>def _utc_now() -&gt; str:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    return datetime.now(timezone.utc).isoformat()</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>class EvidenceRef:</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    &quot;&quot;&quot;指向**真源**的引用(不复制内容)。</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code></code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    locator 约定:</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    - ``seq``          → ``&quot;&lt;session_id&gt;:&lt;seq&gt;&quot;``(Envelope.seq)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    - ``decision_id``  → ``&quot;&lt;decision_id&gt;&quot;``(decision.issued 主键)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    - ``receipt_id``   → ``&quot;&lt;receipt_id&gt;&quot;``(receipt.emitted 主键)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    - ``segment``      → ``&quot;&lt;task_id&gt;:seg&quot;``(segment.start 的 task_id)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    - ``test``         → ``&quot;tests/…::test_x&quot;``(**外部**引用,不做运行时校验)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    kind: str</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    locator: str</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code></code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>class Evidence:</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    &quot;&quot;&quot;★ 证据工件:支持某个 ``claim`` 的**引用集合** + 脱敏摘要(INV-G4)。</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    ``artifact_path`` 仅为**可选外部附件**引用——**不承载治理事实**、不得作为</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    任何治理判定的输入(见模块纪律)。</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    evidence_id: str</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    claim: str</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    refs: tuple[EvidenceRef, ...]</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    summary: str</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    artifact_path: Optional[str]</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    ts: str</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    def to_payload(self) -&gt; dict:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        &quot;&quot;&quot;持久化形态(冻结 4 字段;``refs`` 内层仍为 ``{kind, locator}``)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        return {&quot;evidence_id&quot;: self.evidence_id, &quot;claim&quot;: self.claim,</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                &quot;refs&quot;: [{&quot;kind&quot;: r.kind, &quot;locator&quot;: r.locator}</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                         for r in self.refs],</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                &quot;artifact_path&quot;: self.artifact_path}</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>def _coerce_refs(refs: Iterable[Any]) -&gt; tuple[EvidenceRef, ...]:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    &quot;&quot;&quot;规范化引用集合:接受 ``EvidenceRef`` 或 ``{&quot;kind&quot;,&quot;locator&quot;}`` 字典。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    out: list[EvidenceRef] = []</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    for r in refs or ():</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        if isinstance(r, EvidenceRef):</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            out.append(r)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        elif isinstance(r, dict) and set(r) == {&quot;kind&quot;, &quot;locator&quot;}:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            out.append(EvidenceRef(kind=str(r[&quot;kind&quot;]),</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                                   locator=str(r[&quot;locator&quot;])))</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        else:</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            raise_code(&quot;CYC-999&quot;, module=&quot;governance.evidence&quot;, field=&quot;refs&quot;,</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                       why=&quot;引用必须是 EvidenceRef 或 {kind, locator} 字典&quot;,</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                       got=type(r).__name__)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    return tuple(out)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>class EvidenceCollector:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    &quot;&quot;&quot;证据归档入口(S5-1)。</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    当前只提供 **``archive()``(唯一写点)**;``on_event`` / ``collect_for_task``</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    属 S5-2,``TraceabilityMatrix`` 属 S7。</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code></code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    def __init__(self, *, session: Any = None,</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                 id_factory: Optional[Callable[[], str]] = None,</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                 clock: Optional[Callable[[], str]] = None) -&gt; None:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        self._session = session</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        self._id_factory = id_factory or (lambda: uuid4().hex)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        self._clock = clock or _utc_now</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        # ---- 派生缓存(S5-2a):**可由事件日志完全重建**,非事实源(INV-E3) ----</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        # ① 证据索引:evidence_id → (事件 seq, Evidence)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        self._evidence: dict[str, tuple[int, Evidence]] = {}</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        # ② 段索引:task_id → [start_seq, end_seq](end 未闭合时为 None)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        self._segments: dict[str, list[Optional[int]]] = {}</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        # ③ 锚 seq:decision_id / receipt_id → 其事件 seq(用于把引用解析到段)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        self._anchor_seq: dict[str, int] = {}</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code></code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    # ------------------------------------------------------------ 校验</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    def _resolve(session: Any, ref: EvidenceRef) -&gt; bool:</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        &quot;&quot;&quot;INV-E2:该引用能否指向**真实存在**的真源锚(只读,不写)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        if ref.kind == &quot;test&quot;:</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            return True                              # 外部引用:不做运行时校验</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        events = _read_events(session)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        if ref.kind == &quot;seq&quot;:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            tail = ref.locator.rsplit(&quot;:&quot;, 1)[-1]</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            try:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                want = int(tail)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            except ValueError:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                return False</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            return any(int(getattr(e, &quot;seq&quot;, -1)) == want for e in events)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        if ref.kind == &quot;decision_id&quot;:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            return any(getattr(e, &quot;type&quot;, None) == &quot;decision.issued&quot;</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                       and str((getattr(e, &quot;payload&quot;, None) or {})</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                               .get(&quot;decision_id&quot;) or &quot;&quot;) == ref.locator</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                       for e in events)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        if ref.kind == &quot;receipt_id&quot;:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            return any(getattr(e, &quot;type&quot;, None) == &quot;receipt.emitted&quot;</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                       and str((getattr(e, &quot;payload&quot;, None) or {})</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                               .get(&quot;receipt_id&quot;) or &quot;&quot;) == ref.locator</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                       for e in events)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        if ref.kind == &quot;segment&quot;:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>            task = ref.locator.rsplit(&quot;:&quot;, 1)[0]</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            return any(getattr(e, &quot;type&quot;, None) == &quot;segment.start&quot;</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>                       and str((getattr(e, &quot;payload&quot;, None) or {})</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                               .get(&quot;task_id&quot;) or &quot;&quot;) == task</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                       for e in events)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        return False</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code></code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    # ------------------------------------------------------------ 归档</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    async def archive(self, claim: str, refs: Iterable[Any], *,</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>                      ctx: Any = None, summary: str = &quot;&quot;,</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>                      artifact_path: Optional[str] = None) -&gt; Optional[Evidence]:</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        &quot;&quot;&quot;归档一条证据 → ``append(&quot;evidence.archived&quot;)``(**本模块唯一写点**)。</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code></code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        - ``ctx`` 省略时用构造期注入的 ``session``;</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        - 无会话(纯内存/单测)⇒ 返回 ``None``(降级,不发射);</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        - 引用不可解析(INV-E2)⇒ ``CYC-999`` **fail-closed**;</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        - 事件为**普通攒批**(非强同步)——丢失可由既有事件**再派生**(INV-E3)。</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        if not isinstance(claim, str) or not claim:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>            raise_code(&quot;CYC-999&quot;, module=&quot;governance.evidence&quot;, field=&quot;claim&quot;,</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                       why=&quot;claim 必须为非空字符串&quot;)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        norm = _coerce_refs(refs)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        for r in norm:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            if r.kind not in REF_KINDS:</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                raise_code(&quot;CYC-999&quot;, module=&quot;governance.evidence&quot;,</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                           field=&quot;refs.kind&quot;, got=str(r.kind),</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                           why=f&quot;引用种类必须是 {REF_KINDS} 之一&quot;)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            if not isinstance(r.locator, str) or not r.locator:</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                raise_code(&quot;CYC-999&quot;, module=&quot;governance.evidence&quot;,</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                           field=&quot;refs.locator&quot;, why=&quot;locator 必须为非空字符串&quot;)</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        sess = getattr(ctx, &quot;session&quot;, None) if ctx is not None else self._session</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        if sess is None:</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>            return None                              # 未接线:降级不发射</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        for r in norm:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>            if r.kind in _RESOLVABLE_KINDS and not self._resolve(sess, r):</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                raise_code(&quot;CYC-999&quot;, module=&quot;governance.evidence&quot;,</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                           field=&quot;refs.locator&quot;, kind=r.kind,</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                           locator=r.locator,</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                           why=&quot;引用不可解析(INV-E2):locator 未指向真实存在的真源锚&quot;)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        evidence_id = self._id_factory()</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        ts = self._clock()</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        payload = {&quot;evidence_id&quot;: evidence_id, &quot;claim&quot;: claim,</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                   &quot;refs&quot;: [{&quot;kind&quot;: r.kind, &quot;locator&quot;: r.locator}</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                            for r in norm],</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                   &quot;artifact_path&quot;: artifact_path}</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        r = sess.append(EVENT_EVIDENCE_ARCHIVED, payload, actor=&quot;system&quot;,</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>                        trace=None)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        if hasattr(r, &quot;__await__&quot;):</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            r = await r</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        return Evidence(evidence_id=evidence_id, claim=claim, refs=norm,</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                        summary=summary, artifact_path=artifact_path, ts=ts)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code></code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    # ------------------------------------------------------------ 只读索引</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>    async def on_event(self, env: Any) -&gt; None:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        &quot;&quot;&quot;**只读**消费一条事件,更新派生索引(S5-2a)。</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code></code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        约束:① 只消费不产生——**本方法体内零 ``append``**;② 索引仅是缓存,</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        可由日志 replay 完全重建(``from_log``);③ 未知类型静默忽略;④ 畸形</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        事件不得抛穿(总线的 EVT-103 隔离之外,**此处亦不抛**)。</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        订阅面(5 类):``evidence.archived``(证据索引) · ``segment.start`` /</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        ``segment.end``(段范围) · ``decision.issued`` / ``receipt.emitted``</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        (锚 → seq,用于把引用解析到段)。</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        **不订阅** ``tool.result``(属工具执行因果关系,由 S5-3 Audit 承担)。</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        try:</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            t = getattr(env, &quot;type&quot;, None)</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>            p = getattr(env, &quot;payload&quot;, None) or {}</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>            seq = int(getattr(env, &quot;seq&quot;, 0) or 0)</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>            if t == EVENT_EVIDENCE_ARCHIVED:</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>                ev = self._evidence_of(p, seq)</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>                if ev is not None:</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>                    self._evidence[ev.evidence_id] = (seq, ev)</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            elif t == &quot;segment.start&quot;:</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>                task = str(p.get(&quot;task_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                if task:</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                    self._segments.setdefault(task, [seq, None])[0] = seq</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>            elif t == &quot;segment.end&quot;:</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                task = str(p.get(&quot;task_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                if task:</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                    st = int(p.get(&quot;start_seq&quot;) or 0) or seq</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                    self._segments.setdefault(task, [st, None])</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                    self._segments[task][0] = st</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>                    self._segments[task][1] = seq      # 闭区间右端 = end 事件 seq</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>            elif t == &quot;decision.issued&quot;:</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>                did = str(p.get(&quot;decision_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>                if did:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>                    self._anchor_seq[f&quot;decision_id:{did}&quot;] = seq</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>            elif t == &quot;receipt.emitted&quot;:</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                rid = str(p.get(&quot;receipt_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                if rid:</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>                    self._anchor_seq[f&quot;receipt_id:{rid}&quot;] = seq</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        except Exception:                            # noqa: BLE001 只读索引:绝不抛穿</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            return</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code></code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>    @classmethod</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>    async def from_log(cls, session: Any, **kw: Any) -&gt; &quot;EvidenceCollector&quot;:</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        &quot;&quot;&quot;**由事件日志重建** collector(INV-E3:索引可完全再派生)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        col = cls(session=session, **kw)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        for env in _read_events(session):</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>            await col.on_event(env)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        return col</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code></code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>    def _evidence_of(p: Any, seq: int) -&gt; Optional[Evidence]:</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        &quot;&quot;&quot;由 ``evidence.archived`` 载荷重建 ``Evidence``(只读;载荷非法 → None)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        if not isinstance(p, dict):</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            return None</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        try:</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>            refs = _coerce_refs(p.get(&quot;refs&quot;) or ())</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        except Exception:                            # noqa: BLE001 载荷非法:跳过</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>            return None</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        eid = str(p.get(&quot;evidence_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        if not eid:</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>            return None</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        return Evidence(evidence_id=eid, claim=str(p.get(&quot;claim&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>                        refs=refs, summary=&quot;&quot;,</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>                        artifact_path=p.get(&quot;artifact_path&quot;), ts=&quot;&quot;)</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code></code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>    def _task_at(self, seq: int) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        &quot;&quot;&quot;该事件 seq 落在哪个段内(闭区间;未闭合段**不得**向右无限延伸)。</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code></code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        段在时间轴上互不重叠且按 seq 递增开合,故判据 = **起点 ≤ seq 的最近一段**</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        (未闭合段的右界由此天然止于下一段起点之前)。</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code></code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        2026-09-21 R14-10:此前把未闭合段(崩溃现场:进程被杀 → ``_run_task`` 的</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        ``finally`` 未执行 → 无 ``segment.end``)的右界当作**无穷**,又按插入序遍历</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        ``_segments`` ⇒ 该段**吞掉其后所有任务的证据**(实测:未闭合的 taskA 之后,</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        taskB 的证据被算到 taskA 上,``collect_for_task(&quot;taskB&quot;)`` 返回空)。属**恢复</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        一致性**缺陷:崩溃重启后证据按任务查错。</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        best_task: Optional[str] = None</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        best_start = -1</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        for task, (s, e) in self._segments.items():</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            if s is None:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                continue</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>            s = int(s)</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            if s &gt; seq or (e is not None and seq &gt; int(e)):</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                continue</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>            if s &gt; best_start:                       # 起点最近者胜(段不重叠)</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                best_task, best_start = task, s</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>        return best_task</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code></code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>    def _tasks_of(self, ev: Evidence) -&gt; set[str]:</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        &quot;&quot;&quot;该证据归属的 task 集合(按引用解析;无法解析的引用被忽略)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        out: set[str] = set()</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        for r in ev.refs:</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>            if r.kind == &quot;segment&quot;:</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                task = r.locator.rsplit(&quot;:&quot;, 1)[0]</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                if task:</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>                    out.add(task)</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                continue</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>            if r.kind == &quot;seq&quot;:</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>                tail = r.locator.rsplit(&quot;:&quot;, 1)[-1]</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>                try:</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                    t = self._task_at(int(tail))</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>                except ValueError:</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>                    t = None</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            else:                                    # decision_id / receipt_id</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>                anchor = self._anchor_seq.get(f&quot;{r.kind}:{r.locator}&quot;)</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>                t = self._task_at(anchor) if anchor else None</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>            if t:</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>                out.add(t)</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>        return out</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code></code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>    def collect_for_task(self, task_id: str) -&gt; tuple[Evidence, ...]:</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        &quot;&quot;&quot;按**段锚**聚合该任务的证据(S5-2a)。</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code></code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        来源**只有** ``evidence.archived`` 事件(D-1(a));返回按事件 seq 升序的</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        不可变元组;未知/空 ``task_id`` 或无线索 ⇒ ``()``(**不抛**)。</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        if not task_id:</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>            return ()</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        hits = [(seq, ev) for seq, ev in self._evidence.values()</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>                if task_id in self._tasks_of(ev)]</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        hits.sort(key=lambda it: it[0])</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        return tuple(ev for _seq, ev in hits)</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code></code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>    def evidence_count(self) -&gt; int:</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        &quot;&quot;&quot;当前索引内的证据条数(只读;供测试/自检)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>        return len(self._evidence)</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code></code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code></code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>__all__ = [</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>    &quot;REF_KINDS&quot;, &quot;EVENT_EVIDENCE_ARCHIVED&quot;, &quot;EvidenceRef&quot;, &quot;Evidence&quot;,</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>    &quot;EvidenceCollector&quot;,</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

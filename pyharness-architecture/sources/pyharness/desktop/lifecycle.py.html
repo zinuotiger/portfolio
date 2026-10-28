@@ -1,0 +1,106 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/desktop/lifecycle.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/desktop/lifecycle.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 106 行</span></nav><main class="wrap source-page"><h1>pyharness/desktop/lifecycle.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：0c5aafee66029011f592cda3a91ad766c4b6471d<br>SHA-256（内容校验）：702fb6e27220d248396ca11eb0c208b14d3bad8c2c78ea450e5437942445099e</p><p><a href="../../../architecture-detailed.html?node=desktop_lifecycle">Desktop Lifecycle Owner（桌面生命周期管理）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 5 个类、函数与方法</summary><ul><li><a href="#L11">DesktopLifecycle（类） · L11–L105</a><ul><li><a href="#L14">DesktopLifecycle.shutdown_gracefully（方法） · L14–L53</a></li><li><a href="#L55">DesktopLifecycle._shutdown_async（异步方法） · L55–L78</a></li><li><a href="#L80">DesktopLifecycle._flush_persistence_async（异步方法） · L80–L94</a></li><li><a href="#L96">DesktopLifecycle._destroy_webview（方法） · L96–L105</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;DesktopLifecycle operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from typing import TYPE_CHECKING</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import asyncio</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import threading</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from .sessions import _await</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.desktop.host_policy import log</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>if TYPE_CHECKING:  # 仅注解引用(app↔bridge 环形依赖,运行时不需要)</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    pass</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>class DesktopLifecycle:</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    &quot;&quot;&quot;DesktopLifecycle responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    def shutdown_gracefully(self) -&gt; None:</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        &quot;&quot;&quot;窗口关闭 = 优雅停服(F065 边界;幂等:双击关闭只走一次)。</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        序:stopping 置位 → 停事件 fan-out → hub 关闭(SSE 客户端收 close)→ 兜底 flush</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        (强同步事件已随 append 落盘)→ server.should_exit=True 停 uvicorn → webview.destroy。</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        幂等判据用 _graceful_done(伪码 `if stopping.is_set(): return` 会在 closing 事件</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        先置位时让首次 graceful 空转——伪码缺陷,以行为契约修正,见模块 docstring)。</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        if self._graceful_done:</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>            return</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        self._graceful_done = True</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        self.stopping.set()</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        loop = self.loop</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        if loop is not None and loop.is_running():</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>            try:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>                fut = asyncio.run_coroutine_threadsafe(self._shutdown_async(), loop)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>                fut.result(timeout=15)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            except Exception:                       # noqa: BLE001</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>                log.warning(&quot;desktop async shutdown failed&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        else:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            try:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                asyncio.get_running_loop()</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            except RuntimeError:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                asyncio.run(self._shutdown_async())</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            else:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>                # 已处于另一个事件循环(通常仅启动失败路径):用短线程隔离执行。</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                errors: list[BaseException] = []</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>                def _worker() -&gt; None:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>                    try:</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>                        asyncio.run(self._shutdown_async())</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>                    except BaseException as exc:    # noqa: BLE001</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                        errors.append(exc)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>                t = threading.Thread(target=_worker, name=&quot;desktop-shutdown&quot;, daemon=True)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>                t.start()</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>                t.join(timeout=15)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                if errors:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                    log.warning(&quot;desktop shutdown worker failed&quot;, exc_info=errors[0])</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        self._destroy_webview()</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    async def _shutdown_async(self) -&gt; None:</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        &quot;&quot;&quot;在 uvicorn 事件循环内完成 fan-out 摘除、刷盘和服务器退出信号。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        bus = getattr(self.ctx, &quot;bus&quot;, None)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        if bus is not None and self._sub:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            try:</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>                bus.unsubscribe_all(&quot;desktop&quot;)      # 停事件 fan-out</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            except Exception:                       # noqa: BLE001</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                log.warning(&quot;desktop shutdown unsubscribe failed&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        self._sub = None</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        self.hub.close_all()                        # SSE 客户端收 close,前端可重开</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        errors = []</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        try: await self._flush_persistence_async()</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        for service in self._service_registry.all():</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            try:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                await service.shutdown()</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            except BaseException as exc:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                errors.append(exc)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        if self.server is not None:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            try:</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                self.server.should_exit = True      # uvicorn 线程自然退出</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            except Exception:                       # noqa: BLE001</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                log.warning(&quot;desktop server stop signal failed&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        if errors: raise BaseExceptionGroup(&#x27;desktop cleanup failed&#x27;, errors)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    async def _flush_persistence_async(self) -&gt; None:</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        &quot;&quot;&quot;异步收尾:等待 flush 完成后才允许调用方关闭 store。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        persist = getattr(self.ctx, &quot;persistence&quot;, None)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        if persist is not None:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            flush_sync = getattr(persist, &quot;flush_sync&quot;, None)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            fn = flush_sync if callable(flush_sync) else getattr(persist, &quot;flush&quot;, None)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            if fn is not None:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                try:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                    await _await(fn())</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                except Exception:                       # noqa: BLE001 兜底失败不阻断退出</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                    log.warning(&quot;desktop 收尾 flush 失败&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        # This helper flushes only. ApplicationService owns writer shutdown.</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        surface = getattr(self, &#x27;_surface&#x27;, None)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        for store in list(getattr(surface, &#x27;_stores&#x27;, {}).values()):</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            await _await(store.flush())</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code></code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    def _destroy_webview() -&gt; None:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        &quot;&quot;&quot;webview.destroy 兜底(已销毁则忽略,本地异常不跨边界阻止进程退出)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        try:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            from .launcher import _load_webview</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            wv = _load_webview()</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            if wv is not None:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                wv.destroy()</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        except Exception:                           # noqa: BLE001</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>            log.debug(&quot;webview destroy skipped&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

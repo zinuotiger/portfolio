@@ -1,0 +1,94 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/writeback_previews.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/writeback_previews.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 94 行</span></nav><main class="wrap source-page"><h1>pyharness/application/writeback_previews.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：943fde0921b66967887ffbdeb4bc59f3c788a9ba<br>SHA-256（内容校验）：4453f6c2c789c5a3613440b5c8440f6c8917ade40fda4d2e4b2c98fc388557d0</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 6 个类、函数与方法</summary><ul><li><a href="#L13">preview_basis（函数） · L13–L16</a></li><li><a href="#L19">deleted_output（函数） · L19–L31</a></li><li><a href="#L34">preview_diff（函数） · L34–L42</a></li><li><a href="#L45">WritebackPreviews（类） · L45–L94</a><ul><li><a href="#L46">WritebackPreviews._wb_collect（方法） · L46–L94</a><ul><li><a href="#L51">WritebackPreviews._wb_collect.gate（方法） · L51–L54</a></li></ul></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Exact original baseline and selected delivery bytes; preview writes nothing.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import difflib</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import os</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import time</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.writeback_records import MergeFile,FixedValidation</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.writeback_merge import merge_bytes,validate_result,MERGE_VERSION,VALIDATOR_VERSION</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.writeback_io import observe_target,target_metadata</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.application.source_snapshot import LIMIT,check_content</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.errors import PyHError,raise_code</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>def preview_basis(project,actor,command,files):</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    return digest_of(canonical(dict(operation=&#x27;writeback.merge.preview&#x27;,project_id=project,actor=actor,</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        selection=command.model_dump(),files=files,merge_version=MERGE_VERSION,validator_version=VALIDATOR_VERSION)))</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>def deleted_output(service,execution,reference):</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    from pyharness.application.product_execution_sessions import read_execution_events</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    if reference.session_id!=execution[&#x27;execution_authorization&#x27;][&#x27;session_id&#x27;]:</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_deletion_requires_root_receipt&#x27;)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    events=read_execution_events(service._tenant_sessions_dir(),execution,service.tenant_id)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    changes=[(e,c) for e in events if e.type==&#x27;execution.effect&#x27; and e.payload[&#x27;phase&#x27;]==&#x27;returned&#x27;</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        and e.payload.get(&#x27;file_observation&#x27;)==&#x27;observed&#x27; for c in e.payload.get(&#x27;file_changes&#x27;) or [] if c[&#x27;path&#x27;]==reference.path]</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    if not changes:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;writeback_deletion_receipt_unavailable&#x27;)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    event,change=changes[-1]</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    if (event.seq!=reference.source_seq or event.actor!=&#x27;system&#x27; or digest_of(canonical(event.payload))!=reference.record_digest</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>            or change[&#x27;kind&#x27;]!=&#x27;deleted&#x27; or change[&#x27;after_sha256&#x27;] is not None):</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        raise_code(&#x27;EVT-101&#x27;,reason=&#x27;writeback_deletion_receipt_changed&#x27;)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>def preview_diff(current,merged):</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    a=(current or b&#x27;&#x27;).decode(&#x27;utf-8&#x27;).splitlines(keepends=True)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    b=(merged or b&#x27;&#x27;).decode(&#x27;utf-8&#x27;).splitlines(keepends=True)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    lines=[];length=0</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    for line in difflib.unified_diff(a,b,fromfile=&#x27;current-target&#x27;,tofile=&#x27;fixed-merged-result&#x27;,n=3):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        if len(lines)&gt;=80 or length+len(line)&gt;2048:</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>            lines.append(&#x27;\n[差异显示已截断；批准仍绑定完整字节摘要]\n&#x27;);break</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        lines.append(line);length+=len(line)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    return &#x27;&#x27;.join(lines)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>class WritebackPreviews:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    def _wb_collect(self,resources,project,command,actor,authorize,service,started):</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        from pyharness.application.delivery_outputs import output_bytes</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        grant,_,_,execution,wi=self._wb_current(resources,project,command,actor,authorize,service)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        root=Path(grant[&#x27;writeback_grant&#x27;][&#x27;canonical_root&#x27;]);blobs={};metadata=[];public=[];total=0</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        def gate():</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            if time.monotonic()-started&gt;=self.MAX_WORKSPACE_CAPTURE_SECONDS:raise_code(&#x27;EVT-104&#x27;,reason=&#x27;writeback_preview_time_limit&#x27;)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>            fresh,_,_=self._delivery_read_snapshot()</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            self._wb_current(fresh,project,command,actor,authorize,service)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        for selected in command.files:</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>            gate();base=None</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            if selected.input_path is not None:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                original=next(i for i in wi[&#x27;files&#x27;] if i[&#x27;path&#x27;]==selected.input_path)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                base=self._read_input_blob(original,gate)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            target,current=observe_target(root,selected.target_path,gate)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            if current is not None:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                try:check_content(current)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                except PyHError:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_target_content_rejected&#x27;)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            delivery=None</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            if selected.output_ref:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                gate();delivery=output_bytes(service,execution,selected.output_ref.model_dump());gate()</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            else:deleted_output(service,execution,selected.deletion_ref)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            merged=merge_bytes(base,current,delivery);raw=merged[&#x27;merged&#x27;]</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            validation=validate_result(selected.target_path,raw) if merged[&#x27;status&#x27;]==&#x27;mergeable&#x27; else dict(version=VALIDATOR_VERSION,status=&#x27;failed&#x27;,checks=[&#x27;conflict-blocker&#x27;],reason=&#x27;merge_conflict&#x27;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            before=digest_of(current) if current is not None else None;after=digest_of(raw) if raw is not None else None</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            action=&#x27;none&#x27; if before==after else &#x27;create&#x27; if current is None else &#x27;delete&#x27; if raw is None else &#x27;replace&#x27;</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            if merged[&#x27;status&#x27;]==&#x27;mergeable&#x27; and action!=&#x27;none&#x27; and action not in grant[&#x27;writeback_grant&#x27;][&#x27;selection&#x27;][&#x27;actions&#x27;]:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_action_not_granted&#x27;)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            item=MergeFile(target_path=selected.target_path,target=target_metadata(target) if target else None,base_digest=digest_of(base) if base is not None else None,</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                delivery_digest=digest_of(delivery) if delivery is not None else None,merged_digest=after,merged_size=len(raw) if raw is not None else 0,</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                action=action,validation=FixedValidation.model_validate(validation)).model_dump()</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            metadata.append(item)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            public.append(dict(item,status=merged[&#x27;status&#x27;],conflicts=merged[&#x27;conflicts&#x27;],</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                diff=preview_diff(current,raw) if merged[&#x27;status&#x27;]==&#x27;mergeable&#x27; and validation[&#x27;status&#x27;]==&#x27;passed&#x27; else None))</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            for value in (base,current,delivery,raw):</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                if value is not None:blobs[digest_of(value)]=value;total+=len(value)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            if total&gt;4*LIMIT:raise_code(&#x27;EVT-100&#x27;,reason=&#x27;writeback_merge_total_limit&#x27;)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        gate()</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        # Read every target again after all other target and source I/O. Saving</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        # the plan later repeats this observation; application locks them all.</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        for item in metadata:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            now,_=observe_target(root,item[&#x27;target_path&#x27;],gate)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            if (target_metadata(now) if now else None)!=item[&#x27;target&#x27;]:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;writeback_target_changed&#x27;)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        gate();status=&#x27;conflict&#x27; if any(f[&#x27;status&#x27;]==&#x27;conflict&#x27; for f in public) else &#x27;validation_failed&#x27; if any(f[&#x27;validation&#x27;][&#x27;status&#x27;]!=&#x27;passed&#x27; for f in public) else &#x27;mergeable&#x27;</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        result=dict(schema_version=1,project_id=project,status=status,files=public,confirmation_digest=preview_basis(project,actor,command,metadata),</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            merge_version=MERGE_VERSION,validator_version=VALIDATOR_VERSION,applicable=False,execution_authorized=False,</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            application_backend=&#x27;windows-exclusive-handles&#x27; if os.name==&#x27;nt&#x27; else &#x27;preview-and-explicit-export-only&#x27;)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        if len(canonical(result))&gt;self.MAX_CONTEXT_BYTES:raise_code(&#x27;EVT-100&#x27;,reason=&#x27;writeback_preview_limit&#x27;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        return result,metadata,blobs</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

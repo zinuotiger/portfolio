@@ -1,0 +1,88 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/message_edit.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/message_edit.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 88 行</span></nav><main class="wrap source-page"><h1>pyharness/core/message_edit.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：52adfaf13413375f21300ca8f3dc4938023092f7<br>SHA-256（内容校验）：bb62bb930860f272bf6d0465660c3f94d7d5f3e7abc1281e87c6e2129fef1ba3</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 4 个类、函数与方法</summary><ul><li><a href="#L19">_edit_window_s（函数） · L19–L35</a></li><li><a href="#L38">_age_s（函数） · L38–L49</a></li><li><a href="#L52">edit_user_message（异步函数） · L52–L77</a></li><li><a href="#L80">last_user_message（函数） · L80–L85</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/message_edit.py — 消息编辑/重发出口(F063,#13)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>SessionLog 公开方法面被 INV-01 钉死(append-only 只读派生 + append),故编辑</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>语义以本模块承载:经公开 append/get 追加 user.message_edited(投影 _fold_history</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>自动取新版留旧痕),不新增 SessionLog 方法面——INV-01 铁律不受触碰。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code># EDT-001 = ERR.md §2.11 功能特性码(errors.py 故意不登记)⇒ 必须**直接构造**</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code># 保住字面码;用 raise_code 会被静默改写为 CYC-999(见 R19)。</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>EDIT_WINDOW_CODE = &quot;EDT-001&quot;</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>def _edit_window_s(session: Any) -&gt; int:</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    &quot;&quot;&quot;编辑窗秒数(功能键 `loop.message_edit_window_s`;取不到 → L1 默认 1800)。</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    R24:该键此前**零读取者**(L-20 死配置)⇒ 文档承诺的 `EDT-001`「编辑超 30 分钟</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    窗拒写」在实现里**根本不存在**。现接到唯一编辑入口。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    from pyharness.config import DEFAULTS</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    default = int(DEFAULTS[&quot;loop&quot;][&quot;message_edit_window_s&quot;])</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    for holder in (getattr(session, &quot;_cfg&quot;, None),</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>                   getattr(session, &quot;settings&quot;, None),</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>                   getattr(session, &quot;ctx&quot;, None)):</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        loop = getattr(holder, &quot;loop&quot;, None) if holder is not None else None</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        win = getattr(loop, &quot;message_edit_window_s&quot;, None)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        if win is not None:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            return int(win)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    return default</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>def _age_s(ts: Any) -&gt; Optional[float]:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    &quot;&quot;&quot;事件 ts(UTC ISO 毫秒 Z)距今秒数;不可解析 → None(不拦,如实降级)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    raw = str(ts or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    if not raw:</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        return None</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    try:</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        when = datetime.fromisoformat(raw.replace(&quot;Z&quot;, &quot;+00:00&quot;))</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    except ValueError:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        return None</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    if when.tzinfo is None:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        when = when.replace(tzinfo=timezone.utc)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    return (datetime.now(timezone.utc) - when).total_seconds()</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code></code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>async def edit_user_message(session: Any, target_seq: int,</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                            new_content: str) -&gt; Any:</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    &quot;&quot;&quot;修正一条 user.message(编辑):追加 edited 事件,强同步落盘。</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    target 必须是已落盘 user.message(EVT-101);空内容 EVT-100;**超出编辑窗</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    `loop.message_edit_window_s`(默认 1800s)→ `EDT-001` 拒写**(R24 接线;此前该</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    窗只有文档承诺、实现缺失)。原文仍在日志(append-only),审计可重建。</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    if not str(new_content or &quot;&quot;).strip():</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        raise_code(&quot;EVT-100&quot;, field=&quot;new_content&quot;, hint=&quot;修正内容不能为空&quot;)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    ev = session.get(int(target_seq))</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    if ev is None or ev.type != &quot;user.message&quot;:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        raise_code(&quot;EVT-101&quot;, seq=int(target_seq),</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                   hint=&quot;目标不是可编辑的 user.message&quot;</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                        &quot;(编辑面=用户消息;投影修正由 _fold_history 应用)&quot;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    window = _edit_window_s(session)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    age = _age_s(getattr(ev, &quot;ts&quot;, None))</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    if window &gt; 0 and age is not None and age &gt; window:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        raise PyHError(EDIT_WINDOW_CODE, ctx={</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            &quot;seq&quot;: int(target_seq), &quot;age_s&quot;: round(age, 3), &quot;window_s&quot;: window,</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            &quot;advice&quot;: f&quot;超过编辑窗 {window}s(loop.message_edit_window_s);&quot;</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                      &quot;如需改历史请新发一条用户消息&quot;})</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    return await session.append(&quot;user.message_edited&quot;,</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                                {&quot;target_seq&quot;: int(target_seq),</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                                 &quot;new_content&quot;: str(new_content)},</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                                actor=&quot;user&quot;, sync=True)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code></code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>def last_user_message(session: Any) -&gt; Optional[dict]:</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    &quot;&quot;&quot;最近一条 user.message 摘要(重发用;只读,无状态)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    for ev in reversed(list(session.events_after(0))):</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        if ev.type == &quot;user.message&quot;:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            return {&quot;seq&quot;: ev.seq, &quot;content&quot;: ev.payload.get(&quot;content&quot;, &quot;&quot;)}</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    return None</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code></code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>__all__ = [&quot;edit_user_message&quot;, &quot;last_user_message&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

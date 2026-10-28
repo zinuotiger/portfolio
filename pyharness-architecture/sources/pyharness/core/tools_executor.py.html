@@ -1,0 +1,570 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/tools_executor.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/tools_executor.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 570 行</span></nav><main class="wrap source-page"><h1>pyharness/core/tools_executor.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：8c6209cd12284314b0b397ec16f27144d77dc142<br>SHA-256（内容校验）：6040252a4e90ac50257240d77dbedb807978519f4333643917078742ff34a566</p><p><a href="../../../architecture-detailed.html?node=tools_executor">Tool Executor（工具执行管道）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 25 个类、函数与方法</summary><ul><li><a href="#L146">_authorize_governance（异步函数） · L146–L148</a></li><li><a href="#L151">ToolExecutor（类） · L151–L555</a><ul><li><a href="#L168">ToolExecutor.__init__（方法） · L168–L180</a></li><li><a href="#L183">ToolExecutor.register（方法） · L183–L185</a></li><li><a href="#L187">ToolExecutor.register_definition（方法） · L187–L189</a></li><li><a href="#L191">ToolExecutor.unregister_definition（方法） · L191–L193</a></li><li><a href="#L195">ToolExecutor.unregister（方法） · L195–L197</a></li><li><a href="#L199">ToolExecutor.schemas_for（方法） · L199–L204</a></li><li><a href="#L207">ToolExecutor.reset_turn_failures（方法） · L207–L209</a></li><li><a href="#L211">ToolExecutor.mark_turn_failure（方法） · L211–L216</a></li><li><a href="#L218">ToolExecutor._check_fail_streak（方法） · L218–L223</a></li><li><a href="#L225">ToolExecutor.rejected_ids（方法） · L225–L227</a></li><li><a href="#L230">ToolExecutor.parse_tool_call（方法） · L230–L263</a></li><li><a href="#L265">ToolExecutor._attempted_name（方法） · L265–L275</a></li><li><a href="#L277">ToolExecutor._parse_fail_message（方法） · L277–L281</a></li><li><a href="#L284">ToolExecutor.execute_tool_calls（异步方法） · L284–L315</a></li><li><a href="#L318">ToolExecutor._trace（方法） · L318–L322</a></li><li><a href="#L324">ToolExecutor._append（异步方法） · L324–L333</a></li><li><a href="#L336">ToolExecutor.execute（异步方法） · L336–L454</a></li><li><a href="#L457">ToolExecutor._coerce_call（方法） · L457–L474</a></li><li><a href="#L476">ToolExecutor._require_wiring（方法） · L476–L495</a></li><li><a href="#L511">ToolExecutor._on_error（异步方法） · L511–L536</a></li><li><a href="#L538">ToolExecutor._provider_handle（方法） · L538–L548</a></li><li><a href="#L550">ToolExecutor._authorize_governance（异步方法） · L550–L551</a></li><li><a href="#L553">ToolExecutor._new_provider_pool（方法） · L553–L555</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/tools_executor.py — 工具执行管道总闸(四关强制)(specs/tools_executor.py.md 契约)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F022(调用解析回填)· F026(先验后跑)· F014/F015(guard/审批编排)·</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>F017(超时)· F025(取消)· F039(结果 spill)联动。</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>权威口径:specs/tools_executor.py.md(编码契约)+ DIS-CORE §7.3.2(执行管道伪代码)</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>+ EVENT-SCHEMA §3.4(事件字段级);冲突以 PRD-Core 为准。本文件是 tools 脊柱三文件</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>之一,为统一 Consumer(DIS-SEAM §2.3):消费 tools_registry(契约/模型/Provider)与</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>tools_guard(链),一切工具调用必经 execute——无旁路(INV-04)。</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>四关强制(顺序不可换,DIS-CORE §7.3.2):</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>  关1 契约校验(lookup,TLB-802)+ 参数 pydantic 先验后跑(validate_args,TLB-803,</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>      失败 = Provider 零调用,INV-06)→ 落 tool.call(args+raw_args 双份存档)</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>  关2 scope 前置(GRD-401)→ guard 单调链 evaluate(F014;reject 终局零副作用,</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>      guard.rejected 强同步)→ 审批(F015,granted 重入链起点,GRD-403 语义)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>  关3 Provider 执行(同步 handler 经**每次调用独立**单工线程池承载;总超时 =</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>      defn.timeout_s or 60s(TLB-805,TLB-805 码即默认超时参数锚);wait_for 掐断;</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>      超时/取消后该线程池被驱逐不复用(线程后台跑完,见偏离 13);</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>      CancelledError 不吞——已发生副作用如实写 partial 后 re-raise(F025))</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>  关4 结果检查 finalize(输出 schema 校验 → 超长转 spill(F039)→ ≤2KB 摘要 →</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>      tool.result;每调用恰一条 result 或 error,trace.parent_seq 关联父响应)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>安全铁律:TLB-803 参数失败=真实函数零调用(INV-06);guard reject=零副作用</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>(INV-05);审批 denied/timeout=不执行;GRD-402 防重放(已裁决拒绝的 call_id 再执行</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>尝试 → 拒绝上抛);错误全走 raise_code;失败写 tool.error 回喂 LLM 不中断循环。</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>偏离说明(契约=spec;以下为与既有实现/落地事件模型的冲突取舍,均列理由):</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>1. tool.call 事件 trace 键用 parent_seq(agent_loop.py 同款 repo 惯例,EVENT-SCHEMA</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   §2.4 建议形态 {&quot;parent_seq&quot;: int});spec 伪码的 trace={&quot;parent&quot;: …} 键名弃用。</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   actor 恒 &quot;tool&quot;(spec 伪码;EVENT-SCHEMA §3.4.1 表注 agent 为 F022 语义归属,</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   以本模块伪码为准)。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>2. TLB-802/803(关1)失败在 execute() 内部即转 tool.error + ExecResult——spec 伪码</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>   注释称&quot;executor 上层转&quot;但 agent-loop 单步路径(await ctx.tools.execute(call, ctx))</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   无批量上层包装,不转换则畸形参数会以 system.error 而非 tool.error 回喂,违反</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>   职责 2 回喂语义;批量入口 execute_tool_calls 亦依赖 r.summary 前缀计数,故关1</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   失败收敛在 execute 内(与状态机&quot;parsed→errored 回喂&quot;一致,事件序语义不变)。</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>   参数失败 summary 前缀 &quot;参数校验失败&quot;(F026 连败计数锚),guard 拒绝前缀 &quot;guard&quot;。</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>3. 审批 granted 后重入链的裁决语义细化:伪码 `if d != &quot;allow&quot; → GRD-403` 字面直译</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   将使 danger=high 工具(链上 g-danger 恒判 approval)与覆写转审批工具(g-overwrite</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>   目标仍存在恒判 approval)在人类批准后永远无法执行——F015 核心用途失效。落地为:</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>   重入 decision=reject(新拒/策略收紧)→ GRD-403(记录 rejected id,批准作废);</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>   decision=approval(链仍要求人类,而本次调用同参刚获 granted)→ 经绑定指纹校验</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>   (本轮参数指纹 == approval 提供器为该 call_id 记录的 binding)一致才放行,不一致</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>   = 批准针对异参数(篡改/复用)→ GRD-403 拒;decision=allow → 正常执行。GRD-403</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>   语义只落在&quot;新拒&quot;(errors.py 登记:批准后被新拒),approval 决策不是拒绝、不存在</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>   被&quot;翻回&quot;问题(单调性指拒绝不可被批准覆盖)。</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>4. tool.error 事件与 payload 模型对齐(extra=forbid 实测超字段 append → EVT-100):</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>   payload 仅 {name, call_id, code, message}(无 reason/明细字段);解析失败</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>   (call=None,尚无 ToolCall)时 name/call_id 取 raw 中的尝试名/补生成 id,保证</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>   事件结构合法可审计(工具名非法/缺失时 name 回落 &quot;?&quot;)。tool.result 的 spill_ref</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>   为完整 spill 引用 dict {ref, chars, lines, preview}(ToolResultPayload 模型锁定),</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>   ExecResult.spill_ref 同型;spec 伪码以 sp[&quot;ref&quot;] 字符串作 spill_ref 弃用。</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>5. 终局拒的 summary 统一 &quot;guard 拒绝:…&quot; 前缀(DIS-CORE §7.3.2 的 &quot;scope 拒绝&quot;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>   弃用):F026 连败计数与审计 grep &quot;guard 拒绝&quot; 同口径,scope 前置拒绝本就属</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>   GRD-401 守卫族。</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>   **该路径的唯一所有者是 ``GuardChain._evaluate_full``**(S3-2-2 上提)。executor</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>   侧原有的 ``_reject()`` 实现已于 2026-09-20 **删除**(GAP-12):它零调用点,且</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>   保留会让 ``guard.rejected`` 出现第二个发射点,违反 INV-05 的唯一出口要求。</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>6. 取消(F025)partial 事件以 ok=False + truncated=True + summary 标注 partial</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>   表达(ExecResult/ToolResultPayload 均无 partial 字段);EVENT-SCHEMA §3.4.6 注的</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>   &quot;ok=True,truncated=True&quot; 为另一口径,以 executor spec 职责 4(ok=False,</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>   partial=true)为准。仅 Provider 已启动(invoke 已进入)才写 partial;取消落在</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>   执行前则直接 re-raise(无副作用即无事可记)。</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>7. Provider 调用面:spec 伪码 `provider.handle(args, ctx)` 为同步函数由线程池</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>   承载;落地兼容两形态——同步 handle/裸 callable 经**每次调用独立**的</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>   ThreadPoolExecutor(单工),async handle 直接协程 wait_for(异步 handler 不应</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>   占用线程池)。两者同样受 timeout 掐断与取消语义。Provider 缺 handle 且不可</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>   调用 → TLB-802(契约在但实现损坏,拒绝执行)。</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>8. 输出契约编译复用 tools_registry 的 schema→pydantic 编译器(私有 _compile_model</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>   同包借用,单向依赖不变;避免复制第二套编译器造成双源漂移)。_finalize 对</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>   compile/校验失败(ValidationError/ValueError)统一转 tool.error(TLB-803,</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>   &quot;输出校验失败:&quot;);spec 伪码仅覆盖 ValidationError,ValueError(坏输出契约)一并收。</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>9. F026 轮内连败以 execute_tool_calls 内 break 表达(spec 伪代码权威),结构表所述</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>   &quot;抛 TurnToolFailures&quot; 的异常类不落地——批量 break 不打断 agent-loop 单步执行,</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>   语义等价(≥2 终止本轮不再尝试)。</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>10. spill 阈值 SPILL_THRESHOLD = 2048 字符(DIS-SEAM §6.1 G1:5KB&gt;2KB → spill;</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    PARAMETER-ANCHOR 的 64KB 行指 F034 读入截断/事件 payload 安全线 N3,非 executor</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    摘要阈值);summary 上限 2000 字符(ToolResultPayload max_length=2048 留余量)。</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>11. GRD-402 用 raise_code 上抛(spec 伪码直接构造 PyHError;码已登记,统一抛出入口</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    纪律);guard 链 reject 与审批重入新拒同样记入 _rejected(职责 6 广义防重放)。</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>12. 超时/异常消息用动态实际超时值(spec 伪码字面 &quot;60s&quot; 在 timeout_s 覆盖时失真),</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>   错误文本经 e.to_model_message()(errors.py 落地名;spec 伪码 to_llm_text 为</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>   ERR.md 文档名,同一函数两处命名,以实现为准)。</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>13. 超时&quot;杀&quot;同步 Provider 线程的落地语义:Python 无法安全终止运行中线程,故不做</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>   真杀,改为**驱逐不复用**——同步 Provider 经每次调用独立单工线程池执行,超时/取消</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>   掐断后线程在后台把副作用跑完(已发生副作用仍如实 error/partial 标注,不假装回滚),</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>   但该线程池 `shutdown(wait=False)` 且不入共享池,绝不被复用于后续调用。此举消除</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>   &quot;超时线程回共享池 → mark_idle 后新调用复用到同一物理线程 → 重叠副作用&quot;的竞态;</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>   驱逐池保留引用(防 GC 半途回收线程),超过 _ZOMBIE_POOL_LIMIT 时裁剪已空闲池。</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>依赖方向(单向,INV-08):本文件 → tools_registry(lookup/validate_args/lookup_provider/</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>register_tool/schemas_for)、tools_guard(ToolCall/Decision)、errors(raise_code)、</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>events.vocab(summarize_validation);不 import 任何 Provider 内部符号、不 import</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>approval/agent/llm(审批/消费方经 ctx 注入)。本文件被 tools_guard/tools_registry</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>反向 import = 环,禁止。</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>import asyncio</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>import hashlib</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>import inspect</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>import json</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>import logging</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>import time</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>import uuid</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>from concurrent.futures import ThreadPoolExecutor</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>from dataclasses import dataclass, replace</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>from pydantic import ValidationError</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>from pyharness.core.tools_guard import Decision, ToolCall</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>from pyharness.core.tools_registry import (NAME_RE, ToolRegistry,</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                                           _compile_model as _registry_compile_model)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>from pyharness.events.vocab import summarize_validation</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code></code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code></code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code># ====================================================================== 常量</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code># F026 轮内同工具连败终止阈值(CFG `loop.max_arg_failures_per_round` 默认 2;装配层注入,</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code># 未注入时用本常量——保持&quot;未装配=默认&quot;语义,与 flush_interval_s 同款)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code># 参数摘要化优先展示键(审批展示用:先动作后其余,按风险/动作语义排序)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code></code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code># 动作/内容承载键:审批展示时头尾双展示(防恶意尾部被截断隐藏——人类只看到</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code># &gt;80 字命令的开头就批准,危险命令段若在尾部则被省略号吞掉)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code></code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code># ================================================================ ExecResult</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code></code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code></code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code># ========================================================= ApprovalRoundResult</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code></code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code># ================================================================ 文本辅助</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>from pyharness.core.result_text import render_result_text</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code></code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code># ================================================================ ToolExecutor</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code></code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code></code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>from pyharness.core.execution_result import (log, DEFAULT_TOOL_TIMEOUT, SPILL_THRESHOLD, SUMMARY_MAX_CHARS, DEFAULT_MAX_ARG_FAILURES, PARSE_FAIL_NAME, _ZOMBIE_POOL_LIMIT, _SUMMARY_PRIORITY, _SUMMARY_TAIL_KEYS, _TAIL_KEEP, ExecResult, ApprovalRoundResult, summarize_text, _short_value, summarize, _approval_binding)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code></code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>from pyharness.core.tool_invocation import ToolInvocation</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>from pyharness.core.tool_approval import ToolApproval</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code></code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>async def _authorize_governance(ctx, call, **kwargs):</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    &quot;&quot;&quot;Single governance funnel, including approval re-entry.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    return await ctx.governance.authorize(call, ctx, **kwargs)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code></code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code></code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>class ToolExecutor(ToolInvocation, ToolApproval):</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    &quot;&quot;&quot;工具执行管道总闸(统一 Consumer;DIS-SEAM §2.3)。</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code></code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    构造注入 registry(契约/模型/Provider 索引;可 None = 自建空注册表)。</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    scope/guard/approval/session/storage 一律经 execute 的 ctx 参数注入</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    (ctx.session/ctx.scope/ctx.guard/ctx.approval/ctx.storage.spill)——与</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>    scope/guard/approval 模块&quot;注入式装配&quot;先例一致,装配层接线而非本模块持依赖。</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code></code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    实例状态(均会话内单调/轮内可重置,单事件循环无需锁):</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>      _rejected  set[call_id]  已裁决(拒绝)调用(GRD-402 防重放,单调只增)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>      _fail      dict[name,int] 轮内同工具连败计数(每轮起点 reset_turn_failures)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>      _out_models dict[id(defn), model] 输出契约编译缓存(Definition 不可变,</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                  对象身份即版本;注销重注册 = 新对象 → 新编译,不串味)</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    registry 的 mark_running/mark_idle(注销 BUSY 闸)由关3 调用,执行器不另持</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    在途镜像(registry._running 是唯一真源,spec 结构表 _Running 由此兑现)。</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code></code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    def __init__(self, registry: Optional[ToolRegistry] = None, *,</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                 max_arg_failures: int = DEFAULT_MAX_ARG_FAILURES) -&gt; None:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        self._r: ToolRegistry = registry if registry is not None else ToolRegistry()</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        self._rejected: set[str] = set()        # GRD-402 防重放(拒绝裁决记忆)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        self._fail: dict[str, int] = {}         # F026 轮内连败计数</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        # F026 终止阈值:装配层从 cfg.loop.max_arg_failures_per_round 注入</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        # (2026-09-21 修:此前恒硬编码 2,该配置键声明可调却零读取者)</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        self._max_arg_failures: int = max(1, int(max_arg_failures))</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        self._out_models: dict[int, Any] = {}   # 输出契约编译缓存(id(defn) 键)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        self._active: Optional[asyncio.Future] = None   # cancel_current 在途句柄</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        # 超时/取消后被驱逐的同步 Provider 线程池(线程仍在后台跑完副作用);</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        # 保留引用防 GC 半途回收线程,超过上限时裁剪已空闲池(见 _prune_zombies)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        self._zombie_pools: set[ThreadPoolExecutor] = set()</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code></code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>    # ------------------------------------------------------------ 门面透传</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>    def register(self, defn: Any, *, provider: Any = None) -&gt; str:</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        &quot;&quot;&quot;门面对 registry 的透传(能力 announce 第③步;spec register 签名)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        return self._r.register_tool(defn, provider=provider)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code></code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    def register_definition(self, defn: Any) -&gt; str:</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        &quot;&quot;&quot;agent.announce 消费别名(= register_tool;与 agent.py 装配面兼容)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        return self._r.register_tool(defn)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code></code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    def unregister_definition(self, name: str) -&gt; None:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        &quot;&quot;&quot;agent.detach_capability 消费别名(= unregister,在途 BUSY 闸同语义)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        self._r.unregister(name)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code></code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>    def unregister(self, name: str) -&gt; None:</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        &quot;&quot;&quot;注销透传(卸插件/能力 detach;运行中不可卸 → BUSY)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        self._r.unregister(name)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code></code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    def schemas_for(self, scope: Any = None, *,</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>                    toolset: Optional[set[str]] = None) -&gt; list[dict]:</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        &quot;&quot;&quot;门面对 registry.schemas_for 透传(agent-loop 每轮下发 F007)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        schemas=self._r.schemas_for(scope, toolset=toolset)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        hidden=getattr(self,&#x27;hidden_tools&#x27;,set())</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        return [schema for schema in schemas if schema[&#x27;function&#x27;][&#x27;name&#x27;] not in hidden]</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code></code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>    # ------------------------------------------------------ F026 轮内连败计数</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    def reset_turn_failures(self) -&gt; None:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        &quot;&quot;&quot;每轮起点清零(spec: 轮内连败计数每轮重置)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        self._fail.clear()</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    def mark_turn_failure(self, name: str) -&gt; int:</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        &quot;&quot;&quot;同工具失败一次并返回累计次数(达阈值由批量入口终止该轮,F026)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        key = str(name)</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        n = self._fail.get(key, 0) + 1</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        self._fail[key] = n</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        return n</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code></code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>    def _check_fail_streak(self, name: str) -&gt; bool:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        &quot;&quot;&quot;轮内同工具连败达阈值判定(F026;调用方终止该轮)。</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code></code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        阈值来自装配层注入(CFG `loop.max_arg_failures_per_round`,缺省 2)。</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        return self._fail.get(str(name), 0) &gt;= self._max_arg_failures</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code></code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>    def rejected_ids(self) -&gt; set[str]:</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        &quot;&quot;&quot;已裁决(拒绝)call_id 集(F031 自检/审计;GRD-402 防重放)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        return set(self._rejected)</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code></code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>    # ------------------------------------------------------------ 解析入口</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>    def parse_tool_call(self, raw: Any, parent_seq: Optional[int] = None) -&gt; ToolCall:</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        &quot;&quot;&quot;LLM 原始 tool_calls 单条 → ToolCall(spec 伪代码权威)。</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code></code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        缺 id 补生成(uuid4 前 8 位,审计仍可关联);name 非法/缺失 → TLB-802</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        (幻觉名入口拦截,NAME_RE 锚定);arguments 非 JSON/非对象 → TLB-803</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        (解析失败不猜测、不透传执行)。兼容 OpenAI 嵌套(function.name)与</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        llm.response 事件扁平(id/name/arguments)两种 wire 形态。</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        if not isinstance(raw, dict):</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>            raise_code(&quot;TLB-803&quot;, tool=PARSE_FAIL_NAME,</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                       detail=f&quot;tool_calls 元素须为对象,实为 {type(raw).__name__}&quot;,</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                       advice=&quot;按响应结构修正重发;零执行(INV-06)&quot;)</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        tid = raw.get(&quot;id&quot;) or uuid.uuid4().hex[:8]</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        fn = raw.get(&quot;function&quot;) or {}</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        if not isinstance(fn, dict):</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            fn = {}</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        name = fn.get(&quot;name&quot;) or raw.get(&quot;name&quot;)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        if not isinstance(name, str) or not name or not NAME_RE.fullmatch(name):</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>            raise_code(&quot;TLB-802&quot;, tool=name, rule=NAME_RE.pattern,</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                       advice=&quot;工具名非法/缺失(幻觉名入口拦截);查 schemas_for 名单&quot;)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        args_raw = fn.get(&quot;arguments&quot;) if fn.get(&quot;arguments&quot;) is not None \</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>            else raw.get(&quot;arguments&quot;)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        try:</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>            args = json.loads(args_raw if isinstance(args_raw, str) and args_raw.strip()</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                              else args_raw or &quot;{}&quot;)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        except (json.JSONDecodeError, TypeError) as e:</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            raise_code(&quot;TLB-803&quot;, tool=name,</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>                       detail=f&quot;arguments 非法 JSON:{e}&quot;,</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>                       advice=&quot;按 JSON 格式修正;未执行任何操作&quot;)</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        if not isinstance(args, dict):</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>            raise_code(&quot;TLB-803&quot;, tool=name,</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>                       detail=f&quot;arguments 须为 JSON 对象,实为 {type(args).__name__}&quot;,</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>                       advice=&quot;按参数对象格式修正;未执行任何操作&quot;)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        return ToolCall(name=name, raw_args=args, call_id=tid, parent_seq=parent_seq)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code></code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>    def _attempted_name(raw: Any) -&gt; str:</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        &quot;&quot;&quot;raw 中尝试的工具名(解析失败计数/审计用;缺失 → 占位 &quot;?&quot;)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        if isinstance(raw, dict):</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>            fn = raw.get(&quot;function&quot;)</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>            if isinstance(fn, dict) and isinstance(fn.get(&quot;name&quot;), str) \</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>                    and fn[&quot;name&quot;]:</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>                return fn[&quot;name&quot;]</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>            if isinstance(raw.get(&quot;name&quot;), str) and raw[&quot;name&quot;]:</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>                return raw[&quot;name&quot;]</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>        return PARSE_FAIL_NAME</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code></code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>    def _parse_fail_message(self, e: PyHError, name: str) -&gt; str:</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        &quot;&quot;&quot;解析失败 → tool.error message(带上尝试名便于 LLM 自查)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        tip = e.ctx.get(&quot;detail&quot;) or e.ctx.get(&quot;hint&quot;) or &quot;&quot;</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        base = f&quot;tool_calls 解析失败(tool={name or &#x27;?&#x27;})&quot;</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        return f&quot;{base}:{tip}&quot; if tip else base</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code></code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>    # -------------------------------------------------------- F022 批量串行入口</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>    async def execute_tool_calls(self, calls: list, ctx: Any, *,</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>                                 parent_seq: Optional[int] = None) -&gt; list[ExecResult]:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        &quot;&quot;&quot;每轮 LLM 返回的多个 tool_calls 逐条解析执行(spec 伪代码权威)。</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code></code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        默认串行(保序可审计);解析失败/参数校验失败/guard 拒绝按工具名计连败,</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        ≥2 → 终止本轮后续调用(F026);单条失败各自落 tool.error/guard 事件回喂,</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        不抛到循环(本函数只返回结果列表)。</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>        self.reset_turn_failures()</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>        results: list[ExecResult] = []</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>        for raw in calls:</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>            try:</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>                call = self.parse_tool_call(raw, parent_seq)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>            except PyHError as e:                       # 解析失败:连败计数</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                name = self._attempted_name(raw)</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                self.mark_turn_failure(name)</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                tid = raw.get(&quot;id&quot;) if isinstance(raw, dict) else None</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>                results.append(await self._on_error(</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                    ctx, None, e.code, self._parse_fail_message(e, name),</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>                    name=name, call_id=tid or uuid.uuid4().hex[:8],</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>                    parent_seq=parent_seq))</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>                if self._check_fail_streak(name):</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                    break                               # 连败 2 次终止该轮(F026)</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>                continue</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>            r = await self.execute(call, ctx)           # 全管道纪律在 execute 内</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            results.append(r)</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>            key = call.name</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>            if not r.ok and r.summary.startswith((&quot;参数校验&quot;, &quot;guard&quot;)):</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>                self.mark_turn_failure(key)</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>                if self._check_fail_streak(key):</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>                    break                               # TLB-803/GRD 连败 2 → 终止轮</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        return results</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code></code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>    # ------------------------------------------------------------ 事件出口</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>    def _trace(call: Any) -&gt; Optional[dict]:</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        &quot;&quot;&quot;trace 语义父关联:parent_seq(父 llm.response;EVENT-SCHEMA §2.4)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>        seq = getattr(call, &quot;parent_seq&quot;, None)</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        return {&quot;parent_seq&quot;: seq} if seq is not None else None</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code></code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>    async def _append(ctx: Any, type_: str, payload: dict, *, actor: str,</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>                      sync: bool = False,</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>                      trace: Optional[dict] = None) -&gt; Any:</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        &quot;&quot;&quot;session.append 统一封装(兼容异步 SessionLog/同步替身;guard 同款)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>        sess = ctx.session</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        r = sess.append(type_, payload, actor=actor, sync=sync, trace=trace)</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>        if inspect.isawaitable(r):</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>            return await r</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        return r</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code></code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>    # ------------------------------------------------------------ 执行管道主函数</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>    async def execute(self, call: Any, ctx: Any) -&gt; ExecResult:</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>        &quot;&quot;&quot;四关强制编排(spec 伪代码权威;详见模块 docstring 四关表)。</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code></code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>        任何失败收敛为 tool.error 回喂(ExecResult.ok=False),成功恰一条</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>        tool.result;guard/审批拒绝走各自事件不留 result(拒绝零副作用,审计以</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>        guard.rejected/approval.* 为证)。</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>        call = self._coerce_call(call)                  # 鸭子 → guard.ToolCall</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>        if call.call_id in self._rejected:              # GRD-402:已裁决禁重放</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>            raise_code(&quot;GRD-402&quot;, call_id=call.call_id,</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>                       advice=&quot;该调用已裁决(拒绝),禁止重复执行&quot;)</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>        self._require_wiring(ctx)                       # session/scope/guard 必接线</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code></code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>        # ---- 关1a 契约(TLB-802 → tool.error 回喂,零执行)</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>        try:</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>            defn = self._r.lookup(call.name)</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>        except PyHError as e:</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>            return await self._on_error(ctx, call, e.code, e.to_model_message())</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        call = replace(call, defn=defn)                 # 挂契约(guard 读 danger 面)</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>        runtime = getattr(ctx, &#x27;platform_runtime&#x27;, None)</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        validate_path = getattr(runtime, &#x27;validate_file_call&#x27;, None)</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        if callable(validate_path):</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>            error = validate_path(call.name, call.raw_args, ctx)</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>            if error:</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>                result = await self._on_error(ctx, call, &#x27;TLB-803&#x27;, json.dumps(error, ensure_ascii=False))</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>                if not error[&#x27;recoverable&#x27;]:</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>                    raise PyHError(&#x27;platform_workspace_path_denied&#x27;)</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>                return result</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        # ---- 关1b 先验后跑(TLB-803 → 参数校验失败 summary;本函数立即返回,</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>        # 后续任何一行不执行 —— 畸形参数零调用,INV-06)</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>        try:</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>            args = self._r.validate_args(call.name, call.raw_args)</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>        except PyHError as e:</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>            detail = e.ctx.get(&quot;detail&quot;) or e.ctx.get(&quot;advice&quot;) or e.message</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>            return await self._on_error(</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>                ctx, call, e.code,</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>                f&quot;参数校验失败(TLB-803):{detail}&quot;</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>                if e.code == &quot;TLB-803&quot; else e.to_model_message())</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>        call = replace(call, args=args)                 # guard/审批读校验后实参</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code></code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>        # ---- tool.call 双份存档(raw_args 模型原话 vs args 实际执行;INV-06)</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>        call_event = await self._append(ctx, &quot;tool.call&quot;,</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>                           {&quot;name&quot;: call.name, &quot;args&quot;: dict(args),</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>                            &quot;raw_args&quot;: dict(call.raw_args or {}),</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>                            &quot;call_id&quot;: call.call_id},</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>                           actor=&quot;tool&quot;, trace=self._trace(call))</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        # ---- 关2 治理授权(S3-2-2:唯一治理入口):scope 前置 + guard 单调链 +</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>        # Decision + decision.issued。scope 前置的运行时**唯一所有者**是</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>        # GuardChain._evaluate_full(职责上提,非重复计算);executor 不再自算</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>        # scope.can_use,也不再直呼 ctx.guard.evaluate。</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>        # S4-P1-1:授权↔执行绑定摘要(既有 `_approval_binding` 语义,**复用不重写**)</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>        # 注入为 `Decision.inputs_digest`。治理层不得 import 本模块(ADR-018:308),</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>        # 故由执行侧计算后经 `authorize(inputs_digest=...)` 传入——与 `chain_factory`</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>        # 注入先例同型(装配/执行侧适配,治理层只持有)。全流程只算一次。</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>        digest = _approval_binding(call, args)</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>        d = await _authorize_governance(ctx, call, inputs_digest=digest)</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>        if d == &quot;reject&quot;:                               # 终局拒(含 scope-hidden)</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>            self._rejected.add(call.call_id)            # 广义防重放(偏离 11)</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>            return ExecResult(ok=False, summary=&quot;guard 拒绝,未执行&quot;)</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>        # ---- 关2.5 审批(F015;danger≥high 由链出 approval 决策)</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>        if d == &quot;approval&quot;:</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>            round_ = await self._approval_round(ctx, call, args, prior=d,</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>                                                binding=digest)</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>            if not round_.executed:</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>                return ExecResult(ok=False, summary=round_.message)  # 非放行 → 不执行</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>        # ---- 关3 Provider 执行(线程池 + 超时掐断 TLB-805)</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>        timeout = int(defn.timeout_s) or DEFAULT_TOOL_TIMEOUT</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>        started = False</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>        elapsed_ms = 0.0</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>        try:</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>            self._r.mark_running(call.name)             # registry 注销闸联动</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>            t0 = time.perf_counter()</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>            from pyharness.core.invocation_binding import InvocationBinding, current_invocation</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>            token = current_invocation.set(InvocationBinding(call.call_id,</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>                getattr(call_event, &#x27;seq&#x27;, 0), call.name, digest))</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>            try:</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>                provider_task = asyncio.create_task(self._run_provider(defn,args,ctx))</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>            finally:</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>                current_invocation.reset(token)</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>            fut = asyncio.create_task(asyncio.wait_for(provider_task, timeout=timeout))</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>            self._active = fut</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>            started = True                          # Provider 已进入 await 点</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>            try:</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>                raw = await fut</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>            finally:</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>                # Cancellation may arrive before wait_for first runs. The owned</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>                # provider Task must still be cancelled and awaited in that window.</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>                if not provider_task.done():</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>                    provider_task.cancel()</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>                    await asyncio.gather(provider_task,return_exceptions=True)</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>                if self._active is fut:</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>                    self._active = None</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>            elapsed_ms = (time.perf_counter() - t0) * 1000.0</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>        except asyncio.TimeoutError:                    # 掐断;进程类杀树归</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>            return await self._on_error(                # Provider(TO-301),见 docstring</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>                ctx, call, &quot;TLB-805&quot;, f&quot;执行超时({timeout}s):已停止等待;&quot;</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>                &quot;工具可能仍在运行,已发生副作用未撤销&quot;)</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>        except asyncio.CancelledError:                  # F025:取消不吞</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>            if started:                                 # 已发生副作用如实写 partial</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>                await self._append(ctx, &quot;tool.result&quot;,</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>                                   {&quot;name&quot;: call.name, &quot;call_id&quot;: call.call_id,</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>                                    &quot;ok&quot;: False, &quot;truncated&quot;: True,</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>                                    &quot;summary&quot;: &quot;已取消等待:工具可能仍在运行,&quot;</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>                                               &quot;已发生副作用未撤销(partial)&quot;},</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>                                   actor=&quot;tool&quot;, trace=self._trace(call))</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>            raise                                       # 按取消协议 re-raise</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>        except PyHError as e:                           # Provider 结构化错误</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>            return await self._on_error(ctx, call, e.code, e.to_model_message())</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>        except Exception as e:                          # noqa: BLE001 Provider 运行异常</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>            # 回喂 LLM 的 tool.error 不含异常原文(str(e) 可能带内部路径/实现细节,</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>            # P2 收紧):只报类型名判断失败性质;完整堆栈留本地日志,审计以日志为准。</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>            log.exception(&quot;tool provider failed name=%s call_id=%s&quot;,</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>                          call.name, call.call_id)</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>            return await self._on_error(</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>                ctx, call, &quot;TLB-805&quot;, f&quot;Provider 运行异常:{type(e).__name__}&quot;)</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code>        finally:</code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>            self._r.mark_idle(call.name)</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>        # ---- 关4 结果检查 + finalize(输出 schema/spill/摘要 → tool.result)</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>        return await self._finalize(ctx, call, defn, raw, elapsed_ms=elapsed_ms)</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code></code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>    # ------------------------------------------------------------ 内部编排件</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>    def _coerce_call(self, call: Any) -&gt; ToolCall:</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>        &quot;&quot;&quot;鸭子 ToolCall(llm.ToolCall/SimpleNamespace)→ guard.ToolCall 规范化。</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code></code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>        call_id 缺省(uuid4 前 8 位)与解析层补 id 同语义——事件配对/审计仍可关联;</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>        名字缺失/非 str 不在此拦(registry lookup 会 TLB-802,事件 name 回落 &quot;?&quot;)。</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>        if isinstance(call, ToolCall):</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>            return call</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>        name = getattr(call, &quot;name&quot;, None)</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>        raw_args = getattr(call, &quot;raw_args&quot;, None)</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>        cid = getattr(call, &quot;call_id&quot;, None) or getattr(call, &quot;id&quot;, None)</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code>        return ToolCall(</code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code>            name=name if isinstance(name, str) else str(name) if name else &quot;&quot;,</code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>            raw_args=dict(raw_args) if isinstance(raw_args, dict) else {},</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>            call_id=str(cid) if cid else uuid.uuid4().hex[:8],</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>            parent_seq=getattr(call, &quot;parent_seq&quot;, None),</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>            defn=getattr(call, &quot;defn&quot;, None),</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>            args=getattr(call, &quot;args&quot;, None))</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code></code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>    def _require_wiring(self, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>        &quot;&quot;&quot;执行前置装配检查(fail-closed):无 session/scope/guard = 非法执行路径。</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code></code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code>        缺任一 → CYC-999 上抛(装配期 bug 证据),绝不带缺件执行(INV-04:无</code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code>        guard.evaluated 的执行非法;事件留痕是审计硬前提)。</code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>        if getattr(ctx, &quot;session&quot;, None) is None:</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>            raise_code(&quot;CYC-999&quot;, module=&quot;tools_executor&quot;,</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>                       hint=&quot;ctx.session 未接线:事件落点缺失,拒绝执行(INV-04)&quot;)</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code>        if getattr(ctx, &quot;scope&quot;, None) is None:</code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>            raise_code(&quot;CYC-999&quot;, module=&quot;tools_executor&quot;,</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code>                       hint=&quot;ctx.scope 未接线:scope 前置/guard 求值不可执行&quot;)</code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code>        if getattr(ctx, &quot;guard&quot;, None) is None:</code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>            raise_code(&quot;CYC-999&quot;, module=&quot;tools_executor&quot;,</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>                       hint=&quot;ctx.guard 未接线:无 guard.evaluated 的执行非法&quot;</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code>                            &quot;(F031 自检兜底)&quot;)</code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code>        if getattr(ctx, &quot;governance&quot;, None) is None:</code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code>            raise_code(&quot;CYC-999&quot;, module=&quot;tools_executor&quot;,</code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code>                       hint=&quot;ctx.governance 未接线:关2 唯一治理入口缺失,&quot;</code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code>                            &quot;拒绝执行(S3-2-2)&quot;)</code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code></code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code></code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code>    # ------------------------------------------------------------ 已删除:_reject</code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code>    # GAP-12(2026-09-20):原 ``_reject()`` 已删除。取证口径:</code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>    #   ① 全库**零调用点**(仅有自身定义与三处说明性引用);</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code>    #   ② 它的语义(scope-hidden 终局拒 → guard.evaluated + guard.rejected +</code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code>    #      记 _rejected)自 S3-2-2 起**已整体上移**到</code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>    #      ``GuardChain._evaluate_full``,由关 2 的唯一治理入口</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>    #      ``authorize()`` 触发;</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code>    #   ③ 保留它的**风险**大于价值:它使 ``guard.rejected`` 存在**第二个发射点**,</code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code>    #      而 INV-05 要求拒绝留痕只有一个出口;一旦有人&quot;顺手接线&quot;,就会造出</code></div>
+<div class="code-line" id="L507"><a class="line-number" href="#L507">507</a><code>    #      绕过 ``decision.issued`` 的第二条拒绝路径(与 P2/P3 冲突)。</code></div>
+<div class="code-line" id="L508"><a class="line-number" href="#L508">508</a><code>    # 删除后 ``guard.rejected`` 的生产发射点**唯一** = ``tools_guard._append_rejected``,</code></div>
+<div class="code-line" id="L509"><a class="line-number" href="#L509">509</a><code>    # 由 ``tests/invariants/test_inv_context_and_paths.py`` 中的结构断言钉死。</code></div>
+<div class="code-line" id="L510"><a class="line-number" href="#L510">510</a><code></code></div>
+<div class="code-line" id="L511"><a class="line-number" href="#L511">511</a><code>    async def _on_error(self, ctx: Any, call: Any, code: str, message: str, *,</code></div>
+<div class="code-line" id="L512"><a class="line-number" href="#L512">512</a><code>                        name: Optional[str] = None, call_id: Optional[str] = None,</code></div>
+<div class="code-line" id="L513"><a class="line-number" href="#L513">513</a><code>                        parent_seq: Optional[int] = None) -&gt; ExecResult:</code></div>
+<div class="code-line" id="L514"><a class="line-number" href="#L514">514</a><code>        &quot;&quot;&quot;统一错误出口:append tool.error(code/message ≤2000)并回 ExecResult。</code></div>
+<div class="code-line" id="L515"><a class="line-number" href="#L515">515</a><code></code></div>
+<div class="code-line" id="L516"><a class="line-number" href="#L516">516</a><code>        code 原样透传(ERR §5.2);call=None(解析失败尚无 ToolCall)时 name/</code></div>
+<div class="code-line" id="L517"><a class="line-number" href="#L517">517</a><code>        call_id 取实参或回落占位(偏离 4),保证事件结构合法可审计。失败即</code></div>
+<div class="code-line" id="L518"><a class="line-number" href="#L518">518</a><code>        单条 tool.error——与 tool.result 互斥,每调用恰一条终局事件。</code></div>
+<div class="code-line" id="L519"><a class="line-number" href="#L519">519</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L520"><a class="line-number" href="#L520">520</a><code>        ename = name if name is not None else (getattr(call, &quot;name&quot;, None)</code></div>
+<div class="code-line" id="L521"><a class="line-number" href="#L521">521</a><code>                                               if call is not None else None)</code></div>
+<div class="code-line" id="L522"><a class="line-number" href="#L522">522</a><code>        ecid = call_id if call_id is not None else (getattr(call, &quot;call_id&quot;, None)</code></div>
+<div class="code-line" id="L523"><a class="line-number" href="#L523">523</a><code>                                                    if call is not None else None)</code></div>
+<div class="code-line" id="L524"><a class="line-number" href="#L524">524</a><code>        if not isinstance(ename, str) or not ename:</code></div>
+<div class="code-line" id="L525"><a class="line-number" href="#L525">525</a><code>            ename = PARSE_FAIL_NAME</code></div>
+<div class="code-line" id="L526"><a class="line-number" href="#L526">526</a><code>        if not isinstance(ecid, str) or not ecid:</code></div>
+<div class="code-line" id="L527"><a class="line-number" href="#L527">527</a><code>            ecid = uuid.uuid4().hex[:8]</code></div>
+<div class="code-line" id="L528"><a class="line-number" href="#L528">528</a><code>        msg = str(message or code or &quot;工具执行失败&quot;)[:2000]</code></div>
+<div class="code-line" id="L529"><a class="line-number" href="#L529">529</a><code>        seq = parent_seq if parent_seq is not None else (</code></div>
+<div class="code-line" id="L530"><a class="line-number" href="#L530">530</a><code>            getattr(call, &quot;parent_seq&quot;, None) if call is not None else None)</code></div>
+<div class="code-line" id="L531"><a class="line-number" href="#L531">531</a><code>        trace = {&quot;parent_seq&quot;: seq} if seq is not None else None</code></div>
+<div class="code-line" id="L532"><a class="line-number" href="#L532">532</a><code>        await self._append(ctx, &quot;tool.error&quot;,</code></div>
+<div class="code-line" id="L533"><a class="line-number" href="#L533">533</a><code>                           {&quot;name&quot;: ename, &quot;call_id&quot;: ecid,</code></div>
+<div class="code-line" id="L534"><a class="line-number" href="#L534">534</a><code>                            &quot;code&quot;: code or &quot;CYC-999&quot;, &quot;message&quot;: msg},</code></div>
+<div class="code-line" id="L535"><a class="line-number" href="#L535">535</a><code>                           actor=&quot;tool&quot;, trace=trace)</code></div>
+<div class="code-line" id="L536"><a class="line-number" href="#L536">536</a><code>        return ExecResult(ok=False, summary=msg)</code></div>
+<div class="code-line" id="L537"><a class="line-number" href="#L537">537</a><code></code></div>
+<div class="code-line" id="L538"><a class="line-number" href="#L538">538</a><code>    def _provider_handle(self, name: str) -&gt; Any:</code></div>
+<div class="code-line" id="L539"><a class="line-number" href="#L539">539</a><code>        &quot;&quot;&quot;解析 Provider 可调用面:provider.handle(args, ctx) 或裸 callable。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L540"><a class="line-number" href="#L540">540</a><code>        provider = self._r.lookup_provider(name)        # 未绑定 → TLB-802</code></div>
+<div class="code-line" id="L541"><a class="line-number" href="#L541">541</a><code>        handle = getattr(provider, &quot;handle&quot;, None)</code></div>
+<div class="code-line" id="L542"><a class="line-number" href="#L542">542</a><code>        if callable(handle):</code></div>
+<div class="code-line" id="L543"><a class="line-number" href="#L543">543</a><code>            return handle</code></div>
+<div class="code-line" id="L544"><a class="line-number" href="#L544">544</a><code>        if callable(provider):                          # 兼容裸函数 Provider</code></div>
+<div class="code-line" id="L545"><a class="line-number" href="#L545">545</a><code>            return provider</code></div>
+<div class="code-line" id="L546"><a class="line-number" href="#L546">546</a><code>        raise_code(&quot;TLB-802&quot;, tool=name,</code></div>
+<div class="code-line" id="L547"><a class="line-number" href="#L547">547</a><code>                   advice=&quot;Provider 缺 handle(args, ctx) 且不可调用:&quot;</code></div>
+<div class="code-line" id="L548"><a class="line-number" href="#L548">548</a><code>                          &quot;能力实现损坏或未激活&quot;)</code></div>
+<div class="code-line" id="L549"><a class="line-number" href="#L549">549</a><code></code></div>
+<div class="code-line" id="L550"><a class="line-number" href="#L550">550</a><code>    async def _authorize_governance(self, ctx, call, **kwargs):</code></div>
+<div class="code-line" id="L551"><a class="line-number" href="#L551">551</a><code>        return await _authorize_governance(ctx, call, **kwargs)</code></div>
+<div class="code-line" id="L552"><a class="line-number" href="#L552">552</a><code></code></div>
+<div class="code-line" id="L553"><a class="line-number" href="#L553">553</a><code>    def _new_provider_pool(self, name):</code></div>
+<div class="code-line" id="L554"><a class="line-number" href="#L554">554</a><code>        return ThreadPoolExecutor(max_workers=1,</code></div>
+<div class="code-line" id="L555"><a class="line-number" href="#L555">555</a><code>            thread_name_prefix=f&quot;tool:{str(name)[:16]}&quot;)</code></div>
+<div class="code-line" id="L556"><a class="line-number" href="#L556">556</a><code></code></div>
+<div class="code-line" id="L557"><a class="line-number" href="#L557">557</a><code></code></div>
+<div class="code-line" id="L558"><a class="line-number" href="#L558">558</a><code>    # ------------------------------------------------------------ Provider 调用</code></div>
+<div class="code-line" id="L559"><a class="line-number" href="#L559">559</a><code></code></div>
+<div class="code-line" id="L560"><a class="line-number" href="#L560">560</a><code></code></div>
+<div class="code-line" id="L561"><a class="line-number" href="#L561">561</a><code>    # ------------------------------------------------------------ 取消(F025)</code></div>
+<div class="code-line" id="L562"><a class="line-number" href="#L562">562</a><code></code></div>
+<div class="code-line" id="L563"><a class="line-number" href="#L563">563</a><code>    # ------------------------------------------------------------ 关4 finalize</code></div>
+<div class="code-line" id="L564"><a class="line-number" href="#L564">564</a><code></code></div>
+<div class="code-line" id="L565"><a class="line-number" href="#L565">565</a><code></code></div>
+<div class="code-line" id="L566"><a class="line-number" href="#L566">566</a><code>__all__ = [</code></div>
+<div class="code-line" id="L567"><a class="line-number" href="#L567">567</a><code>    &quot;ToolExecutor&quot;, &quot;ExecResult&quot;, &quot;ToolCall&quot;, &quot;Decision&quot;,</code></div>
+<div class="code-line" id="L568"><a class="line-number" href="#L568">568</a><code>    &quot;DEFAULT_TOOL_TIMEOUT&quot;, &quot;SPILL_THRESHOLD&quot;, &quot;SUMMARY_MAX_CHARS&quot;,</code></div>
+<div class="code-line" id="L569"><a class="line-number" href="#L569">569</a><code>    &quot;render_result_text&quot;, &quot;summarize_text&quot;, &quot;summarize&quot;,</code></div>
+<div class="code-line" id="L570"><a class="line-number" href="#L570">570</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

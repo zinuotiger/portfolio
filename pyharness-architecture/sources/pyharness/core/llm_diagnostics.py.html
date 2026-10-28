@@ -1,0 +1,146 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/llm_diagnostics.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/llm_diagnostics.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 146 行</span></nav><main class="wrap source-page"><h1>pyharness/core/llm_diagnostics.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：df6febf851485d3e307a03455f53b4d39bdb8a68<br>SHA-256（内容校验）：bfa93203eff374e1602140197e3330c2ed91e19a5a4f7726c38b87ce8cb187dc</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 7 个类、函数与方法</summary><ul><li><a href="#L22">observed_wait（异步函数） · L22–L37</a></li><li><a href="#L40">model_call（函数） · L40–L46</a></li><li><a href="#L49">atom（函数） · L49–L57</a></li><li><a href="#L60">endpoint_origin（函数） · L60–L68</a></li><li><a href="#L71">response_metadata（函数） · L71–L94</a></li><li><a href="#L97">public_diagnostics（函数） · L97–L120</a></li><li><a href="#L123">diagnostics（函数） · L123–L146</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Bounded model diagnostics. Never serialize exceptions, bodies or headers.</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Call role and attempt are coroutine-local: auxiliary/concurrent work cannot</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>change the main agent&#x27;s attribution. Unknown means absent, never inferred.</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from contextlib import contextmanager</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from contextvars import ContextVar</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>import asyncio</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import re</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from urllib.parse import urlsplit</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>import httpx</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>call_role = ContextVar(&#x27;llm_call_role&#x27;, default=&#x27;other&#x27;)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>call_attempt = ContextVar(&#x27;llm_call_attempt&#x27;, default=1)</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>response_observation = ContextVar(&#x27;llm_response_observation&#x27;, default=None)</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>ROLES = {&#x27;main_agent&#x27;, &#x27;title_generation&#x27;, &#x27;probe&#x27;, &#x27;other&#x27;}</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>CATEGORIES = {&#x27;authentication&#x27;, &#x27;permission&#x27;, &#x27;rate_limit&#x27;, &#x27;provider_server&#x27;,</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>              &#x27;timeout&#x27;, &#x27;connection&#x27;, &#x27;protocol&#x27;, &#x27;invalid_response&#x27;, &#x27;unknown&#x27;}</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>async def observed_wait(awaitable, timeout, *, observation=None):</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    &quot;&quot;&quot;Share only this request&#x27;s safe observations with wait_for&#x27;s child task.</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>wait_for replaces cancellation with TimeoutError; retain headers received before</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>that cancellation without putting mutable state on a shared adapter/transport.</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    if observation is None:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        observation = {}</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    token = response_observation.set(observation)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    try:</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        return await asyncio.wait_for(awaitable, timeout=timeout)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    except Exception as exc:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        exc.diagnostics = {**observation, **getattr(exc, &#x27;diagnostics&#x27;, {})}</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        raise</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    finally:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        response_observation.reset(token)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code></code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code></code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>@contextmanager</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>def model_call(role):</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    token = call_role.set(role if role in ROLES else &#x27;other&#x27;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    try:</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        yield</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    finally:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        call_role.reset(token)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>def atom(value, limit=128):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    &quot;&quot;&quot;Reject free text, paths, credentials and oversized opaque metadata.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    if not isinstance(value, (str, int)) or isinstance(value, bool):</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        return &#x27;unknown&#x27;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    text = str(value)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    if (len(text) &gt; limit or not re.fullmatch(r&#x27;[A-Za-z0-9_.:+-]+&#x27;, text)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>            or re.search(r&#x27;(?i)sk-|bearer|authorization|secret|password|api.?key&#x27;, text)):</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        return &#x27;unknown&#x27;</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    return text or &#x27;unknown&#x27;</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>def endpoint_origin(value):</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    try:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        url = urlsplit(str(value))</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        if url.scheme in {&#x27;https&#x27;, &#x27;http&#x27;} and url.hostname:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            host = atom(url.hostname, 253)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            return f&#x27;{url.scheme}://{host}&#x27; if host != &#x27;unknown&#x27; else &#x27;unknown&#x27;</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    except ValueError:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        pass</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    return &#x27;unknown&#x27;</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>def response_metadata(response):</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    &quot;&quot;&quot;Only three response headers and a bounded JSON error code are inspected.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    headers = response.headers</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    code = &#x27;unknown&#x27;</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    # Streaming responses may not have been read; do not buffer arbitrary bodies.</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    try:</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        content = response.content</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    except httpx.ResponseNotRead:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        content = None</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    if content is not None and len(content) &lt;= 16384:</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        try:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            body = response.json()</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            error = body.get(&#x27;error&#x27;) if isinstance(body, dict) else None</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            if isinstance(error, dict):</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                code = atom(error.get(&#x27;code&#x27;))</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        except (ValueError, httpx.ResponseNotRead):</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            pass</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    retry = headers.get(&#x27;retry-after&#x27;)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    # Retry-After accepts delta seconds or an HTTP date, bounded and grammar checked.</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    if not isinstance(retry, str) or not re.fullmatch(r&#x27;(\d{1,9}|[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT)&#x27;, retry):</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        retry = &#x27;unknown&#x27;</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    return {&#x27;http_status&#x27;: response.status_code, &#x27;provider_code&#x27;: code,</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            &#x27;request_id&#x27;: atom(headers.get(&#x27;x-request-id&#x27;) or headers.get(&#x27;request-id&#x27;)),</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            &#x27;retry_after&#x27;: retry}</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code></code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>def public_diagnostics(value=None, **defaults):</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    &quot;&quot;&quot;Revalidate even persisted/legacy metadata at public boundaries.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    d = {**defaults, **(value if isinstance(value, dict) else {})}</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    if d.get(&#x27;code&#x27;)==&#x27;LLM-305&#x27;:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        from pyharness.core.budget_diagnostics import public_budget</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        budget=public_budget(d)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        if budget is not None:return budget</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    category = d.get(&#x27;category&#x27;) if d.get(&#x27;category&#x27;) in CATEGORIES else &#x27;unknown&#x27;</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    status = d.get(&#x27;http_status&#x27;)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    attempt = d.get(&#x27;attempt&#x27;, &#x27;unknown&#x27;)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    seq = d.get(&#x27;request_seq&#x27;, &#x27;unknown&#x27;)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    retry = d.get(&#x27;retry_after&#x27;)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    if not isinstance(retry, str) or not re.fullmatch(r&#x27;(\d{1,9}|[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT)&#x27;, retry):</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        retry = &#x27;unknown&#x27;</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    return dict(code=atom(d.get(&#x27;code&#x27;)), category=category,</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        http_status=status if type(status) is int and 100 &lt;= status &lt;= 599 else &#x27;unknown&#x27;,</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        provider_code=atom(d.get(&#x27;provider_code&#x27;)), request_id=atom(d.get(&#x27;request_id&#x27;)),</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        retry_after=retry, endpoint=endpoint_origin(d.get(&#x27;endpoint&#x27;)),</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        model=atom(d.get(&#x27;model&#x27;)), role=d.get(&#x27;role&#x27;) if d.get(&#x27;role&#x27;) in ROLES else &#x27;other&#x27;,</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        request_seq=seq if type(seq) is int and seq &gt; 0 else &#x27;unknown&#x27;,</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        attempt=attempt if type(attempt) is int and attempt &gt; 0 else &#x27;unknown&#x27;,</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        retried=d.get(&#x27;retried&#x27;) if type(d.get(&#x27;retried&#x27;)) is bool else &#x27;unknown&#x27;,</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        safe_to_retry=d.get(&#x27;safe_to_retry&#x27;) if type(d.get(&#x27;safe_to_retry&#x27;)) is bool else &#x27;unknown&#x27;,</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        summary=f&#x27;Model request failed ({category})&#x27;)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code></code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>def diagnostics(exc, *, code, endpoint=None, model=None, request_seq=None):</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    meta = dict(getattr(exc, &#x27;diagnostics&#x27;, {}) or {})</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    response = getattr(exc, &#x27;response&#x27;, None)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    if isinstance(response, httpx.Response):</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        meta.update(response_metadata(response))</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    status = meta.get(&#x27;http_status&#x27;, getattr(exc, &#x27;status_code&#x27;, None))</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    category = {401:&#x27;authentication&#x27;, 403:&#x27;permission&#x27;, 429:&#x27;rate_limit&#x27;}.get(status)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    if category is None and isinstance(status, int):</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        category = &#x27;provider_server&#x27; if status &gt;= 500 else &#x27;protocol&#x27; if status &gt;= 400 else None</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    if category is None:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        if isinstance(exc, (TimeoutError, httpx.TimeoutException)):</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            category = &#x27;timeout&#x27;</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        elif isinstance(exc, httpx.ProtocolError):</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            category = &#x27;protocol&#x27;</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        elif isinstance(exc, httpx.TransportError):</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            category = &#x27;connection&#x27;</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        elif type(exc).__name__ == &#x27;ProviderProtocolError&#x27;:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            category = &#x27;invalid_response&#x27;</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        else:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            category = &#x27;unknown&#x27;</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    return public_diagnostics(meta, code=code, http_status=status, category=category,</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        endpoint=endpoint, model=model, role=call_role.get(), request_seq=request_seq,</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        attempt=call_attempt.get(), retried=call_attempt.get() &gt; 1,</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        safe_to_retry=category in {&#x27;rate_limit&#x27;, &#x27;provider_server&#x27;, &#x27;timeout&#x27;, &#x27;connection&#x27;})</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

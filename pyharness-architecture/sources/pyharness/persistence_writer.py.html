@@ -1,0 +1,300 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/persistence_writer.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/persistence_writer.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 300 行</span></nav><main class="wrap source-page"><h1>pyharness/persistence_writer.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：4931772529318b122862bcc82c2f01ab6652cdf4<br>SHA-256（内容校验）：5e93cfe3de95964d3d3bf10c544e0df9ccea3a4c03411682ad667571d640e088</p><p><a href="../../architecture-detailed.html?node=persistence">JSON Lines Persistence（追加日志持久化与恢复）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 14 个类、函数与方法</summary><ul><li><a href="#L13">PersistenceWriter（类） · L13–L299</a><ul><li><a href="#L16">PersistenceWriter.append（异步方法） · L16–L50</a></li><li><a href="#L52">PersistenceWriter._flush_pending_all（异步方法） · L52–L87</a></li><li><a href="#L89">PersistenceWriter.flush（异步方法） · L89–L138</a><ul><li><a href="#L100">PersistenceWriter.flush._within（方法） · L100–L101</a></li></ul></li><li><a href="#L140">PersistenceWriter._failure_state_reached（方法） · L140–L148</a></li><li><a href="#L150">PersistenceWriter._enter_failure_state（异步方法） · L150–L164</a></li><li><a href="#L166">PersistenceWriter._heal_torn_tail（方法） · L166–L179</a></li><li><a href="#L181">PersistenceWriter._write_batch（方法） · L181–L214</a></li><li><a href="#L216">PersistenceWriter._reconcile_rows（方法） · L216–L244</a></li><li><a href="#L246">PersistenceWriter._remember_committed（方法） · L246–L252</a></li><li><a href="#L254">PersistenceWriter._invalidate_scan（方法） · L254–L257</a></li><li><a href="#L259">PersistenceWriter._tail_looks_torn（方法） · L259–L271</a></li><li><a href="#L273">PersistenceWriter._flush_batch（异步方法） · L273–L299</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;PersistenceWriter operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import json</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import os</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from collections import deque</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from typing import Optional</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.events import Envelope</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.events.vocab import validate_payload</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.persistence_policy import log, _RETRY_Q_LIMIT, _FAIL_STREAK_LIMIT, _resolve_by_seq</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.persistence_reader import _iter_replay, detect_truncation</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>class PersistenceWriter:</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    &quot;&quot;&quot;PersistenceWriter responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    async def append(self, env: Envelope, sync: bool = False) -&gt; None:</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        &quot;&quot;&quot;Envelope → 单行落盘(F011 双速写)。</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        sync=True(强同步三类:user.message/guard.rejected/approval.* 等):立即</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        write+flush,成功才返回(崩溃一致性锚点);否则入 _pending 攒批(满 batch</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        即刷,间隔定时器兜底 —— **定时器不在本类**:由 ``EngineSpine`` 持有</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        (``start_flush_ticker``,间隔读本实例 ``flush_interval_s``),见 GAP-13)。</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        异常:强同步 OSError → PERS-202 直接抛;异步 3 次重试仍败 → PERS-202 +</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        会话暂停;暂停中(拒新不丢旧)→ PERS-202。</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        self.ensure_writable()                   # 拒新不丢旧:暂停期拒绝新事件</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        line = env.model_dump_json() + &quot;\n&quot;       # 信封+payload 拍平单行(§3.6)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        if sync:                                  # 强同步点:成功才返回</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>            # 入 pending + 立即 flush:物理序 = 入队序 = seq 序。若直接 write,</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>            # 会与非 sync 攒批行交错 → 文件物理序 ≠ seq 序(5 在 3/4 前),</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            # 回放遇 seq 倒退即弃 → 重启后 0 事件(实测 bug)。</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>            try:</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>                self._pending.append((env.seq, line))</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                await self._flush_pending_all()</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            except OSError as e:</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>                self._fail_streak += 1</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                if self._failure_state_reached():   # GAP-2:强同步同样受阈值约束</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>                    await self._enter_failure_state(why=str(e))</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>                    raise_code(&quot;PERS-202&quot;, seq=env.seq,</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                               advice=&quot;会话暂停(fail-streak/重试队列达阈值),&quot;</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>                                      &quot;repair 后恢复;本行仍在重试队列&quot;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>                raise_code(&quot;PERS-202&quot;, seq=env.seq, why=str(e),</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>                           advice=&quot;落盘通道故障;跑 repair(F060)&quot;)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        else:                                     # 普通事件:攒批(内存即对订阅者可见)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            self._pending.append((env.seq, line))</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>            if len(self._pending) &gt;= self.flush_batch:   # ≥64 条 → 立即批量 flush</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>                await self._flush_batch()</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            # 间隔定时器兜底:由 EngineSpine.start_flush_ticker 周期性调 flush()</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            # (append 内不 sleep;GAP-13 前该定时器不存在,注释与实现不符)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        self._maybe_rotate()                      # &gt;50MB → 轮转(§8.3.4)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code></code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    async def _flush_pending_all(self) -&gt; None:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        &quot;&quot;&quot;内部:全量 pending + 重试队列写盘(强同步路径用;失败 → OSError 上抛)。</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        失败语义(**F-SYNC-1 修复**):**本批一行不丢**——写失败时把</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        ``retry_old + pending_now`` **完整回填** ``_retry_q``(保序)后上抛</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        ``OSError``;不丢任何一条、不重复任何一条。</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        为什么这样能恢复 caller-visible failure:本函数由装配层适配器(总线订阅者)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        调用,其异常被总线按 EVT-103 隔离——若此处**丢弃**本批,``session.append``</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        步骤 9 的 ``flush(seq)`` 会面对空队列而**静默返回成功**(调用方以为已落盘,</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        实际丢行)。回填后,步骤 9 成为对同一批的**第二次真实尝试**:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        - 成功 ⇒ 事件真正持久,``append`` 成功返回(且 replay 可读出);</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        - 仍失败 ⇒ ``PERS-202`` 上抛至调用方(**不再 silent success**),行仍留在</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>          ``_retry_q`` 待 repair 后恢复。</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        排序:重试行恒先写(旧行 seq 更小),与 ``flush`` / ``_flush_batch`` 三处</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        写入路径语义一致——**seq 不会倒退**,replay 顺序正常。</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        if not self._pending and not self._retry_q:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            return</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        retry_old = list(self._retry_q)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        pending_now = list(self._pending)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        # 一致性校验先行(无副作用):同 seq 异内容 → PERS-202 fail-closed,</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        # 此时尚未改动任何队列 → 两份数据都保留,绝不静默覆盖。</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        to_write = _resolve_by_seq(retry_old + pending_now)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        self._pending = deque()</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        try:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            self._write_batch(to_write)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            self._fh.flush()</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            self._fail_streak = 0</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            self._retry_q.clear()</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        except BaseException:</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            self._retry_q = deque(retry_old)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            self._retry_q.extend(pending_now)     # F-SYNC-1:本批完整回填(保序)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            raise</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    async def flush(self, up_to_seq: Optional[int] = None) -&gt; None:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        &quot;&quot;&quot;公开 flush:把 _pending 与 _retry_q 中 seq ≤ up_to_seq 的行写盘+flush。</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        up_to_seq=None = 全量(定时器/关闭前);成功才返回(强同步契约);OSError →</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        行回重试队列(PERS-202,拒新不丢旧)。调用方:session 强同步点、</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        ``EngineSpine.start_flush_ticker`` 的间隔定时器(GAP-13)、进程收尾。</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        两队列同受 up_to_seq 过滤(P3:此前 retry_q 不过滤,&gt;up_to_seq 的旧重试行会被</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        提前写出、破坏 seq 升序)。</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        if not self._pending and not self._retry_q:</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            return                                # 无积压:空操作</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        def _within(seq: int) -&gt; bool:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            return up_to_seq is None or seq &lt;= up_to_seq</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        take = [it for it in self._pending if _within(it[0])]</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        keep = [it for it in self._pending if not _within(it[0])]</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        self._pending = deque(keep)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        retry_original = list(self._retry_q)      # 保序(失败回填需与写序一致)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        retry_take = [it for it in retry_original if _within(it[0])]</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        retry_keep = [it for it in retry_original if not _within(it[0])]</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        to_write = retry_take + take              # 先重试旧行再新取(seq 升序)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        if not to_write:</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            self._retry_q = deque(retry_keep)     # 全在 up_to_seq 之后:原位保留</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            return</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        try:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            self._write_batch(to_write)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            self._fh.flush()</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>            self._fail_streak = 0                 # 成功:复位连续失败计数</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            self._retry_q = deque(retry_keep)     # 仅剩 &gt;up_to_seq 的旧重试行待刷</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            # R14-15:写通道**确已恢复** ⇒ 解除暂停(recovering→normal)。此前解除点只有</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            # ``SessionStore.repair()``(旧面,生产零调用者)⇒ 一旦因磁盘故障达阈值暂停,</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            # 本进程内**永不恢复**:``append`` 恒被 &quot;拒新不丢旧&quot; 挡回 PERS-202,而重试队列</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            # 只靠定时器重写、永不解除暂停(实测)。现由**既有** flush 定时器</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            # (``EngineSpine.start_flush_ticker``)在通道恢复后自动解除,不需新调用方。</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            if self._suspended:</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                self._suspended = False</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                log.warning(&quot;会话写通道恢复:解除暂停(重试队列已落盘)path=%s&quot;,</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                            self.path)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        except BaseException as e:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>            self._retry_q = deque(retry_original)  # 旧行原样保序保留</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            self._retry_q.extend(take)            # 新取入队:不重不漏</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            if not isinstance(e, OSError):</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                raise</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            self._fail_streak += 1</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            if self._failure_state_reached():     # GAP-2:公开 flush 同样受阈值约束</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                await self._enter_failure_state(why=str(e))</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                raise_code(&quot;PERS-202&quot;, n=len(take),</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                           advice=&quot;会话暂停(fail-streak/重试队列达阈值),&quot;</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                                  &quot;repair 后恢复;行不丢&quot;)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            raise_code(&quot;PERS-202&quot;, n=len(take), why=str(e),</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                       advice=&quot;行已入重试队列不丢;repair 后恢复&quot;)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code></code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    def _failure_state_reached(self) -&gt; bool:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        &quot;&quot;&quot;失败状态判据(**单一真源**;GAP-2):连续失败 ≥ N 或重试队列越界。</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code></code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        全部写路径(强同步 ``append`` / 公开 ``flush`` / 异步 ``_flush_batch``)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        共用本判据——修复前只有异步路径检查,强同步路径的 ``_fail_streak``</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        只增不判 ⇒ 磁盘持续故障时永不暂停、队列无界增长。</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        return (self._fail_streak &gt;= _FAIL_STREAK_LIMIT</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                or len(self._retry_q) &gt; _RETRY_Q_LIMIT)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code></code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    async def _enter_failure_state(self, *, why: str = &quot;&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        &quot;&quot;&quot;进入失败状态:发**可观察证据**(system.error)并暂停会话(拒新不丢旧)。</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code></code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        ``_suspended=True`` 后的新 ``append`` 一律 ``PERS-202``(拒新),已入</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        ``_retry_q`` 的行**一行不丢**(repair → recovering → normal 后恢复)。</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        await self._on_system_event(&quot;system.error&quot;, {</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>            &quot;code&quot;: &quot;PERS-202&quot;,</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            &quot;advice&quot;: &quot;落盘通道故障,会话暂停(拒新不丢旧);已入重试队列的行不会丢,&quot;</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                      &quot;通道恢复后由定时 flush 自动解除暂停(R14-15);&quot;</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>                      &quot;若进程先退出,队列内事件需跑 repair(F060) 复核&quot;,</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            &quot;fail_streak&quot;: self._fail_streak,</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>            &quot;retry_q&quot;: len(self._retry_q),</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>            **({&quot;why&quot;: why} if why else {})})</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        self._suspended = True</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code></code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    def _heal_torn_tail(self) -&gt; None:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        &quot;&quot;&quot;首写前给崩溃残片补一个行尾分隔(2026-09-21 R13-2)。</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code></code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        崩溃可能留下**无换行的尾部半行**;此后任何 append 都会与该残片拼在**同一物理</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        行** ⇒ 新事件不可解析(内存以为已落盘、磁盘读不回 = **静默丢事件**,实测:</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        `…,&quot;type&quot;:&quot;agent.mess{&quot;seq&quot;:3,…`)。此处**只补一个 `\\n`**:残片自成一(坏)行、</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        新事件保持完整可解析;**不删任何字节**(残片留待 repair 按&quot;中部坏行&quot;口径隔离),</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        保持&quot;open/回放不修&quot;的既有口径(§repair:先备份再截断)。</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        if not self._torn_tail:</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            return</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        self._fh.write(&quot;\n&quot;)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        self._fh.flush()</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        self._torn_tail = False</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code></code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    def _write_batch(self, rows: list) -&gt; None:</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        &quot;&quot;&quot;Commit actual missing rows, reconciling uncertain writes before retry.</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code></code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        The cache is derived from complete physical rows, never from write()&#x27;s</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        return value. Drain uncertain TextIO buffers before reading the file;</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        flush/fsync failure cannot cause a visible prefix to be appended twice.</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        rows = _resolve_by_seq(rows)</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        self._fh.flush()</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        self._reconcile_rows()</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        if self._torn_tail:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            self._heal_torn_tail()</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            # A short write may contain the entire JSON object except its newline.</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            # Reconcile the now complete row before deciding which suffix to retry.</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            self._reconcile_rows()</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        missing = []</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        for seq, line in rows:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            expected = json.loads(line)</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            actual = self._committed_rows.get(seq)</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            if actual is not None:</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                if actual != expected:</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>                    raise_code(&#x27;PERS-202&#x27;, op=&#x27;seq_conflict&#x27;, seq=seq)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            else:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                if self._committed_rows and seq &lt;= max(self._committed_rows):</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                    raise_code(&#x27;PERS-202&#x27;, op=&#x27;out_of_order&#x27;, seq=seq)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>                missing.append((seq, line))</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        # An fsync failure is an unknown durability result, never business success.</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        os.fsync(self._fh.fileno())</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        for _seq, line in missing:</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>            if self._fh.write(line) != len(line):</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>                raise OSError(&#x27;short JSONL write&#x27;)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        self._fh.flush()</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        os.fsync(self._fh.fileno())</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        self._reconcile_rows()</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code></code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    def _reconcile_rows(self) -&gt; None:</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        if not self._segments_scanned:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>            for path in self._rotated_paths():</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>                for env in _iter_replay([path], self._quarantine):</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>                    self._remember_committed(env.model_dump(mode=&#x27;json&#x27;))</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>            self._segments_scanned = True</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        with self.path.open(&#x27;rb&#x27;) as source:</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            if source.seek(0, os.SEEK_END) &lt; self._scan_offset:</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>                raise_code(&#x27;PERS-202&#x27;, op=&#x27;unexpected_truncation&#x27;)</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>            source.seek(self._scan_offset)</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>            while True:</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                start = source.tell()</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                line = source.readline()</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                if not line:</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                    self._torn_tail = False</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                    break</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                if not line.endswith(b&#x27;\n&#x27;):</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                    self._torn_tail = True</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>                    self._scan_offset = start</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                    break</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>                try:</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>                    env = Envelope.model_validate_json(line)</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>                    validate_payload(env.type, env.payload)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                    value = env.model_dump(mode=&#x27;json&#x27;)</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                except Exception:</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                    self._scan_offset = source.tell()</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>                    continue  # damaged bytes remain for explicit repair</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>                self._remember_committed(value)</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>                self._scan_offset = source.tell()</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code></code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>    def _remember_committed(self, value):</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        seq = value[&#x27;seq&#x27;]</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        if seq in self._committed_rows:</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>            raise_code(&#x27;PERS-202&#x27;, op=&#x27;duplicate_physical_seq&#x27;, seq=seq)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        if self._committed_rows and seq &lt;= next(reversed(self._committed_rows)):</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>            raise_code(&#x27;PERS-202&#x27;, op=&#x27;out_of_order&#x27;, seq=seq)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        self._committed_rows[seq] = value</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code></code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>    def _invalidate_scan(self):</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        self._scan_offset = 0</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        self._committed_rows.clear()</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        self._segments_scanned = False</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code></code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>    def _tail_looks_torn(self) -&gt; bool:</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        &quot;&quot;&quot;写失败后判定&quot;文件是否停在行中&quot;(R13-3)。</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code></code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        句柄是**缓冲**的 ⇒ 半行可能还在缓冲里:先尽力 ``flush`` 把它推到盘上,再按</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        事实读尾部(``detect_truncation``)。推不出去(仍 OSError)⇒ 无法判定,保守</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        按&quot;可能半行&quot;处理(下轮写前补分隔,最坏多一个空行 —— 空行被 replay 跳过,</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        代价远小于丢事件)。</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        try:</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>            self._fh.flush()</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        except OSError:</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>            return True</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        return detect_truncation(self.path) is not None</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code></code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>    async def _flush_batch(self) -&gt; None:</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        &quot;&quot;&quot;内部:攒批写 + 失败重试(摘批先行:并发 append 不阻塞)。</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code></code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        失败语义:行全部回填 ``_retry_q``(拒新不丢旧),``_fail_streak += 1``;</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        达 ``_failure_state_reached`` ⇒ 暂停会话 + ``PERS-202``;未达阈值 ⇒</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        **静默保留**(等下一次 flush 定时器重试,不在批量路径上抛——批量由</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        ``append`` 的非 sync 分支调用,抛会打断事件发射)。</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        batch, self._pending = self._pending, deque()</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        retry = list(self._retry_q)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        to_write = retry + list(batch)</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        if not to_write:</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            return</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        try:</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>            self._write_batch(to_write)</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            self._fh.flush()</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>            self._fail_streak = 0                 # 成功:复位失败计数</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>            self._retry_q.clear()</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>        except BaseException as e:</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>            self._retry_q = deque(retry)</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            self._retry_q.extend(batch)           # 拒新不丢旧:全部回重试队列</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>            if not isinstance(e, OSError):</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>                raise</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>            self._fail_streak += 1</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>            if self._failure_state_reached():</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                await self._enter_failure_state(why=str(e))</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                raise_code(&quot;PERS-202&quot;, advice=&quot;会话暂停,repair 后恢复&quot;)</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

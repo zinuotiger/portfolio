@@ -1,0 +1,145 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/guard_paths.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/guard_paths.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 145 行</span></nav><main class="wrap source-page"><h1>pyharness/core/guard_paths.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：c759b8ae68a0fc6692525453c47a829277ca9952<br>SHA-256（内容校验）：b3a2fd80abe79a02ce91231063d9b724a660e92bb8f23d37bae0349e94d49b36</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 12 个类、函数与方法</summary><ul><li><a href="#L8">_normcase_path（函数） · L8–L10</a></li><li><a href="#L12">_inside_workspace（函数） · L12–L21</a></li><li><a href="#L23">_norm_target（函数） · L23–L36</a></li><li><a href="#L38">_path_from_args（函数） · L38–L43</a></li><li><a href="#L45">_fs_target（函数） · L45–L47</a></li><li><a href="#L49">_has_dotdot（函数） · L49–L52</a></li><li><a href="#L54">_final_realpath（函数） · L54–L56</a></li><li><a href="#L58">_is_junction（函数） · L58–L65</a></li><li><a href="#L68">_is_linkish（函数） · L68–L93</a><ul><li><a href="#L70">_is_linkish.is_link（方法） · L70–L79</a></li></ul></li><li><a href="#L95">_in_read_extra（函数） · L95–L112</a></li><li><a href="#L114">_resolve_geometry（函数） · L114–L145</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Guard paths: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import os</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import stat</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from typing import Any, Callable, Optional</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>def _normcase_path(p: str) -&gt; str:</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    &quot;&quot;&quot;路径归一(大小写/分隔符;Windows 同源比较用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    return os.path.normcase(os.path.normpath(p))</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>def _inside_workspace(target: str, workspace_root: str) -&gt; bool:</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    &quot;&quot;&quot;target(已 normpath)是否几何落在 workspace_root 内(含根本身)。</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    前缀比较带分隔符边界(防 ws=/a/b 误纳 /a/bc);Windows normcase 后比较。</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    ws = _normcase_path(os.path.abspath(os.path.expanduser(workspace_root)))</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    t = _normcase_path(os.path.abspath(target))</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    if t == ws:</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        return True</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    return t.startswith(ws.rstrip(&quot;\\/&quot;) + os.sep)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>def _norm_target(raw: Any, workspace_root: str) -&gt; str:</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    &quot;&quot;&quot;原始路径 → 参与几何判定的规范绝对串(相对路径以 workspace 为基拼接)。</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    只做词法规范化(normpath),不做 symlink 解析(那是 POL-FS-3 单独职责);</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    规范化后仍可能词法在界内而真实(realpath)在界外 → FS-3 接住。</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    s = str(raw).strip()</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    if not s:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        return os.path.abspath(os.path.expanduser(workspace_root))</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    raw = os.path.expanduser(s)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    ws = os.path.abspath(os.path.expanduser(workspace_root))</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    if os.path.isabs(raw):</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        return os.path.normpath(raw)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    return os.path.normpath(os.path.join(ws, raw))</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>def _path_from_args(args: dict) -&gt; str:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    &quot;&quot;&quot;从动作参数取目标路径(工具契约键面:path/src/dst/target;空 → workspace)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    for key in (&quot;path&quot;, &quot;src&quot;, &quot;dst&quot;, &quot;target&quot;, &quot;dir&quot;):</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        if isinstance(args.get(key), str) and args[key].strip():</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            return args[key]</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    return &quot;&quot;</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>def _fs_target(call: Any) -&gt; str:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    &quot;&quot;&quot;g3/g4/g7 共享:取调用目标路径原文(无 → 空串=workspace 根)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    return _path_from_args(getattr(call, &quot;safe_args&quot;, {}) or {})</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>def _has_dotdot(raw: str) -&gt; bool:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    &quot;&quot;&quot;原始路径是否含 &quot;..&quot; 路径段(fnmatch 段级,防 /a..b 误报)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    return any(seg == &quot;..&quot; for seg in os.path.normpath(str(raw)).split(os.sep)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>               or os.path.normpath(str(raw)).split(&quot;/&quot;))</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>def _final_realpath(p: str) -&gt; str:</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    &quot;&quot;&quot;symlink/junction 最终解析(realpath;不存在路径解析现存前缀,不抛)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    return os.path.realpath(p)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>def _is_junction(path) -&gt; bool:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    &quot;&quot;&quot;Inspect one Windows path without following its junction target (3.11+).&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    if os.name != &quot;nt&quot;:</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        return False</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    try:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        return os.lstat(path).st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    except FileNotFoundError:</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        return False</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>def _is_linkish(p: str) -&gt; bool:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    &quot;&quot;&quot;p 或其现存祖先是否 symlink/junction(触发 FS-3 realpath 复核的门槛)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    def is_link(path: str) -&gt; bool:</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        if os.path.islink(path):</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            return True</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        junction = getattr(os.path, &quot;isjunction&quot;, None)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        if junction is not None:</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            return junction(path)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        try:</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            return _is_junction(path)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        except (OSError, ValueError):</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            return False</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    cur = os.path.normpath(p)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    if is_link(cur):</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        return True</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    parent = os.path.dirname(cur)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    guard = 0</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    while parent and parent != cur and guard &lt; 64:  # 向上找现存链点</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        if is_link(parent):</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            return True</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        nxt = os.path.dirname(parent)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        if nxt == parent:</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            break</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        cur, parent, guard = parent, nxt, guard + 1</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    return False</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>def _in_read_extra(target: str, extra_read_dirs: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    &quot;&quot;&quot;target 是否落在**只读例外目录**内(A2;两层同判口径)。</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    例外目录条目按 `expanduser` + `abspath`(+ 尽力 `realpath`)归一后比较;</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    不可解析的条目跳过(不放大)。**只判包含**:是否&quot;允许&quot;由调用方按**读写**决定。</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    for entry in (extra_read_dirs or ()):</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        raw = str(entry or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        if not raw:</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            continue</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        try:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            base = os.path.abspath(os.path.expanduser(raw))</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            real = os.path.realpath(base)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        except (OSError, ValueError):</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            continue</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        if _inside_workspace(target, base) or _inside_workspace(target, real):</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            return True</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    return False</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>def _resolve_geometry(raw: Any, workspace_root: str,</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                      *, link_resolver: Optional[Callable[[str], str]] = None,</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                      read_only: bool = False,</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                      extra_read_dirs: Any = ()</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                      ) -&gt; tuple[str, Optional[str]]:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    &quot;&quot;&quot;路径几何单点判定(g3 权威语义;F055 单点 guard 侧实现)。</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    返回 (规范绝对路径, policy_ref);policy_ref 非空 = 越界(调用方须拒):</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        POL-FS-1 绝对路径越界(词法不在 workspace)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        POL-FS-2 &quot;..&quot; 段逃逸(规范化后越界)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        POL-FS-3 symlink/junction 终解析越界(词法在界内,真实在界外)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    全过返回 (target, None)。纯只读:零 stat 之外副作用(os.path 探测)。</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    ``read_only`` + ``extra_read_dirs``(**A2/R24**):``security.policy.read_extra_dirs``</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    声明的例外目录**只对读类工具**放行(写类一律仍越界拒)。此前例外在两层都被忽略</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    ⇒ 配置了仍被拒(L-24)。此处与 provider ``resolve_in_workspace`` **同判**。</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    target = _norm_target(raw, workspace_root)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    ws = os.path.abspath(os.path.expanduser(workspace_root))</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>    exempt = bool(read_only) and _in_read_extra(target, extra_read_dirs)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    # 1) POL-FS-1:绝对路径词法越界(不 startswith workspace)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    if os.path.isabs(str(raw).strip()) and not _inside_workspace(target, ws)             and not exempt:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        return (target, &quot;POL-FS-1&quot;)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    # 2) POL-FS-2:&quot;..&quot; 段逃逸(规范化后不在 workspace)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    if _has_dotdot(str(raw)) and not _inside_workspace(target, ws)             and not exempt:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        return (target, &quot;POL-FS-2&quot;)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    # 3) POL-FS-3:symlink/junction 终解析越界(链点存在才查,防误伤普通路径)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    if _is_linkish(target):</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        final = (link_resolver or _final_realpath)(target)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        if not _inside_workspace(final, ws) and not exempt:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            return (target, &quot;POL-FS-3&quot;)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    return (target, None)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

@@ -1,0 +1,85 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/product_index_repairs.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/product_index_repairs.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 85 行</span></nav><main class="wrap source-page"><h1>pyharness/application/product_index_repairs.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：9806e772b3c68c6e8c355694c3d5a4e649d23beb<br>SHA-256（内容校验）：f64a4af41b578af4e70ff452120b1bcba5a872dc5034e8c3fb10e8bf90354479</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 9 个类、函数与方法</summary><ul><li><a href="#L18">index_path（函数） · L18–L18</a></li><li><a href="#L21">ProductIndexRepairs（类） · L21–L85</a><ul><li><a href="#L22">ProductIndexRepairs._index_repair_context（异步方法） · L22–L56</a><ul><li><a href="#L37">ProductIndexRepairs._index_repair_context.verify（方法） · L37–L40</a></li><li><a href="#L41">ProductIndexRepairs._index_repair_context.acquire（方法） · L41–L53</a></li></ul></li><li><a href="#L58">ProductIndexRepairs._perform_index_repair（异步方法） · L58–L67</a></li><li><a href="#L69">ProductIndexRepairs.repair_execution_index（异步方法） · L69–L75</a></li><li><a href="#L77">ProductIndexRepairs.index_repair_submission（异步方法） · L77–L80</a></li><li><a href="#L82">ProductIndexRepairs.index_repairs（异步方法） · L82–L85</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Exact private journal leases and only the original FTS rebuild operation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.execution_contracts import ExecutionId</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.index_repair_contracts import RepairIndex</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.run_attempt_contracts import SubmissionKey</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.workspace_contracts import ProjectId</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.workspace_store import digest_of,canonical</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.application.execution_recovery_plan import observe_recovery_plan,index_observation,index_scope_path,journal_basis</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.application.execution_child_reader import read_child_log</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.application.product_execution_sessions import read_execution_log</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.core.lifecycle import admitted</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pyharness.core.sandbox import safe_path,read_regular</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>from pyharness.persistence import _FileLock,session_data_paths,session_lock_path,session_lock_held</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>def index_path(service):return index_scope_path(service)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>class ProductIndexRepairs:</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    async def _index_repair_context(self,row,summary):</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        service=self.service;plan=await observe_recovery_plan(self,row,summary)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        directory=service._tenant_sessions_dir();path=index_path(service);scope=digest_of(canonical(str(path)))</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        if plan[&#x27;index_observation&#x27;][&#x27;scope_digest&#x27;]!=scope:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;index_repair_scope_changed&#x27;)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        files={};total=0</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        for basis in plan[&#x27;journals&#x27;]:</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>            main=safe_path(directory,basis[&#x27;session_id&#x27;]+&#x27;.jsonl&#x27;)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>            for item in session_data_paths(main):</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>                item=safe_path(directory,item.name);raw=read_regular(item,32*1048576);total+=len(raw)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>                if total&gt;64*1048576 or len(files)&gt;=256:raise_code(&#x27;EVT-100&#x27;,reason=&#x27;index_repair_journal_limit&#x27;)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>                files[item]=digest_of(raw)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        root=await read_execution_log(directory,row,service.tenant_id);events=list(root.events_after(0))</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        for basis in plan[&#x27;journals&#x27;]:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            log=root if basis[&#x27;session_id&#x27;]==root.sid else await read_child_log(directory,row,service.tenant_id,basis[&#x27;session_id&#x27;])</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            if journal_basis(log)!=basis:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;index_repair_plan_journal_changed&#x27;)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        def verify():</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            if digest_of(canonical(str(index_path(service))))!=scope:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;index_repair_scope_changed&#x27;)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            for item,digest in files.items():</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                if digest_of(read_regular(item,32*1048576))!=digest:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;index_repair_journal_changed&#x27;)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        def acquire():</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            leases=[]</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>            try:</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>                for basis in sorted(plan[&#x27;journals&#x27;],key=lambda b:b[&#x27;session_id&#x27;]):</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>                    lock_path=session_lock_path(safe_path(directory,basis[&#x27;session_id&#x27;]+&#x27;.jsonl&#x27;))</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                    if session_lock_held(lock_path):raise_code(&#x27;GRD-403&#x27;,reason=&#x27;index_repair_journal_writer_active&#x27;)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>                    lease=_FileLock(lock_path)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>                    if not lease.try_acquire():raise_code(&#x27;PERS-202&#x27;,reason=&#x27;index_repair_journal_lease_unavailable&#x27;)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>                    leases.append(lease)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>                return leases</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            except BaseException:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                for lease in reversed(leases):lease.release()</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                raise</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        verify()</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        return dict(plan=plan,path=path,scope_digest=scope,files=files,events=events,verify=verify,acquire=acquire,</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>            observe=lambda:index_observation(service,events))</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    async def _perform_index_repair(self,context):</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        from pyharness.core.session_query import SessionQueryIndex</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        context[&#x27;verify&#x27;]();index=SessionQueryIndex(db_path=context[&#x27;path&#x27;])</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        try:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            await index.enter()</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            sid=context[&#x27;events&#x27;][0].session_id</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            index.attach_source(sid,SimpleNamespace(replay=lambda:iter(context[&#x27;events&#x27;])))</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            await index.rebuild(session_id=sid)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        finally:await index.detach()</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        context[&#x27;verify&#x27;]();return context[&#x27;observe&#x27;]()</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code></code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    @admitted</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    async def repair_execution_index(self,project,ident,body,command_id):</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        self._authorize(write=True);project=self._workspace_id(project,ProjectId);ident=self._workspace_id(ident,ExecutionId)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        command=RepairIndex.model_validate(body);key=self._workspace_id(command_id,SubmissionKey)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        if command.execution_ref.execution_id!=ident:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;index_repair_execution_reference&#x27;)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        return await self.store.apply_index_repair(project,command,command_id=key,authorize=lambda:self._authorize(write=True),</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            inspect=self._index_repair_context,perform=self._perform_index_repair)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    @admitted</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    async def index_repair_submission(self,project,key):</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        self._authorize(write=True);project=self._workspace_id(project,ProjectId);key=self._workspace_id(key,SubmissionKey)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        return await self.store.index_repair_submission(project,key,authorize=lambda:self._authorize(write=True))</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    @admitted</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    async def index_repairs(self,project,ident):</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        self._authorize(write=True);project=self._workspace_id(project,ProjectId);ident=self._workspace_id(ident,ExecutionId)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        return await self.store.index_repairs(project,ident,authorize=lambda:self._authorize(write=True))</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

@@ -1,0 +1,66 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/execution_child_boundary.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/execution_child_boundary.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 66 行</span></nav><main class="wrap source-page"><h1>pyharness/application/execution_child_boundary.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：df571cc411c266b7336599c7713bfd3f99f09d8e<br>SHA-256（内容校验）：7ab27c37c2acc45b187b4f9b5bdbbe6088a84868a8534f481b7a0bcb6056417c</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 7 个类、函数与方法</summary><ul><li><a href="#L12">ProductChildBoundary（类） · L12–L66</a><ul><li><a href="#L13">ProductChildBoundary.__init__（方法） · L13–L15</a></li><li><a href="#L17">ProductChildBoundary._context（方法） · L17–L20</a></li><li><a href="#L22">ProductChildBoundary.checked（方法） · L22–L26</a></li><li><a href="#L28">ProductChildBoundary.append_phase（异步方法） · L28–L32</a></li><li><a href="#L34">ProductChildBoundary.before_model_attempt（异步方法） · L34–L44</a></li><li><a href="#L46">ProductChildBoundary.run_task（异步方法） · L46–L66</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;A delegated turn inherits its root authority, deadline and captured workspace.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import asyncio</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.execution_boundary import ProductExecutionBoundary</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.execution_configuration import compiled_configuration</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.execution_contracts import AgentVersionReference</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.execution_delegation import own_lifecycle,scope_digest</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.execution_effects import confirmed_events,flush_confirmed</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.workspace_store import digest_of</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>class ProductChildBoundary(ProductExecutionBoundary):</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    def __init__(self,root,payload,scope):</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>        super().__init__(root.projects,root.receipt,root.materials)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        self.root=root;self.payload=payload;self.scope=scope;self.deadline=root.deadline;self.entered=False</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    def _context(self,ctx):</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        sid=self.payload[&#x27;child_session_id&#x27;]</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        if ctx.session.sid!=sid or str(ctx.task_id)!=&#x27;subagent:&#x27;+sid or ctx.scope is not self.scope:</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;product_child_context_changed&#x27;)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    def checked(self):</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        result=self.root.checked()</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        if scope_digest(self.scope)!=self.payload[&#x27;scope_digest&#x27;]:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;product_child_scope_changed&#x27;)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        self.root.children.check_parent(self.payload)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        return result</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    async def append_phase(self,ctx,phase,reason=None):</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        self._context(ctx)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        event=await ctx.session.append(&#x27;execution.child&#x27;,dict(self.payload,phase=phase,reason=reason),</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            actor=&#x27;system&#x27;,task_id=str(ctx.task_id),sync=True)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        if confirmed_events(ctx.session)[-1]!=event:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;child_lifecycle_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    async def before_model_attempt(self,model,method,ctx):</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        self._context(ctx);events=await flush_confirmed(ctx.session);self.checked()</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        if [e.payload[&#x27;phase&#x27;] for e in own_lifecycle(events,ctx.session.sid)]!=[&#x27;bound&#x27;,&#x27;running&#x27;]:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;product_child_not_running&#x27;)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        _,cfg=compiled_configuration(self.projects,AgentVersionReference.model_validate(self.receipt[&#x27;agent_ref&#x27;]))</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        from pyharness.application.execution_model_identity import model_configuration_admission</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        configuration_ok,model_ok=model_configuration_admission(ctx.config.llm,cfg.llm,self.projects.service.llm_runtime.registry,model)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        if not configuration_ok or not model_ok:</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;product_child_model_changed&#x27;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        from pyharness.application.execution_state_contract import verify_state_contract</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        verify_state_contract(self,ctx,events)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    async def run_task(self,event,ctx,invoke):</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        self._context(ctx);self.checked()</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        if self.entered or digest_of(event.payload[&#x27;content&#x27;].encode())!=self.payload[&#x27;task_digest&#x27;]:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;product_child_input_changed&#x27;)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        self.entered=True</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        try:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            async with asyncio.timeout_at(self.root.deadline):</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                await flush_confirmed(ctx.session);self.checked()</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                await self.append_phase(ctx,&#x27;running&#x27;)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                result=await invoke()</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                self.checked()</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        except BaseException as exc:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            phase=&#x27;cancelled&#x27; if isinstance(exc,asyncio.CancelledError) else &#x27;failed&#x27;</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            reason=&#x27;execution_cancelled&#x27; if phase==&#x27;cancelled&#x27; else &#x27;execution_deadline_expired&#x27; if isinstance(exc,TimeoutError) else str(getattr(exc,&#x27;code&#x27;,&#x27;child_execution_failed&#x27;))[:100]</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            try:await self.append_phase(ctx,phase,reason)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            except BaseException as secondary:exc.add_note(&#x27;child terminal unavailable: &#x27;+type(secondary).__name__)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            raise</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        reason=getattr(result,&#x27;reason&#x27;,None)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        await self.append_phase(ctx,&#x27;completed&#x27; if reason==&#x27;complete&#x27; else &#x27;cancelled&#x27; if reason==&#x27;cancelled&#x27; else &#x27;failed&#x27;,</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            None if reason==&#x27;complete&#x27; else getattr(result,&#x27;error_code&#x27;,None) or (&#x27;LLM-305&#x27; if reason==&#x27;budget&#x27; else &#x27;runner_stopped&#x27;))</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        return result</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

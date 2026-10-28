@@ -1,0 +1,240 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/subagent.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/subagent.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 240 行</span></nav><main class="wrap source-page"><h1>pyharness/core/subagent.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：0899a9141e630e0db7a8a521113367111677f818<br>SHA-256（内容校验）：1811bc8eaab0793a082efd53fcbc68be904269563db7e67a8ea39d8e2d1490da</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 3 个类、函数与方法</summary><ul><li><a href="#L107">SubagentManager（类） · L107–L194</a><ul><li><a href="#L128">SubagentManager.__init__（方法） · L128–L171</a></li><li><a href="#L173">SubagentManager._child_workspace_root（方法） · L173–L194</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/subagent.py — 子 Agent 进程内派发 (specs/subagent.py.md 契约;F049,阶段 4)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>一句话:主 agent 派生子 agent(F049)——子任务跑在**独立 session**(自己的 JSONL/seq/</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>workspace 根,F044 段不嵌套),与主会话共享进程/凭据口/guard 策略;主会话只落</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>``subagent.spawned/joined/failed`` 三件委派事实(结果摘要 ≤2KB 以**数据身份**回主</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>会话,不是第二指令源);并发 ≤8、递归深度 ≤3、子预算=父×1/4 且计入父任务;危险操作</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>**同权过 guard、无父级担保**;模块自身按 DIS-SEAM §2.4 以能力 Provider 形态接入</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>(enter→announce→detach),detach/会话关闭走 **child-first 清理**(先杀光在途子任务</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>并落终态事件,再摘父侧接线)。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>安全边界(子=分工非特权,SECURITY §3.5/§6.2):①子会话 scope = 父策略快照且只可更紧</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>(继承 deny_tools/allowed_domains;spec.tools_subset/deny_extra 只收窄,无&quot;父级担保&quot;</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>通道);②子任务内任何危险操作照走 F014/F015 同权 guard;③凭据最小权限</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>(spec.creds_allowed 子集,透传给子循环 F016 读口过滤);④子摘要(≤2KB)以 tool-result</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>同等数据身份入主会话,永远成不了 system 指令(reducer 不把 subagent.* 映射为消息,</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>F049 的 LLM 可见摘要经 spawn 工具的 tool.result 路径回喂,见偏离 8);⑤child-first</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>清理:任何拆除路径(用户取消/父会话关闭/模块 detach)先终止全部在途子任务,防止子</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>任务在父会话 finished 后回写 joined → EVT-104。</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>偏离说明(契约=specs/subagent.py.md;以下为与既有实现/规格冲突处的取舍,均列理由,</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>与 task_queue.py/goal.py/agent.py 同款先例,已入 docstring 供审查):</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>1. ``Session.spawn(parent=, budget=, policy=)`` 工厂不存在(SessionLog 无 spawn 面,</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   agent.enter 才写 session.created)→ 子会话经注入的 **session_factory** seam 创建</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   (默认 SessionLog 纯内存 + 就地引导 session.created,seq=1),父策略/预算缩放传给</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   child_scope_factory(默认自 scope.from_snapshot 同源值拷贝构造独立 Scope,workspace</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>   根换成 storage.workspaces_dir/{sub_id},不注册全局 _scopes 表——子 scope 生命周期</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>   随 ChildHandle,release 由装配层随子会话关闭处理)。</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>2. 父会话绑定:spec 伪码事件全经 ctx.* 取服务;实际代码库能力模块(goal/task_queue)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   先例 = 构造期绑定 session(父会话 SessionLog),spawn/join/cancel/status 的事件写口</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   用绑定会话,ctx 只作 scope/tools/bus/轮锚的附加来源(允许缺省)。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>3. 预算表达:spec 伪码 ``ctx.scope.budget * spec.budget_ratio`` 为单一标量;实际 scope</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>   落地为 BudgetLimits(max_in_tokens/max_out_tokens/max_cost_yuan/warn_ratio)→ 子预算</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   = 父 limits 逐字段 × ratio(下限 1),&quot;计入父任务&quot;的用量回写(meter 层 task 级聚合)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>   属装配层接线:本模块提供 ChildContext.budget_limits 供子循环 scope 同源取用,并留</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   charge_hook 注入位(默认 None = 纯分配记账;真 wire 由装配层把子用量 report 进父</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>   任务计数器,防 8 个子任务各 1/4 超父总盘)。</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>4. 并发闸语义:spec 结构表 _sem=Semaphore(acquire 排队)与其异常表&quot;并发满→BUSY 拒新&quot;</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   矛盾 → 用**计数闸**(单线程事件循环,计数增减间无 await,原子):满(≥limit)→ BUSY</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>   拒新,不排队;子任务终态释放。max_concurrent 可注入(默认 8)便于测试。</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>5. 深度闸语义:spec.depth 即&quot;本子任务所处层级&quot;(主会话=0,首层=1,…≤3);除上界</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>   (depth &gt; 3 → BUSY)外补**递增闸**(spec.depth &lt; 自身层级+1 → BUSY,防平级/降级派发</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>   绕过递归闸);非 int → EVT-100。子执行器拿到 env.spec.depth,装配层据其构造下一层</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>   manager(depth=spec.depth),形成 ≤3 的硬链。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>6. ChildHandle.started_ts 用 epoch 秒(float):spec 表型 str 与 status 伪码</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>   ``int(now - h.started_ts)`` 减法矛盾,取数值语义。</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>7. agent_loop.run(sub_session, intent=, tools=) 面不存在(实际 agent_loop.run(ctx) 是</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>   排水监督器,无 intent 入口)→ 子执行器经构造注入 **runner seam**(async</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>   run_child(env) -&gt; Any,env=ChildContext{session/spec/scope/budget_limits}),</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>   task_queue.runner 同款先例;未装配 runner → 子任务 CYC-999 快速失败(防 S-1&quot;伪造</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>   已执行&quot;,宁失败不静默假完成)。F007 唯一 LLM 入口纪律(INV-02)由 runner 内部保证。</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>8. F049 工具路径:announce 注册 ``subagent.spawn`` 工具(Definition danger=none +</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>   Provider 适配器),Provider.handle = spawn + join,返回 ≤2KB 摘要——LLM 视角一次</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>   工具调用即&quot;派发并回收&quot;,摘要经 executor 的 tool.result 管道以 tool 数据身份进主</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>   会话派生历史(reducer §4.2 不映射 subagent.* 事件,故摘要不入主历史则永不可见)。</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>9. enter/announce/detach 的 ctx 可为 None(装配层已构造期注入 bus/tools 时);事件类型</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>   登记按 EventBus 实例弱引用去重(同 bus 重复 enter/重入幂等,防 register_type 二次</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>   注册撞 EVT-102;tools_registry._registered_buses 同款先例)。</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>10. 终态事件写口统一 ``_write_event``:actor=agent/origin=cap:subagent;EVT-104(父会话</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    已 finished)兜底只记本地日志不阻断子回收(spec _run_child 异常表同语义);spawned</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    落盘失败则 EVT-104 上抛(派发闸,spec spawn 异常表)。</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>11. &quot;session.closing&quot; 为规范预关钩子事件名(词表外,无触发方;agent.close 目前先</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    cancel 在途 run 再 append finished,能力级 pre-finished 清理钩子属阶段 5 装配)——</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    announce 按 spec 挂订阅 owner=cap:subagent;detach 自身即 child-first,兜底无孤儿;</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    测试直接 emit 或调用 _on_session_closing 驱动。</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code></code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>错误全走 raise_code(EVT-1xx/TLB-8xx)/字面量 BUSY(PyHError 直构,未登记码先例),</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>禁裸 raise str。</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>from pyharness.core.lifecycle import admitted, stop_admissions</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>import asyncio</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>import inspect</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>import itertools</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>import json</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>import logging</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>import time</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>import weakref</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>from typing import Any, Callable, Literal, Optional</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>from pyharness.errors import PyHError, raise_code, wrap_unexpected</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>from pyharness.core.session import SessionLog</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code></code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code># ------------------------------------------------------------------ 约束常量</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code># 参数锚定(PARAMETER-ANCHOR/CFG.md 锁死;禁自创数字):并发 ≤8/深度 ≤3/预算 1/4/摘要 ≤2KB</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code># ------------------------------------------------------------------ 数据结构</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code># ------------------------------------------------------------------ 文本辅助</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>from pyharness.core.result_text import render_result_text</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code># ------------------------------------------------------------------ SubagentManager</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>from pyharness.core.subagent_models import (log, MAX_DEPTH, MAX_CONCURRENT, DEFAULT_BUDGET_RATIO, SUMMARY_MAX_CHARS, TOOL_NAME, SUBA_OWNER, CHILD_PREFIX, EVENT_TYPES, _TERMINAL, _raise_busy, ChildState, SubagentSpec, ChildContext, ChildHandle, SubagentStatus, summarize, _scale_limits)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code></code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>from pyharness.core.subagent_provider import (SubagentSpawnProvider)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code></code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>from pyharness.core.subagent_context import SubagentContext</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>from pyharness.core.subagent_lifecycle import SubagentLifecycle</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>from pyharness.core.subagent_execution import SubagentExecution</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code></code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>class SubagentManager(SubagentContext, SubagentLifecycle, SubagentExecution):</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    &quot;&quot;&quot;子 Agent 进程内派发管理器(F049;编排层,绑定父会话)。</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    生命周期 = DIS-SEAM §2.4 能力三动作(enter→announce→detach,均可 None ctx/幂等);</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    核心入口 spawn(spec, ctx) 四道约束闸(深度 ≤3/工具子集在册/并发 ≤8/预算=父×ratio</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    且计入父任务)全过 → 建独立子会话 → 父会话落 subagent.spawned → 登记 ChildHandle</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    并起 _run_child 协程;join/cancel/status 供主循环回收/取消/查询;子任务终态 →</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    摘要(≤2KB)→ subagent.joined / PyHError → subagent.failed;child-first 清理在</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    detach/_on_session_closing 统一收口(先杀光在途子任务并落终态事件,再摘父侧接线)。</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code></code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    构造注入(INV-08 装配纪律):session = 父会话 SessionLog(事件写口,必填用于</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    spawn);runner = 子执行器 seam(偏离 7);parent_scope/tools/bus = ctx 缺省来源</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    (spawn 亦可经 ctx 现取);cfg = 分层配置(Settings,读 budget.subagent_ratio 上限);</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    depth = 本 manager 所处递归层级(主会话=0);session_factory/child_scope_factory/</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    child_id_factory = 子会话/子 scope/子 id 构造 seam(默认实现见下,测试注入替身);</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    max_concurrent/max_depth/budget_ratio/summary_max_chars = 约束闸参数(默认取常量)。</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    # EventBus 实例弱引用去重:同 bus 重复 register_type 会 EVT-102(偏离 9)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    _typed_buses: &quot;weakref.WeakKeyDictionary[Any, None]&quot; = weakref.WeakKeyDictionary()</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code></code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    def __init__(self, session: Optional[Any] = None, *,</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>                 runner: Any = None, parent_scope: Any = None,</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                 tools: Any = None, bus: Any = None, cfg: Any = None,</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                 depth: int = 0,</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                 max_concurrent: int = MAX_CONCURRENT,</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                 max_depth: int = MAX_DEPTH,</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                 budget_ratio: Optional[float] = None,</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                 summary_max_chars: int = SUMMARY_MAX_CHARS,</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                 session_factory: Optional[Callable[[str], Any]] = None,</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                 child_scope_factory: Optional[Callable[..., Any]] = None,</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                 child_id_factory: Optional[Callable[[], str]] = None,</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                 charge_hook: Optional[Callable[..., Any]] = None,</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                 owner: str = SUBA_OWNER) -&gt; None:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        self._session: Any = session            # 父会话(事件写口)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        self._runner: Any = runner              # 子执行器 seam(见偏离 7)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        self._parent_scope: Any = parent_scope  # 父 scope(预算/策略快照源)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        self._tools: Any = tools                # 工具注册表(tools_subset 在册校验)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        self._bus: Any = bus                    # 总线(类型登记/订阅/留痕)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        self._cfg: Any = cfg                    # Settings(读 budget.subagent_ratio)</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        self._depth: int = int(depth)           # 本 manager 递归层级(主=0)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        self._max_concurrent: int = int(max_concurrent)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        self._max_depth: int = int(max_depth)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        # 预算比例上限:显式 &gt; cfg.budget.subagent_ratio &gt; 常量 0.25(PARAMETER-ANCHOR)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        self._budget_ratio: float = self._resolve_budget_ratio(</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            budget_ratio, cfg) if budget_ratio is None else float(budget_ratio)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        self._summary_max_chars: int = int(summary_max_chars)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        self._session_factory = session_factory or self._default_session</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        self._child_scope_factory = child_scope_factory or self._default_child_scope</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        self._child_id_factory = child_id_factory or self._default_sub_id</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        self._charge_hook: Any = charge_hook    # 子用量计入父任务钩子(偏离 3)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        self._owner: str = owner                # 订阅属主(默认 cap:subagent)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        self._entered: bool = False             # enter 完成标记(幂等闸)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        self._announced: bool = False           # announce 完成标记(幂等闸)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        self._children: dict[str, ChildHandle] = {}</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        # Bounded immutable results, never completed tasks/session/scope handles.</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        from collections import OrderedDict</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        self._completed = OrderedDict()</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        self._completed_limit = 128</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        self._sem = asyncio.Semaphore(self._max_concurrent)  # 结构表字段(计数闸见偏离 4)</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        self._active: int = 0                   # 并发计数(真源;BUSY 拒新判定)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        self._sub_seq = itertools.count(1)      # 子 id 单调源</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        self._mount_ns: Any = None              # announce mount 目标(agent 命名空间)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        self._mount_prev: Any = None            # mount 前旧值(detach 恢复)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        self._announce_ctx: Any = None          # announce 时的 ctx(供 detach 无参摘除)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code></code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    def _child_workspace_root(self, parent_root: Any, sub_id: str) -&gt; str:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        &quot;&quot;&quot;F055 子会话独立根 = {storage.workspaces_dir}/{sub_id}(唯一派生点)。</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code></code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        权威:`specs/subagent.py.md` §约束常量&quot;child workspace 根=</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        `~/.pyharness/workspaces/{sub_id}/`&quot;、`CFG.md §3.6`。根目录取 config 权威键</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        `storage.workspaces_dir`;cfg 未注入(单测注入替身)时按**父根同族**推导</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        ——父根形态即 `{workspaces_dir}/{parent_sid}`,取 `.parent` 回到树根。</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        两条路径都经 `scope.session_workspace` 拼接,禁止就地字符串拼接。</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code></code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        2026-09-21 修(N10):此前恒用 `base.parent/{sub_id}`,而装配层父根曾为**裸**</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        workspaces_dir → 子根落到 `~/.pyharness/{sub_id}`(越出 workspaces 树)且</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        无人 mkdir,子代理文件类工具全废(治理判 allow、provider 报 TLB-802)。</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        ws_dir = getattr(getattr(self._cfg, &quot;storage&quot;, None),</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                         &quot;workspaces_dir&quot;, None)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        if not ws_dir:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>            from pathlib import Path</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>            base = Path(str(parent_root or</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                            &quot;~/.pyharness/workspaces&quot;)).expanduser()</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            ws_dir = str(base.parent)</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        from pyharness.core.scope import session_workspace</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        return session_workspace(str(ws_dir), sub_id)</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code></code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code></code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    # ============================================================ 内部辅助</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code></code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code></code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    # ============================================================ 事件写口</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code></code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>    # ============================================================ DIS-SEAM §2.4 ①</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code></code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code></code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>    # ============================================================ DIS-SEAM §2.4 ②</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code></code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code></code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>    # ============================================================ DIS-SEAM §2.4 ③</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code></code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    # ============================================================ F049 派发核心</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code></code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code></code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>    # ============================================================ 子任务执行回收</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code></code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code></code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>    # ============================================================ 结果回收</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code></code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>    # ============================================================ 取消(F025)</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code></code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>    # ============================================================ 状态查询</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code></code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>    # ============================================================ child-first 清理</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code></code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code></code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    # 便捷别名:装配层/测试可直接调 _on_session_closing 语义(类型过滤占位)</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code></code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code></code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code># ------------------------------------------------------------------ 工具 Provider</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code></code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code></code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>__all__ = [</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>    &quot;SubagentManager&quot;, &quot;SubagentSpec&quot;, &quot;ChildContext&quot;, &quot;ChildHandle&quot;,</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>    &quot;SubagentStatus&quot;, &quot;SubagentSpawnProvider&quot;, &quot;ChildState&quot;,</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>    &quot;MAX_DEPTH&quot;, &quot;MAX_CONCURRENT&quot;, &quot;DEFAULT_BUDGET_RATIO&quot;,</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    &quot;SUMMARY_MAX_CHARS&quot;, &quot;TOOL_NAME&quot;, &quot;SUBA_OWNER&quot;, &quot;summarize&quot;,</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>]</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code></code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code># 向后兼容别名(装配层两种拼写消费)</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>Subagent = SubagentManager</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

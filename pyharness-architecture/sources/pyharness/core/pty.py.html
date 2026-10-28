@@ -1,0 +1,410 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/pty.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/pty.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 410 行</span></nav><main class="wrap source-page"><h1>pyharness/core/pty.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：4330f0209e0aa9fd0ebd101e707cfbb34b9a92fb<br>SHA-256（内容校验）：3da5fcce4336a27b84358a9e119e149fcdd7b88f704feaa763a8dad0380d8edd</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 27 个类、函数与方法</summary><ul><li><a href="#L48">_tree_kill（函数） · L48–L64</a></li><li><a href="#L68">_WinPtySession（类） · L68–L208</a><ul><li><a href="#L71">_WinPtySession.__init__（方法） · L71–L83</a></li><li><a href="#L85">_WinPtySession.start（方法） · L85–L98</a></li><li><a href="#L100">_WinPtySession._pump（方法） · L100–L123</a></li><li><a href="#L126">_WinPtySession.write（方法） · L126–L132</a></li><li><a href="#L134">_WinPtySession.read（方法） · L134–L152</a></li><li><a href="#L154">_WinPtySession.finished（方法） · L154–L165</a></li><li><a href="#L167">_WinPtySession.exit_code（方法） · L167–L178</a></li><li><a href="#L180">_WinPtySession.wait（方法） · L180–L188</a></li><li><a href="#L190">_WinPtySession.kill（方法） · L190–L194</a></li><li><a href="#L196">_WinPtySession.close（方法） · L196–L208</a></li></ul></li><li><a href="#L212">_PosixPty（类） · L212–L320</a><ul><li><a href="#L215">_PosixPty.__init__（方法） · L215–L224</a></li><li><a href="#L226">_PosixPty.start（方法） · L226–L246</a></li><li><a href="#L248">_PosixPty.write（方法） · L248–L254</a></li><li><a href="#L256">_PosixPty._drain（方法） · L256–L270</a></li><li><a href="#L272">_PosixPty.read（方法） · L272–L284</a></li><li><a href="#L286">_PosixPty.exit_code（方法） · L286–L289</a></li><li><a href="#L291">_PosixPty.finished（方法） · L291–L293</a></li><li><a href="#L295">_PosixPty.wait（方法） · L295–L303</a></li><li><a href="#L305">_PosixPty.kill（方法） · L305–L307</a></li><li><a href="#L309">_PosixPty.close（方法） · L309–L320</a></li></ul></li><li><a href="#L324">pty_supported（函数） · L324–L326</a></li><li><a href="#L329">_unavailable（函数） · L329–L332</a></li><li><a href="#L335">open_pty（函数） · L335–L351</a></li><li><a href="#L354">run_in_pty（函数） · L354–L406</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/pty.py — 真实伪终端(PTY)执行后端(F053)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>一句话职责:把命令放进**真 PTY** 里跑,使子进程看到 isatty()=True 的终端语义</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>(颜色/TTY 判定/行编辑/交互式 CLI 可用)。这是 proc.py 行式管道(stdin 写/stdout</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>读)的**升级替代**,不是降级。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>后端选型(实测决定,诚实记录):</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>- Windows:`pywinpty`(ConPTY 的成熟封装,可选依赖 extra `pty`)。</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>  ⚠️ 为什么不自己 ctypes 直连 CreatePseudoConsole:2026-09-12 本机实测,按</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>  MSDN 流程(CreatePipe → CreatePseudoConsole → STARTUPINFOEXW +</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>  PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE → CreateProcessW)自建实现能创建并启动</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>  子进程,但 **输出端 PeekNamedPipe/ReadFile 恒为 0 字节**(7 种句柄/线程/轮询</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>  变体全试过);同环境 pywinpty 一次跑通并返回带控制序列的输出。故采用成熟封装,</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>  不再重复造 ConPTY 轮子(依赖缺失 → TLB-807,提示 pip install pywinpty)。</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>- POSIX:标准库 `pty.openpty`(零依赖)。</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>与 proc.py 的分工:</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>- proc.py    : 后台会话式进程(行式,可 status/kill 管理),无 TTY 语义;</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>- pty.py(本): 一次性 PTY 执行(可喂 stdin/超时/收集输出),有 TTY 语义;</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>- 两者共同点:cwd 锁在会话沙箱目录、env 走 proc.sandbox_env 白名单(不继承</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>  API key/代理)、墙钟上限——**都是误操作约束,不是安全沙箱**;安全主闸仍是</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>  exec 域的 danger=high → 审批(F015)。</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>import logging</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>import os</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>import shlex</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>import subprocess</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>import threading</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>import time</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>from typing import Any, Optional, Union</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code></code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>from pyharness.core import proc as _proc     # 复用树级终止(单源,CND-05)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>log = logging.getLogger(&quot;pyharness.pty&quot;)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code></code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>DEFAULT_COLS = 120</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>DEFAULT_ROWS = 30</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>READ_CHUNK = 4096</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>MAX_OUTPUT_CHARS = 200_000          # 收集上限(超出截断,防打爆上下文)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>GRACE_KILL_S = 3.0                  # 墙钟超时后的收尾宽限</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>POLL_S = 0.02                       # 空读轮询间隔</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>def _tree_kill(pid: Optional[int], fallback: Any) -&gt; None:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    &quot;&quot;&quot;树级终止(复用 proc._kill_pid_tree:Windows taskkill /T /F、POSIX killpg)。</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    CND-05/契约`SECURITY §4`+`CFG F052`:&quot;超时杀进程树防孤儿&quot;——PTY 的 shell 常有</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    子孙进程,只杀直接进程会遗留孤儿(载体未真正驱逐)。PID 缺失/异常 → 回退 fallback</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    (直接进程,kill/terminate 尽力收尾)。</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    if pid:</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        try:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            _proc._kill_pid_tree(int(pid))</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            return</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        except Exception:                           # noqa: BLE001 收尾尽力</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            pass</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    try:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        fallback()</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    except Exception:                               # noqa: BLE001 收尾尽力</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        pass</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code></code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code># ------------------------------------------------------------------ Windows</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>class _WinPtySession:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    &quot;&quot;&quot;pywinpty(ConPTY)会话:后台线程读、非阻塞轮询取缓冲。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    def __init__(self, command: Union[str, list], *, cwd: Path, env: dict,</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                 cols: int = DEFAULT_COLS, rows: int = DEFAULT_ROWS) -&gt; None:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        self.command = command</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        self.cwd = cwd</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        self.env = env</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        self.cols = cols</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        self.rows = rows</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        self._p: Any = None</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        self._parts: list[str] = []</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        self._lock = threading.Lock()</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        self._eof = threading.Event()</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        self._reader: Optional[threading.Thread] = None</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        self._closed = False</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    def start(self) -&gt; None:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        _unavailable()</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        try:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            from winpty import PtyProcess           # 可选依赖 extra `pty`</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        except ImportError as e:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            raise_code(&quot;TLB-807&quot;, module=&quot;pty&quot;,</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                       hint=f&quot;pywinpty 未安装({type(e).__name__})&quot;,</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                       advice=&quot;pip install pywinpty 后重试;或改用 exec.shell_run&quot;)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        self._p = PtyProcess.spawn(self.command, cwd=str(self.cwd),</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                                   env=self.env or None,</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                                   dimensions=(self.rows, self.cols))</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        self._reader = threading.Thread(target=self._pump, name=&quot;pty-reader&quot;,</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                                        daemon=True)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        self._reader.start()</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code></code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    def _pump(self) -&gt; None:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        &quot;&quot;&quot;后台读:pywinpty.read 阻塞到有数据/EOF;缓冲到内存(上限截断)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        total = 0</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        while True:</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            try:</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                data = self._p.read(READ_CHUNK)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            except (EOFError, OSError):              # EOF/管道关闭</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                break</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            except Exception as e:                   # noqa: BLE001 读面异常即收尾</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                log.debug(&quot;pty read stopped: %s&quot;, type(e).__name__)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                break</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            if not data:</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                break</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            with self._lock:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                if total &lt; MAX_OUTPUT_CHARS:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                    self._parts.append(data)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                    total += len(data)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        self._eof.set()</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        # EOF 后在同线程阻塞收尸:把 exitstatus 落定,后续 exit_code() 读面零等待</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        # (否则 pywinpty 的 isalive/exitstatus 会让每次调用白等数秒,实测 ~4s)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        try:</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            self._p.wait()</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        except Exception:                            # noqa: BLE001 收尸失败不影响输出</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            pass</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    # -------------------------------------------------- 交互</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    def write(self, text: str) -&gt; None:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        if self._p is None or self._closed:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            return</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        try:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            self._p.write(text)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        except Exception as e:                       # noqa: BLE001 管道已断</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            log.debug(&quot;pty write failed: %s&quot;, type(e).__name__)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    def read(self, timeout: float) -&gt; str:</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        &quot;&quot;&quot;等 timeout 秒;返回自上次调用起累计的新增输出(非阻塞取缓冲)。</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code></code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        流已关闭(_eof)且缓冲为空 → 立即返回 &quot;&quot;(不再空等,收尾更快)。</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        deadline = time.monotonic() + max(0.0, timeout)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        while time.monotonic() &lt; deadline:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            with self._lock:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                if self._parts:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                    data = &quot;&quot;.join(self._parts)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                    self._parts.clear()</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                    return data</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            if self._eof.is_set():</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                break</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            time.sleep(POLL_S)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        with self._lock:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>            data = &quot;&quot;.join(self._parts)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>            self._parts.clear()</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        return data</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code></code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    def finished(self) -&gt; bool:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        &quot;&quot;&quot;端到端结束判定:PTY 流已关闭(EOF)或进程不可寻 — 收尾优先信号。</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code></code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        pywinpty 的 isalive() 在子进程退出后可能有秒级滞后(实测 ~4s),故以</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        reader 线程观察到的 EOF 为准,避免每次调用白等。</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        if self._eof.is_set():</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            return True</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        try:</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>            return not self._p.isalive() if self._p is not None else True</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        except Exception:                            # noqa: BLE001 读态失败保守为未结束</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>            return False</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code></code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    def exit_code(self) -&gt; Optional[int]:</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        if self._p is None:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            return None</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        try:</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>            if self._p.isalive():</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                return None</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        except Exception:                            # noqa: BLE001 读态失败视为未知</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            return None</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        st = getattr(self._p, &quot;exitstatus&quot;, None)</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        if st is None:                               # EOF 收尸尚未落定:不阻塞调用方</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>            return None</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        return int(st)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code></code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    def wait(self, timeout: float) -&gt; Optional[int]:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        deadline = time.monotonic() + max(0.0, timeout)</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        while True:</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>            rc = self.exit_code()</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>            if rc is not None:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                return rc</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>            if time.monotonic() &gt;= deadline:</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                return None</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            time.sleep(POLL_S)</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code></code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    def kill(self) -&gt; None:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        if self._p is None:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            return</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        _tree_kill(getattr(self._p, &quot;pid&quot;, None),</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                   lambda: self._p.terminate(force=True))</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code></code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>    def close(self) -&gt; None:</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        if self._closed:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            return</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        self._closed = True</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        if self._p is not None:</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>            _tree_kill(getattr(self._p, &quot;pid&quot;, None),</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>                       lambda: self._p.terminate(force=True))</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            try:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                self._p.close(force=True)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            except Exception:                        # noqa: BLE001</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>                pass</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        if self._reader is not None and self._reader.is_alive():</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>            self._reader.join(timeout=1.0)</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code></code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code># ------------------------------------------------------------------ POSIX</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>class _PosixPty:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>    &quot;&quot;&quot;POSIX 伪终端(pty.openpty;与 Windows 分支同接口,非阻塞轮询)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code></code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>    def __init__(self, command: Union[str, list], *, cwd: Path, env: dict,</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                 cols: int = DEFAULT_COLS, rows: int = DEFAULT_ROWS) -&gt; None:</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        self.command = command</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        self.cwd = cwd</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        self.env = env</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        self.cols = cols</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        self.rows = rows</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        self._master: Optional[int] = None</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        self._proc: Optional[subprocess.Popen] = None</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        self._closed = False</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code></code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    def start(self) -&gt; None:</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        _unavailable()</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        import pty</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        master, slave = pty.openpty()</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        try:</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>            import fcntl</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            import struct</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            import termios</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            fcntl.ioctl(slave, termios.TIOCSWINSZ,</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                        struct.pack(&quot;HHHH&quot;, self.rows, self.cols, 0, 0))</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>            os.set_blocking(master, False)           # 非阻塞轮询(同 Windows 语义)</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        except Exception:                            # noqa: BLE001 尺寸/非阻塞尽力</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>            pass</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        self._master = master</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        argv = (shlex.split(self.command, posix=True)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                if isinstance(self.command, str) else list(self.command))</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        self._proc = subprocess.Popen(</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            argv, cwd=str(self.cwd), env=self.env or None,</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            stdin=slave, stdout=slave, stderr=slave, close_fds=True,</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            start_new_session=True)   # 独立会话/进程组:killpg 方可安全树级终止(CND-05)</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        os.close(slave)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code></code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>    def write(self, text: str) -&gt; None:</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        if self._master is None or self._closed:</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>            return</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        try:</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>            os.write(self._master, text.encode(&quot;utf-8&quot;, &quot;replace&quot;))</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        except OSError as e:</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>            log.debug(&quot;pty write failed: %s&quot;, e)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code></code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>    def _drain(self) -&gt; str:</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        if self._master is None:</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            return &quot;&quot;</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        out = bytearray()</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        while True:</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>            try:</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>                chunk = os.read(self._master, READ_CHUNK)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            except (BlockingIOError, OSError):</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>                break</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>            if not chunk:</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>                break</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>            out.extend(chunk)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>            if len(out) &gt;= MAX_OUTPUT_CHARS:</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>                break</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        return bytes(out).decode(&quot;utf-8&quot;, &quot;replace&quot;)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code></code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>    def read(self, timeout: float) -&gt; str:</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        deadline = time.monotonic() + max(0.0, timeout)</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        parts: list[str] = []</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>        while time.monotonic() &lt; deadline:</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>            chunk = self._drain()</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>            if chunk:</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>                parts.append(chunk)</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>                continue</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>            if self.exit_code() is not None:</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                parts.append(self._drain())</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>                break</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>            time.sleep(POLL_S)</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        return &quot;&quot;.join(parts)</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code></code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>    def exit_code(self) -&gt; Optional[int]:</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        if self._proc is None:</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            return None</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        return self._proc.poll()</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code></code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>    def finished(self) -&gt; bool:</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>        &quot;&quot;&quot;端到端结束判定(POSIX:进程已退出)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>        return self.exit_code() is not None</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code></code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>    def wait(self, timeout: float) -&gt; Optional[int]:</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        deadline = time.monotonic() + max(0.0, timeout)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        while True:</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>            rc = self.exit_code()</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>            if rc is not None:</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                return rc</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>            if time.monotonic() &gt;= deadline:</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                return None</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>            time.sleep(POLL_S)</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code></code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>    def kill(self) -&gt; None:</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>        if self._proc is not None and self._proc.poll() is None:</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>            _tree_kill(self._proc.pid, self._proc.kill)</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code></code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>    def close(self) -&gt; None:</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        if self._closed:</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>            return</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        self._closed = True</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        if self._proc is not None and self._proc.poll() is None:</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>            _tree_kill(self._proc.pid, self._proc.kill)   # 退出必释放(F053):树级</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        if self._master is not None:</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>            try:</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>                os.close(self._master)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>            except OSError:</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>                pass</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>            self._master = None</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code></code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code></code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code># ------------------------------------------------------------------ 门面</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>def pty_supported() -&gt; bool:</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>    &quot;&quot;&quot;PTY execution is gated until it has the same owned-tree contract as exec.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>    return False</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code></code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code></code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>def _unavailable():</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>    raise_code(&#x27;TLB-807&#x27;, module=&#x27;pty&#x27;,</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>               hint=&#x27;PTY execution is disabled: process-tree ownership is not established&#x27;,</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>               advice=&#x27;Use exec.shell_run or exec.python_run; installing a PTY extra does not enable this path&#x27;)</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code></code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code></code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>def open_pty(command: Union[str, list], *, cwd: Path, env: Optional[dict] = None,</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>             cols: int = DEFAULT_COLS, rows: int = DEFAULT_ROWS) -&gt; Any:</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>    &quot;&quot;&quot;开一个真 PTY 会话(两平台同接口);不支持 → TLB-807。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>    _unavailable()</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>    if not pty_supported():</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>        raise_code(&quot;TLB-807&quot;, module=&quot;pty&quot;,</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>                   hint=(&quot;pywinpty 未安装(Windows 真 PTY 后端缺失)&quot;</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>                         if os.name == &quot;nt&quot; else f&quot;平台无 PTY 支持(os={os.name})&quot;),</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>                   advice=&quot;pip install pywinpty(或 extras: pip install &#x27;.[pty]&#x27;);&quot;</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>                          &quot;或改用 exec.shell_run 行式执行&quot;)</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>    from pyharness.core import proc as proc_mod</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>    cwd = Path(cwd)</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>    env = env if env is not None else proc_mod.sandbox_env(cwd)</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>    cls = _WinPtySession if os.name == &quot;nt&quot; else _PosixPty</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>    sess = cls(command, cwd=cwd, env=env, cols=cols, rows=rows)</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>    sess.start()</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>    return sess</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code></code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code></code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>def run_in_pty(command: Union[str, list], *, cwd: Path,</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>               env: Optional[dict] = None, input_text: str = &quot;&quot;,</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>               timeout_s: int = 60, cols: int = DEFAULT_COLS,</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>               rows: int = DEFAULT_ROWS) -&gt; dict:</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>    &quot;&quot;&quot;一次性 PTY 执行(同步;Provider 经 asyncio.to_thread 调用)。</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code></code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>    语义:开 PTY → (可选)喂 stdin → 收集输出直到退出或墙钟超时 → 超时则 kill</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>    并标 timed_out=True。env 缺省走 proc.sandbox_env(白名单,cwd 锁沙箱目录)。</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code></code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>    返回 {output, exit_code, timed_out, tty, truncated, elapsed_ms}。</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>    `tty=True` 表示走的是真 PTY 后端(探针 scripts/probe_pty.py 用子进程</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>    isatty 探测做硬验证)。</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>    started = time.monotonic()</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>    sess = open_pty(command, cwd=Path(cwd), env=env, cols=cols, rows=rows)</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>    parts: list[str] = []</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>    timed_out = False</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>    truncated = False</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>    total = 0</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>    # PTY 的 Enter 是 CR(\r);统一归一,避免调用方用 \n 时&quot;输入没反应&quot;</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>    feed = input_text.replace(&quot;\r\n&quot;, &quot;\r&quot;).replace(&quot;\n&quot;, &quot;\r&quot;) if input_text else &quot;&quot;</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>    try:</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>        if feed:</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>            time.sleep(0.15)                         # 等 shell 就绪再喂(避免丢输入)</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>            sess.write(feed)</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>        deadline = started + max(1, int(timeout_s))</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>        while True:</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>            remaining = deadline - time.monotonic()</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>            if remaining &lt;= 0:</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>                timed_out = True</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>                break</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>            chunk = sess.read(min(0.3, remaining))</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>            if chunk:</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>                parts.append(chunk)</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>                total += len(chunk)</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>                if total &gt;= MAX_OUTPUT_CHARS:</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>                    truncated = True</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>                    break</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>                continue</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>            if sess.finished():</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>                parts.append(sess.read(0.3))         # 取尽残留</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>                break</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>        if timed_out:</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>            sess.kill()</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>            sess.wait(GRACE_KILL_S)</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>    finally:</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>        exit_code = sess.exit_code()</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>        if exit_code is None:</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>            exit_code = sess.wait(0.5)</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>        sess.close()</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>    return {&quot;output&quot;: &quot;&quot;.join(parts), &quot;exit_code&quot;: exit_code,</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>            &quot;timed_out&quot;: timed_out, &quot;tty&quot;: True, &quot;truncated&quot;: truncated,</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>            &quot;elapsed_ms&quot;: int((time.monotonic() - started) * 1000)}</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code></code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code></code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>__all__ = [&quot;open_pty&quot;, &quot;pty_supported&quot;, &quot;run_in_pty&quot;, &quot;MAX_OUTPUT_CHARS&quot;,</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>           &quot;DEFAULT_COLS&quot;, &quot;DEFAULT_ROWS&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

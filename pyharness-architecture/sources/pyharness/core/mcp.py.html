@@ -1,0 +1,319 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/mcp.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/mcp.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 319 行</span></nav><main class="wrap source-page"><h1>pyharness/core/mcp.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：a407094b78bac31b62a9f255b4bab67ba01e7973<br>SHA-256（内容校验）：3226c9df638f4d3128fbe5f2dd8fc8ae62d1d728040d8807fe270f2002e71f1a</p><p><a href="../../../architecture-detailed.html?node=mcp">Model Context Protocol Client（外部工具协议客户端）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 23 个类、函数与方法</summary><ul><li><a href="#L36">_mcp_env（函数） · L36–L38</a></li><li><a href="#L42">Transport（类） · L42–L49</a><ul><li><a href="#L45">Transport.request（异步方法） · L45–L46</a></li><li><a href="#L48">Transport.close（异步方法） · L48–L49</a></li></ul></li><li><a href="#L52">StdioTransport（类） · L52–L193</a><ul><li><a href="#L55">StdioTransport.__init__（方法） · L55–L63</a></li><li><a href="#L65">StdioTransport._ensure（异步方法） · L65–L76</a></li><li><a href="#L78">StdioTransport._drain_stderr（异步方法） · L78–L86</a></li><li><a href="#L88">StdioTransport.request（异步方法） · L88–L132</a></li><li><a href="#L134">StdioTransport.close（异步方法） · L134–L154</a></li><li><a href="#L156">StdioTransport._close_owned（异步方法） · L156–L193</a></li></ul></li><li><a href="#L196">InlineTransport（类） · L196–L212</a><ul><li><a href="#L199">InlineTransport.__init__（方法） · L199–L201</a></li><li><a href="#L203">InlineTransport.request（异步方法） · L203–L212</a></li></ul></li><li><a href="#L216">McpClient（类） · L216–L295</a><ul><li><a href="#L219">McpClient.__init__（方法） · L219–L228</a></li><li><a href="#L230">McpClient.connect（异步方法） · L230–L247</a></li><li><a href="#L249">McpClient.register_into（方法） · L249–L285</a></li><li><a href="#L287">McpClient.call_tool（异步方法） · L287–L291</a></li><li><a href="#L293">McpClient.close（异步方法） · L293–L295</a></li></ul></li><li><a href="#L298">_McpProvider（类） · L298–L316</a><ul><li><a href="#L301">_McpProvider.__init__（方法） · L301–L303</a></li><li><a href="#L305">_McpProvider.handle（异步方法） · L305–L316</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/mcp.py — MCP 客户端最小实现(#30 Consumer 面)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>契约(MCP 2024-11-05 子集):initialize/notifications/initialized → tools/list →</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>tools/call(JSON-RPC 2.0,content 数组)。传输抽象:stdio(本地 server 进程)与</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>http(OpenAI 兼容 HTTP+JSON-RPC 端点)可注入(测试用 InlineTransport 脚本化)。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>工具桥:list 返回的工具逐个编译为 ToolDefinition(name=mcp.&lt;tool&gt; 防命名冲突,</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>danger=high——MCP 工具是远端代码执行面,一律转审批)+ Provider 桥(参数透传</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>tools/call,响应 content[0].text 回喂)。strict 域(mcp.*)不可见,演示用 standard。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>真链边界:真实 MCP server(filesystem/git 等)需外部进程,装配层挂载留 P3 探针;</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>本文件 = 协议 + 桥 + 注入式测试(零外部依赖)。</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>import asyncio</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>import json</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>import logging</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>import os</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>log = logging.getLogger(&quot;pyharness.mcp&quot;)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>DEFAULT_TIMEOUT_S = 30</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>_MCP_ENV_ALLOWLIST = (</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    &quot;PATH&quot;, &quot;PATHEXT&quot;, &quot;COMSPEC&quot;, &quot;SYSTEMROOT&quot;, &quot;SYSTEMDRIVE&quot;, &quot;WINDIR&quot;,</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    &quot;TEMP&quot;, &quot;TMP&quot;, &quot;USERPROFILE&quot;, &quot;HOMEDRIVE&quot;, &quot;HOMEPATH&quot;, &quot;HOME&quot;,</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    &quot;NUMBER_OF_PROCESSORS&quot;, &quot;PROCESSOR_ARCHITECTURE&quot;,</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    &quot;PROCESSOR_ARCHITEW6432&quot;, &quot;OS&quot;, &quot;PYTHONIOENCODING&quot;, &quot;PYTHONUTF8&quot;,</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code></code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>def _mcp_env() -&gt; dict[str, str]:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    &quot;&quot;&quot;MCP 子进程最小环境,避免默认继承宿主 API key/凭据。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    return {k: os.environ[k] for k in _MCP_ENV_ALLOWLIST if k in os.environ}</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code></code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code># ------------------------------------------------------------------ 传输</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>class Transport:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    &quot;&quot;&quot;请求/响应传输基类(JSON-RPC 信封外)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    async def request(self, method: str, params: dict) -&gt; Any:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        raise NotImplementedError</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    async def close(self) -&gt; None:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        pass</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code></code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>class StdioTransport(Transport):</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    &quot;&quot;&quot;本地 MCP server 进程(stdio JSON-RPC;Windows 隐藏窗口)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    def __init__(self, argv: list, *, timeout_s: int = DEFAULT_TIMEOUT_S) -&gt; None:</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        self._argv = list(argv)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        self._timeout = timeout_s</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        self._proc: Optional[asyncio.subprocess.Process] = None</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        self._seq = 0</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        self._stderr_task: Optional[asyncio.Task] = None</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        self._request_lock = asyncio.Lock()</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        self._close_task: Optional[asyncio.Task] = None</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        self._closed = False</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    async def _ensure(self) -&gt; None:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        if self._closed or (self._proc is not None and self._proc.returncode is not None):</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            raise_code(&quot;TLB-805&quot;, module=&quot;mcp&quot;, hint=&quot;MCP 连接已关闭;需显式重新初始化。&quot;</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>                       &quot;此前未确认的远端操作结果不确定,副作用未撤销;先查询核对,不要盲目重试写入&quot;)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        if self._proc is not None and self._proc.returncode is None:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            return</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        flags = 0x08000000 if os.name == &quot;nt&quot; else 0  # CREATE_NO_WINDOW</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        self._proc = await asyncio.create_subprocess_exec(</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            *self._argv, stdin=asyncio.subprocess.PIPE,</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            env=_mcp_env(), creationflags=flags)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        self._stderr_task = asyncio.create_task(self._drain_stderr())</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    async def _drain_stderr(self) -&gt; None:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        proc = self._proc</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        if proc is None or proc.stderr is None:</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            return</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        while True:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            line = await proc.stderr.readline()</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            if not line:</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                return</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            log.debug(&quot;mcp stderr: %s&quot;, line.decode(&quot;utf-8&quot;, errors=&quot;replace&quot;).rstrip())</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    async def request(self, method: str, params: dict) -&gt; Any:</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        async with self._request_lock:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            await self._ensure()</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            proc = self._proc</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            assert proc is not None and proc.stdin is not None and proc.stdout is not None</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            self._seq += 1</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            req_id = self._seq</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            message = {&quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;method&quot;: method, &quot;params&quot;: params}</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            if not method.startswith(&quot;notifications/&quot;):</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                message[&quot;id&quot;] = req_id</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            envelope = json.dumps(message, ensure_ascii=False)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            try:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                async with asyncio.timeout(self._timeout):</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                    proc.stdin.write((envelope + &quot;\n&quot;).encode(&quot;utf-8&quot;))</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                    await proc.stdin.drain()</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                    log.debug(&quot;mcp sent pid=%s id=%s method=%s tool=%s&quot;, proc.pid,</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                              message.get(&quot;id&quot;), method, params.get(&quot;name&quot;))</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                    if method.startswith(&quot;notifications/&quot;):</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                        return None             # JSON-RPC 通知无 id、无响应</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                    while True:</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                        resp = await proc.stdout.readline()</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                        if not resp:</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                            raise ConnectionError(&quot;server closed stdout&quot;)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                        data = json.loads(resp.decode(&quot;utf-8&quot;))</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                        if not isinstance(data, dict) or data.get(&quot;jsonrpc&quot;) != &quot;2.0&quot;:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                            raise ValueError(&quot;invalid JSON-RPC envelope&quot;)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                        if &quot;id&quot; not in data and str(data.get(&quot;method&quot;, &quot;&quot;)).startswith(&quot;notifications/&quot;):</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                            continue</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                        if data.get(&quot;id&quot;) != req_id:</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                            raise ValueError(&quot;response id mismatch&quot;)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                        break</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                # Discard late responses; a new stream must initialize explicitly.</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                log.warning(&quot;MCP cancelled id=%s method=%s; remote outcome unknown, no rollback&quot;, req_id, method)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                await self.close()</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                raise</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            except (OSError, asyncio.TimeoutError, ValueError) as exc:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                await self.close()</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                raise_code(&quot;TLB-805&quot;, module=&quot;mcp&quot;, method=method, request_id=req_id,</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                           hint=f&quot;MCP 传输失败({type(exc).__name__}),连接已关闭;&quot;</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>                           &quot;远端操作结果不确定,可能仍在运行,副作用未撤销;先查询核对,不要盲目重试写入&quot;)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        if &quot;error&quot; in data:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            raise_code(&quot;TLB-805&quot;, module=&quot;mcp&quot;,</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                       hint=f&quot;{method} 远端错误:{data[&#x27;error&#x27;]}&quot;)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        return data.get(&quot;result&quot;)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    async def close(self) -&gt; None:</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        self._closed = True</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        task = self._close_task</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        if task is None or (task.done() and (task.cancelled() or task.exception())):</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            task = self._close_task = asyncio.create_task(self._close_owned())</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        cancelled = None</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        while True:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            try:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                await asyncio.shield(task)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                break</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            except asyncio.CancelledError as exc:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                if task.cancelled():</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                    raise</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                cancelled = exc</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            except BaseException as exc:</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                if cancelled is not None:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                    cancelled.add_note(f&#x27;MCP cleanup failed: {type(exc).__name__}&#x27;)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>                    raise cancelled from exc</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                raise</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        if cancelled is not None:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>            raise cancelled</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code></code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    async def _close_owned(self) -&gt; None:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        # The cleanup task, rather than any individual waiter, owns these handles.</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        # Keep them available for a subsequent close if cleanup itself fails.</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        if self._proc is not None:</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            proc = self._proc</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            if proc.stdin is not None and not proc.stdin.is_closing():</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                proc.stdin.close()</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                try:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                    await proc.stdin.wait_closed()</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                except (BrokenPipeError, ConnectionResetError):</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                    pass</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            if proc.returncode is None:</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                try:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                    # EOF is the normal stdio shutdown; allow the server to flush.</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                    await asyncio.wait_for(proc.wait(), timeout=3)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                except asyncio.TimeoutError:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                    try:</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>                        proc.terminate()</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                        await asyncio.wait_for(proc.wait(), timeout=3)</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                    except (ProcessLookupError, asyncio.TimeoutError):</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                        try:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                            proc.kill()</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                        except ProcessLookupError:</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                            pass</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                        await proc.wait()</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>            if self._stderr_task is not None:</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                self._stderr_task.cancel()</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                try:</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                    await self._stderr_task</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                    # 自己 cancel 的 stderr 排空任务:await 被掐断抛 CancelledError,</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                    # 属清理段,吞掉即可——旧实现 re-raise 会让 request 超时路径的</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                    # await self.close() 被打断,掩盖本应抛的 TLB-805(P2 修复)。</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                    pass</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                except Exception:                # noqa: BLE001 stderr 排空失败不阻断</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                    pass</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                self._stderr_task = None</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            self._proc = None</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code></code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code></code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>class InlineTransport(Transport):</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    &quot;&quot;&quot;脚本化传输(单测/探针:预置 responses 与调用记录,零网络)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code></code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    def __init__(self, responses: Optional[dict] = None) -&gt; None:</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        self.responses = dict(responses or {})</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        self.calls: list[tuple[str, dict]] = []</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code></code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    async def request(self, method: str, params: dict) -&gt; Any:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        self.calls.append((method, params))</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        if method in self.responses:</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>            return self.responses[method]</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        if method == &quot;tools/call&quot;:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>            return {&quot;content&quot;: [{&quot;type&quot;: &quot;text&quot;, &quot;text&quot;: &quot;(默认文本响应)&quot;}],</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                    &quot;isError&quot;: False}</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        if method.startswith(&quot;notifications/&quot;):</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>            return {&quot;ok&quot;: True}                # 通知无响应信封</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        raise_code(&quot;TLB-805&quot;, module=&quot;mcp&quot;, hint=f&quot;未脚本化方法 {method}&quot;)</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code></code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code></code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code># ------------------------------------------------------------------ 客户端</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>class McpClient:</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>    &quot;&quot;&quot;MCP 客户端:初始化握手 → tools/list → 工具桥(定义+Provider)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code></code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>    def __init__(self, name: str, transport: Transport, *,</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>                 tool_reg: Any = None, version: str = &quot;1.0.0&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        self.name = name                       # server 名(工具前缀 mcp.&lt;name&gt;.*)</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        self.transport = transport</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        self.tool_reg = tool_reg</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        self.version = version</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        self.connected = False</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        self._tools: list[dict] = []</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        self.initialization: dict = {}</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        self.tools_listing: dict = {}</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code></code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>    async def connect(self) -&gt; dict:</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        &quot;&quot;&quot;MCP 握手:initialize → notifications/initialized → tools/list。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        init = await self.transport.request(&quot;initialize&quot;, {</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            &quot;protocolVersion&quot;: &quot;2024-11-05&quot;,</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            &quot;capabilities&quot;: {&quot;tools&quot;: {}},</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>            &quot;clientInfo&quot;: {&quot;name&quot;: &quot;pyharness&quot;, &quot;version&quot;: self.version}})</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        self.initialization = dict(init or {})</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        negotiated = self.initialization.get(&quot;protocolVersion&quot;)</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        if negotiated is not None and negotiated != &quot;2024-11-05&quot;:</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>            await self.close()</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>            raise_code(&quot;TLB-805&quot;, module=&quot;mcp&quot;, hint=f&quot;不支持协商版本 {negotiated}&quot;)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        await self.transport.request(&quot;notifications/initialized&quot;, {})</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        listed = await self.transport.request(&quot;tools/list&quot;, {})</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        self.tools_listing = dict(listed or {})</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        self._tools = list((listed or {}).get(&quot;tools&quot;) or [])   # result:null 判空(P2)</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        self.connected = True</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        return {&quot;server&quot;: (init or {}).get(&quot;serverInfo&quot;), &quot;protocolVersion&quot;: negotiated,</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                &quot;tools&quot;: len(self._tools)}</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code></code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>    def register_into(self, tool_reg: Any, *, allowed_tools: Optional[list[str]] = None) -&gt; list[str]:</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        &quot;&quot;&quot;list 出的工具桥接进 core ToolRegistry(mcp.&lt;name&gt;.&lt;tool&gt; 前缀)。</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code></code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        danger=high:远端工具=代码执行面,一律走审批;返回注册名清单。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        from pyharness.core.tools_registry import ToolDefinition</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        registered: list[str] = []</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        selected = self._tools</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        if allowed_tools is not None:</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>            allowed = set(allowed_tools)</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            missing = allowed - {t.get(&quot;name&quot;) for t in self._tools}</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>            if missing:</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>                raise_code(&quot;TLB-802&quot;, module=&quot;mcp&quot;, tool=sorted(missing),</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>                           advice=&quot;本地允许的 MCP 工具未被服务发现&quot;)</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>            selected = [t for t in self._tools if t.get(&quot;name&quot;) in allowed]</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        try:</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            for t in selected:</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>                tool_name = f&quot;mcp.{self.name}.{t.get(&#x27;name&#x27;)}&quot;</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>                schema = t.get(&quot;inputSchema&quot;) or {&quot;type&quot;: &quot;object&quot;,</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>                                                  &quot;properties&quot;: {}}</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>                tool_reg.register_tool(</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>                    ToolDefinition(name=tool_name, danger=&quot;high&quot;,</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>                                   description=(t.get(&quot;description&quot;)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>                                                or f&quot;MCP 远端工具 {tool_name}&quot;)[:190],</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>                                   schema=schema, timeout_s=DEFAULT_TIMEOUT_S,</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>                                   owner=f&quot;mcp:{self.name}&quot;, ctx_path=&quot;mcp&quot;,</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>                                   version=&quot;1.0.0&quot;),</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>                    provider=_McpProvider(self, t.get(&quot;name&quot;)))</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>                registered.append(tool_name)</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        except Exception:</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>            for name in reversed(registered):</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>                try:</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>                    tool_reg.unregister_definition(name)</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                except Exception:                # noqa: BLE001 回滚尽力</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>                    log.debug(&quot;mcp rollback unregister miss %s&quot;, name)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>            raise</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        self.tool_reg = tool_reg</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        return registered</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code></code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>    async def call_tool(self, tool: str, args: dict) -&gt; Any:</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        &quot;&quot;&quot;tools/call 透传(Provider 桥消费)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        return await self.transport.request(&quot;tools/call&quot;,</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                                            {&quot;name&quot;: tool,</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                                             &quot;arguments&quot;: dict(args or {})})</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code></code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>    async def close(self) -&gt; None:</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>        await self.transport.close()</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        self.connected = False</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code></code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code></code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>class _McpProvider:</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>    &quot;&quot;&quot;Provider handle:远端 tools/call 桥,响应 content[0].text 回喂。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code></code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>    def __init__(self, client: McpClient, tool: str) -&gt; None:</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        self._client = client</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        self._tool = tool</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code></code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>    async def handle(self, args: dict, ctx: Any) -&gt; str:</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>        result = await self._client.call_tool(self._tool, args)</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        result = result or {}                                # result:null 判空(P2)</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        if result.get(&quot;isError&quot;):</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            raise_code(&quot;TLB-805&quot;, module=&quot;mcp&quot;, tool=self._tool,</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>                       hint=&quot;远端执行错误&quot;)</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        parts = []</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        for item in result.get(&quot;content&quot;) or []:</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>            txt = item.get(&quot;text&quot;)</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>            if txt:</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>                parts.append(str(txt))</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        return &quot;\n&quot;.join(parts) if parts else &quot;(无文本内容)&quot;</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code></code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code></code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>__all__ = [&quot;McpClient&quot;, &quot;StdioTransport&quot;, &quot;InlineTransport&quot;, &quot;Transport&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

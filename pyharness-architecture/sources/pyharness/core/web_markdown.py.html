@@ -1,0 +1,153 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/web_markdown.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/web_markdown.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 153 行</span></nav><main class="wrap source-page"><h1>pyharness/core/web_markdown.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：b4827d411ba51668b0da75417ea8b49c9f87da62<br>SHA-256（内容校验）：d0d7c0ccf6e3f599549e5cbcaacdf07aa811d155f0615ed224d00be36de7e8a2</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 10 个类、函数与方法</summary><ul><li><a href="#L25">_TextExtractor（类） · L25–L110</a><ul><li><a href="#L34">_TextExtractor.__init__（方法） · L34–L39</a></li><li><a href="#L42">_TextExtractor._break（方法） · L42–L45</a></li><li><a href="#L47">_TextExtractor._push_text（方法） · L47–L57</a></li><li><a href="#L60">_TextExtractor.handle_starttag（方法） · L60–L85</a></li><li><a href="#L88">_TextExtractor.handle_endtag（方法） · L88–L103</a></li><li><a href="#L105">_TextExtractor.handle_data（方法） · L105–L110</a></li></ul></li><li><a href="#L112">_attr（函数） · L112–L118</a></li><li><a href="#L120">_class_hit（函数） · L120–L129</a></li><li><a href="#L131">html_to_markdown（函数） · L131–L150</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Web markdown: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.core.web_policy import log, _MAX_MD</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import html.parser</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import re</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from typing import Optional</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from urllib.parse import urljoin</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>_SKIP_TAGS: frozenset = frozenset({</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    &quot;script&quot;, &quot;style&quot;, &quot;noscript&quot;, &quot;svg&quot;, &quot;head&quot;, &quot;iframe&quot;, &quot;nav&quot;, &quot;footer&quot;,</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>})</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>_BLOCK_TAGS: frozenset = frozenset({</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    &quot;p&quot;, &quot;div&quot;, &quot;li&quot;, &quot;tr&quot;, &quot;pre&quot;, &quot;h1&quot;, &quot;h2&quot;, &quot;h3&quot;, &quot;h4&quot;, &quot;h5&quot;, &quot;h6&quot;,</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>})</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>_HEADING_LEVELS: dict[str, int] = {f&quot;h{i}&quot;: i for i in range(1, 7)}</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>_NOISE_RE: re.Pattern = re.compile(</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    r&quot;(^|[\s_-])(nav|menu|ad|ads?|footer|sidebar|banner)([\s_-]|$)&quot;, re.I)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>_WS_RE: re.Pattern = re.compile(r&quot;\s+&quot;)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>class _TextExtractor(html.parser.HTMLParser):</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    &quot;&quot;&quot;手写 HTMLParser 状态机正文提取器(spec 实现要点权威)。</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    状态:skip(命中丢弃块后的后代深度计数)/parts(输出流,块界以 &quot;\\n&quot; 标记)/</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    links(a 标签栈,出标签拼 [text](url));script/style/noscript/svg/head/</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    iframe/nav/footer 标签与 class/id 噪声命中块整体跳过(其后代不产任何输出),</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    HTML 标签/脚本永不泄漏进结果。feed 全程容错(标准库 parser 容错模式)。</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    def __init__(self, base_url: str = &quot;&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        super().__init__(convert_charrefs=True)  # &amp;amp; 等实体并入文本</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        self.base_url = base_url or &quot;&quot;</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        self.parts: list[str] = []              # 输出流(文本 + &quot;\n&quot; 行断标记)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        self.skip: int = 0                      # 丢弃块深度(skip&gt;0 后代全跳)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        self.links: list[dict] = []             # a 标签栈 {&quot;href&quot;, &quot;parts&quot;}</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    # ---------------------------------------------------------- 工具方法</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    def _break(self) -&gt; None:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        &quot;&quot;&quot;行断标记(连续块界折叠为单个)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        if not self.parts or self.parts[-1] != &quot;\n&quot;:</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            self.parts.append(&quot;\n&quot;)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    def _push_text(self, s: str) -&gt; None:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        &quot;&quot;&quot;文本入流:a 内收进栈顶链接缓冲,否则直出(相邻块空隙去重空格)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        if not s:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            return</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        if self.links:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            self.links[-1][&quot;parts&quot;].append(s)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>            return</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        if (self.parts and self.parts[-1].endswith(&quot; &quot;)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                and s.startswith(&quot; &quot;)):</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>            s = s.lstrip(&quot; &quot;)                   # 前段尾空格 + 本段首空格去重</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        self.parts.append(s)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    # ---------------------------------------------------------- parser 回调</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    def handle_starttag(self, tag: str, attrs: list) -&gt; None:</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        tag = tag.lower()</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        if self.skip:                           # 丢弃块内:每开一标签深度 +1,</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            self.skip += 1                      # 直至块闭合(后代整体跳过)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            return</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        if tag in _SKIP_TAGS or _class_hit(attrs):</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            self.skip = 1                       # 命中丢弃块:跳过其后代</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            return</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        if tag == &quot;br&quot;:                         # 单行断(非块栈成员)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            self._break()</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            return</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        if tag in _BLOCK_TAGS:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            self._break()                       # 块级开:前导换行</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            level = _HEADING_LEVELS.get(tag)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            if level:                           # 标题:写入 &quot;#&quot;*level + &quot; &quot;</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                self.parts.append(&quot;#&quot; * level + &quot; &quot;)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            return</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        if tag == &quot;a&quot;:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            href = _attr(attrs, &quot;href&quot;)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            self.links.append({&quot;href&quot;: href or &quot;&quot;, &quot;parts&quot;: []})</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            return</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        if tag == &quot;img&quot;:                        # 图片取 alt(spec: 图片取 alt)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            alt = _attr(attrs, &quot;alt&quot;)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            if alt:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                self._push_text(str(alt))</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            return</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        # 其余行内标签(span/b/strong/code…):忽略,文本由 handle_data 流入</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    def handle_endtag(self, tag: str) -&gt; None:</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        tag = tag.lower()</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        if self.skip:                           # 丢弃块收口(每个闭合标签 -1)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            self.skip = max(0, self.skip - 1)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            return</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        if tag == &quot;a&quot; and self.links:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            info = self.links.pop()</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            text = _WS_RE.sub(&quot; &quot;, &quot;&quot;.join(info[&quot;parts&quot;])).strip()</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            href = (info.get(&quot;href&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            if text and href:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                self._push_text(f&quot;[{text}]({urljoin(self.base_url, href)})&quot;)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            elif text:                          # 无 href 锚:仅保留文本</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                self._push_text(text)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            return</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        if tag in _BLOCK_TAGS:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            self._break()                       # 块级闭:尾随换行</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    def handle_data(self, data: str) -&gt; None:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        if self.skip:</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            return                              # 丢弃块内文本不产出</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        s = _WS_RE.sub(&quot; &quot;, data)               # 空白折叠(HTML 空白 → 空格)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        if s:</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            self._push_text(s)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code></code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>def _attr(attrs: list, name: str) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    &quot;&quot;&quot;属性大小写不敏感取值(HTMLParser 属性名大小写行为跨版本不一,统一收敛)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    target = name.lower()</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    for k, v in attrs or ():</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        if k is not None and str(k).lower() == target:</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            return v</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    return None</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code></code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>def _class_hit(attrs: list) -&gt; bool:</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    &quot;&quot;&quot;class/id 噪声黑名单命中(class/id 正则,spec 实现要点;re.I 偏离 6)。</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code></code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    命中 class=&quot;nav&quot;/&quot;ad-banner&quot;/&quot;footer x&quot; 等即整块跳过(去导航/广告噪声)。</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    for attr_name in (&quot;class&quot;, &quot;id&quot;):</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        v = _attr(attrs, attr_name)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        if v and _NOISE_RE.search(str(v)):</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            return True</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    return False</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code></code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>def html_to_markdown(html: str, base_url: str) -&gt; str:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    &quot;&quot;&quot;正文提取转 Markdown(spec 伪码权威;标准库自含,禁第三方解析依赖)。</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    流式解析(不建 DOM):去 script/style/noscript/svg/head/nav/footer 与 class/id</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    噪声块,块级标签换行、标题加 #、链接转 [text](url)、图片取 alt、空白折叠;</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    输出为纯文本 Markdown,HTML 标签/脚本永不泄漏进结果。坏 HTML 容错不中断</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    (parser 默认容错,无异常上抛;feed 层兜底记 debug)。输出 ≤ _MAX_MD(2MB)。</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    if not isinstance(html, str):</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        html = str(html or &quot;&quot;)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    parser = _TextExtractor(str(base_url or &quot;&quot;))</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    try:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        parser.feed(html)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        parser.close()</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    except Exception as exc:                    # noqa: BLE001 坏 HTML 不中断</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        log.debug(&quot;html_to_markdown feed 异常(容错继续): %s&quot;, exc)</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    text = &quot;&quot;.join(parser.parts)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    lines = [ln.strip() for ln in text.splitlines()]   # 逐行清理</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    md = &quot;\n&quot;.join(ln for ln in lines if ln)           # 去空行</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    return md[:_MAX_MD]                                # 防御性上限</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code></code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>_TextExtractor.__module__ = &#x27;pyharness.core.tool_web&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

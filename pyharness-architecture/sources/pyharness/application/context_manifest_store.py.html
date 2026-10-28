@@ -1,0 +1,359 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/context_manifest_store.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/context_manifest_store.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 359 行</span></nav><main class="wrap source-page"><h1>pyharness/application/context_manifest_store.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：7593aa5ff53db09d699bc6463b7a6b9bdca758f2<br>SHA-256（内容校验）：64705128647d6ee20c243b8a64d22abb1a08eacf7ababa9d404b91a67cc6f7ca</p><p><a href="../../../architecture-detailed.html?node=context_manifest">ContextManifest（上下文材料清单）</a> · <a href="../../../architecture-detailed.html?node=workspace_store">WorkspaceControlStore（项目控制日志与内容存储）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 19 个类、函数与方法</summary><ul><li><a href="#L10">ContextManifestStore（类） · L10–L359</a><ul><li><a href="#L14">ContextManifestStore._context_finish（方法） · L14–L26</a></li><li><a href="#L28">ContextManifestStore._context_project（方法） · L28–L35</a></li><li><a href="#L37">ContextManifestStore._context_owned（方法） · L37–L43</a></li><li><a href="#L45">ContextManifestStore._context_task（方法） · L45–L53</a></li><li><a href="#L55">ContextManifestStore._validate_context_definition（方法） · L55–L91</a></li><li><a href="#L93">ContextManifestStore._context_quota（方法） · L93–L97</a></li><li><a href="#L99">ContextManifestStore._context_envelope（方法） · L99–L103</a></li><li><a href="#L105">ContextManifestStore._append_context（异步方法） · L105–L106</a></li><li><a href="#L108">ContextManifestStore._append_context_projected（异步方法） · L108–L141</a></li><li><a href="#L143">ContextManifestStore._task_reference_summary（方法） · L143–L150</a></li><li><a href="#L152">ContextManifestStore.save_context_task_reference（异步方法） · L152–L197</a></li><li><a href="#L199">ContextManifestStore.context_task_references（异步方法） · L199–L209</a></li><li><a href="#L211">ContextManifestStore.context_task_reference（异步方法） · L211–L228</a></li><li><a href="#L230">ContextManifestStore._manifest_access（方法） · L230–L239</a></li><li><a href="#L241">ContextManifestStore._manifest_summary（方法） · L241–L253</a></li><li><a href="#L255">ContextManifestStore.save_context_manifest（异步方法） · L255–L310</a></li><li><a href="#L312">ContextManifestStore.context_manifest（异步方法） · L312–L332</a></li><li><a href="#L334">ContextManifestStore.context_manifests（异步方法） · L334–L359</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Context definitions on the existing control owner, JSONL facts and immutable blobs.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from pyharness.application.context_manifest import ContextManifest, TaskContextReference, task_identity</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.snapshot_context import build_context_preview</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.source_snapshot import checked_private_bytes</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.core.tenant_settings import TenantSettingsStore</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.errors import raise_code,PyHError</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.events.payload import WorkspaceResourceCommittedPayload</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>class ContextManifestStore:</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    MAX_CONTEXT_HISTORY = 200</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    MAX_CONTEXT_BYTES = 512 * 1024</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    def _context_finish(authorize, actor, resources, grant_ids=()):</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        &quot;&quot;&quot;Recheck subject after all disk/root I/O, then UTC after account I/O.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        from datetime import timezone</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        from pyharness.application import snapshot_store</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        from pyharness.application.source_grants import parse_expiry</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        if authorize() != actor:</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>            raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        now = snapshot_store.datetime.now(timezone.utc)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        for ident in set(grant_ids):</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>            grant = resources[ident][&#x27;grant&#x27;]</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>            if grant[&#x27;revoked&#x27;] or parse_expiry(grant[&#x27;expires_at&#x27;]) &lt;= now:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>                raise_code(&#x27;GRD-403&#x27;, reason=&#x27;source_grant_unavailable&#x27;)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    def _context_project(resources, project_id, revision=None):</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        parent = resources.get(project_id, {}).get(&#x27;project&#x27;)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        if parent is None or parent[&#x27;archived&#x27;]:</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>            raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_project_unavailable&#x27;)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        if revision is not None and parent[&#x27;revision&#x27;] != revision:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            raise_code(&#x27;EVT-101&#x27;, reason=&#x27;context_project_revision&#x27;)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        return parent</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    def _context_owned(resources, ident, kind, project_id, actor):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        row = resources.get(ident)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        value = row.get(kind) if row else None</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        if value is None or value[&#x27;project_id&#x27;] != project_id or value[&#x27;created_by&#x27;] != actor:</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_resource_unavailable&#x27;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        return row</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    def _context_task(self, resources, ref, project_id, project_revision, actor, *, exact=True):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        row = self._context_owned(resources, ref[&#x27;product_task_id&#x27;], &#x27;task_reference&#x27;, project_id, actor)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        value = row[&#x27;task_reference&#x27;]</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        if value[&#x27;retired&#x27;]:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_task_retired&#x27;)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        if exact and (value[&#x27;revision&#x27;] != ref[&#x27;revision&#x27;] or row[&#x27;digest&#x27;] != ref[&#x27;digest&#x27;]</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                      or row[&#x27;source_seq&#x27;] != ref[&#x27;source_seq&#x27;] or value[&#x27;project_revision&#x27;] != project_revision):</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            raise_code(&#x27;EVT-101&#x27;, reason=&#x27;context_task_revision&#x27;)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        return row</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    def _validate_context_definition(self, definition, resources, previous, event):</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        &quot;&quot;&quot;Validate at event time; later versions cause stale, never corrupt old history.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        value = definition.model_dump()</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        try:</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            self._context_project(resources, value[&#x27;project_id&#x27;], value[&#x27;project_revision&#x27;])</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            if value[&#x27;created_by&#x27;] != event.payload[&#x27;actor_ref&#x27;]:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                raise ValueError(&#x27;creator mismatch&#x27;)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            kind = &#x27;manifest&#x27; if isinstance(definition, ContextManifest) else &#x27;task_reference&#x27;</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            self._context_quota(resources, kind, value[&#x27;project_id&#x27;])</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            prior = previous.get(kind) if previous else None</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            if prior and prior[&#x27;schema_version&#x27;]!=1:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                raise ValueError(&#x27;context version cannot be downgraded&#x27;)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            if prior and (prior[&#x27;created_by&#x27;] != value[&#x27;created_by&#x27;] or prior[&#x27;project_id&#x27;] != value[&#x27;project_id&#x27;]):</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                raise ValueError(&#x27;immutable ownership&#x27;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            if kind == &#x27;task_reference&#x27;:</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>                if prior and prior[&#x27;retired&#x27;]:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                    raise ValueError(&#x27;retired target cannot be revived&#x27;)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                return</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            if prior and task_identity(prior[&#x27;task_ref&#x27;]) != task_identity(value[&#x27;task_ref&#x27;]):</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                raise ValueError(&#x27;immutable target identity&#x27;)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            grant = resources.get(value[&#x27;grant_id&#x27;], {}).get(&#x27;grant&#x27;)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            snaprow = resources.get(value[&#x27;snapshot_id&#x27;], {})</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            snapshot = snaprow.get(&#x27;snapshot&#x27;)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            if (not grant or grant[&#x27;project_id&#x27;] != value[&#x27;project_id&#x27;] or grant[&#x27;revoked&#x27;]</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                    or grant[&#x27;revision&#x27;] != value[&#x27;grant_revision&#x27;] or not snapshot</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                    or snapshot[&#x27;project_id&#x27;] != value[&#x27;project_id&#x27;] or snapshot[&#x27;grant_id&#x27;] != value[&#x27;grant_id&#x27;]</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                    or snapshot[&#x27;grant_revision&#x27;] != value[&#x27;grant_revision&#x27;]</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                    or snaprow[&#x27;digest&#x27;] != value[&#x27;snapshot_digest&#x27;] or snaprow[&#x27;source_seq&#x27;] != value[&#x27;snapshot_source_seq&#x27;]):</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                raise ValueError(&#x27;source binding&#x27;)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            observed = build_context_preview(snaprow)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            if value[&#x27;items&#x27;] != observed[&#x27;items&#x27;] or value[&#x27;total_size_bytes&#x27;] != observed[&#x27;total_size_bytes&#x27;]:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                raise ValueError(&#x27;context differs from committed source&#x27;)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            if value[&#x27;task_ref&#x27;]:</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                self._context_task(resources, value[&#x27;task_ref&#x27;], value[&#x27;project_id&#x27;], value[&#x27;project_revision&#x27;], value[&#x27;created_by&#x27;])</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        except (ValueError, PyHError):</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;context_definition_binding&#x27;)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    def _context_quota(self, resources, kind, project_id):</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        # revision continuity makes the sum count ALL historical commits, not latest IDs.</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        if sum(row[kind][&#x27;revision&#x27;] for row in resources.values()</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>               if kind in row and row[kind][&#x27;project_id&#x27;] == project_id) &gt;= self.MAX_CONTEXT_HISTORY:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            raise_code(&#x27;EVT-100&#x27;, reason=&#x27;context_history_limit&#x27;)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    def _context_envelope(kind, ident, revision, command_id, actor, request_digest, digest=&#x27;0&#x27;*64):</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        return WorkspaceResourceCommittedPayload(resource_kind=kind, resource_id=ident, revision=revision,</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            parent_revision=revision - 1, blob_ref=digest, digest=digest, command_id=command_id,</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            actor_ref=actor, request_digest=request_digest).model_dump()</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    async def _append_context(self, definition, kind, ident, command_id, actor, request_digest, gate):</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        return await self._append_context_projected(definition,kind,ident,command_id,actor,request_digest,gate,self._grant_state)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    async def _append_context_projected(self, definition, kind, ident, command_id, actor, request_digest, gate, read_state):</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        from pyharness.application.workspace_store import canonical, digest_of</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        raw = canonical(definition.model_dump())</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        limit = self.MAX_CONTEXT_BYTES if kind in {&#x27;context_manifest&#x27;,&#x27;workspace_snapshot&#x27;,&#x27;workspace_input&#x27;,&#x27;document&#x27;,&#x27;delivery_definition&#x27;,&#x27;index_repair&#x27;,&#x27;task_graph&#x27;,&#x27;task_graph_run&#x27;,&#x27;experiment_report&#x27;,&#x27;delivery_package&#x27;,&#x27;role_handoff&#x27;,&#x27;delivery_acceptance&#x27;,&#x27;delivery_export&#x27;,&#x27;writeback_grant&#x27;,&#x27;merge_plan&#x27;,&#x27;writeback_application&#x27;} else self.MAX_BLOB_BYTES</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        if len(raw) &gt; limit:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            raise_code(&#x27;EVT-100&#x27;, reason=&#x27;context_blob_limit&#x27;)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        digest = digest_of(raw)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        payload = self._context_envelope(kind, ident, definition.revision, command_id, actor, request_digest, digest)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        path = self._blob(digest)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        try:</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            if path.exists():</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                if checked_private_bytes(path,limit=limit) != raw:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                    raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_blob_digest&#x27;)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            else:</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                TenantSettingsStore._atomic_write(path, raw)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            # Never append a permanent reference to an unconfirmed immutable blob.</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            if checked_private_bytes(path,limit=limit) != raw:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_blob_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        except OSError:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_blob_write&#x27;)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        # Disk/account/root I/O may cross expiry or revocation. Recheck after blob write.</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        gate()</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        try:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            event = await self._session.append(&#x27;workspace.resource_committed&#x27;, payload, actor=&#x27;user&#x27;, sync=True)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            self._verify_commit(self._store, event)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            resources, _ = read_state()</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            return resources, resources[ident]</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        except OSError:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            self._failed = True</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_commit_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        except BaseException:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            self._failed = True</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            raise</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code></code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    def _task_reference_summary(self, resources, row):</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        value = {k: v for k, v in row[&#x27;task_reference&#x27;].items() if k != &#x27;created_by&#x27;}</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        parent = resources[value[&#x27;project_id&#x27;]][&#x27;project&#x27;]</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        current = (parent[&#x27;revision&#x27;] == value[&#x27;project_revision&#x27;]</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                   and resources[value[&#x27;product_task_id&#x27;]][&#x27;task_reference&#x27;][&#x27;revision&#x27;] == value[&#x27;revision&#x27;])</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        status = &#x27;retired&#x27; if value[&#x27;retired&#x27;] else (&#x27;current&#x27; if current else &#x27;stale&#x27;)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        return {**value, &#x27;digest&#x27;: row[&#x27;digest&#x27;], &#x27;source_seq&#x27;: row[&#x27;source_seq&#x27;], &#x27;created_at&#x27;: row[&#x27;created_at&#x27;],</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                &#x27;status&#x27;: status, &#x27;executable&#x27;: False}</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code></code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    async def save_context_task_reference(self, project_id, command, *, command_id, authorize):</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        from pyharness.application.workspace_store import canonical, digest_of</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>            actor = authorize()</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            await self._open(initialize=False)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>            request_digest = digest_of(canonical({&#x27;operation&#x27;: &#x27;context_task_reference&#x27;, &#x27;project_id&#x27;: project_id, &#x27;command&#x27;: command.model_dump()}))</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            self._context_envelope(&#x27;task_definition&#x27;, command.product_task_id, command.expected_revision + 1, command_id, actor, request_digest)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>            resources, commands = self._grant_state()</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            self._context_project(resources, project_id)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            old = commands.get((actor, command_id))</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>            if old:</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                if old[0] != request_digest:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                    raise_code(&#x27;EVT-100&#x27;, reason=&#x27;idempotency_conflict&#x27;)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                current = self._context_owned(resources, command.product_task_id, &#x27;task_reference&#x27;, project_id, actor)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                if current[&#x27;task_reference&#x27;][&#x27;retired&#x27;]:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>                    # The retirement command itself has a safe exact receipt.</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                    if not old[1][&#x27;task_reference&#x27;][&#x27;retired&#x27;]:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                        raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_task_retired&#x27;)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                self._context_finish(authorize, actor, resources)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                return self._task_reference_summary(resources, old[1])</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            prior = resources.get(command.product_task_id)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>            if prior:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                self._context_owned(resources, command.product_task_id, &#x27;task_reference&#x27;, project_id, actor)</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>            definition = TaskContextReference(project_id=project_id, project_revision=command.project_revision,</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                product_task_id=command.product_task_id, revision=command.expected_revision + 1,</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                title=command.title, retired=command.retired, created_by=actor)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            def gate():</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                if authorize() != actor:</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                    raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                fresh, _ = self._grant_state()</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                self._context_project(fresh, project_id, command.project_revision)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                previous = fresh.get(command.product_task_id)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                if previous:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                    self._context_owned(fresh, command.product_task_id, &#x27;task_reference&#x27;, project_id, actor)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                    if previous[&#x27;task_reference&#x27;][&#x27;retired&#x27;]:</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                        raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_task_retired&#x27;)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                if (previous[&#x27;task_reference&#x27;][&#x27;revision&#x27;] if previous else 0) != command.expected_revision:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                    raise_code(&#x27;EVT-101&#x27;, reason=&#x27;stale_revision&#x27;)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                self._context_quota(fresh, &#x27;task_reference&#x27;, project_id)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                self._context_finish(authorize, actor, fresh)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            gate()</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            resources, row = await self._append_context(definition, &#x27;task_definition&#x27;, command.product_task_id,</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                command_id, actor, request_digest, gate)</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            try: self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>            except PyHError: raise_code(&#x27;PERS-202&#x27;,reason=&#x27;workspace_commit_receipt_unavailable&#x27;)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>            return self._task_reference_summary(resources, row)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code></code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    async def context_task_references(self, project_id, *, authorize):</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>            actor = authorize()</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            await self._open(initialize=False)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            resources, _ = self._grant_state()</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>            self._context_project(resources, project_id)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            if authorize() != actor:</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>                raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>            return [self._task_reference_summary(resources, row) for row in resources.values()</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                    if &#x27;task_reference&#x27; in row and row[&#x27;task_reference&#x27;][&#x27;project_id&#x27;] == project_id</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                    and row[&#x27;task_reference&#x27;][&#x27;created_by&#x27;] == actor]</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    async def context_task_reference(self, project_id, task_id, revision, *, authorize):</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            actor = authorize()</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            await self._open(initialize=False)</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            resources, _ = self._grant_state()</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>            self._context_project(resources, project_id)</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            current = self._context_owned(resources, task_id, &#x27;task_reference&#x27;, project_id, actor)[&#x27;task_reference&#x27;]</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>            if current[&#x27;retired&#x27;] and current[&#x27;revision&#x27;] != revision:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>                raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_task_retired&#x27;)</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>            for event in self._session.events_after(0):</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>                if (event.type == &#x27;workspace.resource_committed&#x27; and event.payload[&#x27;resource_kind&#x27;] == &#x27;task_definition&#x27;</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>                        and event.payload[&#x27;resource_id&#x27;] == task_id and event.payload[&#x27;revision&#x27;] == revision):</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>                    value = self._read_definition(event.payload).model_dump()</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>                    row = {&#x27;task_reference&#x27;: value, &#x27;digest&#x27;: event.payload[&#x27;digest&#x27;], &#x27;source_seq&#x27;: event.seq,</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>                           &#x27;created_at&#x27;: event.ts}</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                    self._context_finish(authorize, actor, resources)</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                    return self._task_reference_summary(resources, row)</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>            raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_resource_unavailable&#x27;)</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code></code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>    def _manifest_access(self, resources, row, actor):</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        value = row[&#x27;manifest&#x27;]</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        if value[&#x27;schema_version&#x27;]!=1:</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;context_resource_unavailable&#x27;)</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        self._context_owned({value[&#x27;manifest_id&#x27;]: row}, value[&#x27;manifest_id&#x27;], &#x27;manifest&#x27;, value[&#x27;project_id&#x27;], actor)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        self._context_project(resources, value[&#x27;project_id&#x27;])</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        if value[&#x27;task_ref&#x27;]:</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>            self._context_task(resources, value[&#x27;task_ref&#x27;], value[&#x27;project_id&#x27;], value[&#x27;project_revision&#x27;], actor, exact=False)</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        # Root metadata and UTC check come LAST after reading all private definitions.</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        self._snapshot_grant(resources, value[&#x27;project_id&#x27;], value[&#x27;grant_id&#x27;])</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code></code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>    def _manifest_summary(self, resources, row):</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        value = {k: v for k, v in row[&#x27;manifest&#x27;].items() if k != &#x27;created_by&#x27;}</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        reasons = []</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        if resources[value[&#x27;project_id&#x27;]][&#x27;project&#x27;][&#x27;revision&#x27;] != value[&#x27;project_revision&#x27;]:</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            reasons.append(&#x27;project_revision_changed&#x27;)</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        if value[&#x27;task_ref&#x27;] and resources[value[&#x27;task_ref&#x27;][&#x27;product_task_id&#x27;]][&#x27;task_reference&#x27;][&#x27;revision&#x27;] != value[&#x27;task_ref&#x27;][&#x27;revision&#x27;]:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>            reasons.append(&#x27;task_revision_changed&#x27;)</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        if resources[value[&#x27;manifest_id&#x27;]][&#x27;manifest&#x27;][&#x27;revision&#x27;] != value[&#x27;revision&#x27;]:</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>            reasons.append(&#x27;manifest_revision_superseded&#x27;)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        return {**value, &#x27;items&#x27;: [] if reasons else value[&#x27;items&#x27;], &#x27;file_count&#x27;: len(value[&#x27;items&#x27;]),</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>                &#x27;digest&#x27;: row[&#x27;digest&#x27;], &#x27;source_seq&#x27;: row[&#x27;source_seq&#x27;], &#x27;created_at&#x27;: row[&#x27;created_at&#x27;],</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>                &#x27;status&#x27;: &#x27;stale&#x27; if reasons else &#x27;current&#x27;, &#x27;stale_reasons&#x27;: reasons,</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>                &#x27;binding_mode&#x27;: &#x27;context_task_reference&#x27; if value[&#x27;task_ref&#x27;] else &#x27;project_only&#x27;, &#x27;executable&#x27;: False}</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code></code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>    async def save_context_manifest(self, project_id, command, *, command_id, authorize):</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        from pyharness.application.workspace_store import canonical, digest_of</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            actor = authorize()</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>            await self._open(initialize=False)</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>            request_digest = digest_of(canonical({&#x27;operation&#x27;: &#x27;context_manifest&#x27;, &#x27;project_id&#x27;: project_id, &#x27;command&#x27;: command.model_dump()}))</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>            self._context_envelope(&#x27;context_manifest&#x27;, command.manifest_id, command.expected_revision + 1, command_id, actor, request_digest)</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>            resources, commands = self._grant_state()</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            self._context_project(resources, project_id)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            old = commands.get((actor, command_id))</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>            if old:</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>                if old[0] != request_digest:</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>                    raise_code(&#x27;EVT-100&#x27;, reason=&#x27;idempotency_conflict&#x27;)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>                if authorize() != actor:</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>                    raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>                self._manifest_access(resources, old[1], actor)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>                self._context_finish(authorize, actor, resources, (old[1][&#x27;manifest&#x27;][&#x27;grant_id&#x27;],))</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>                return self._manifest_summary(resources, old[1])</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>            snapshot_row = resources.get(command.snapshot_id)</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>            snapshot = snapshot_row.get(&#x27;snapshot&#x27;) if snapshot_row else None</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>            if not snapshot or snapshot[&#x27;project_id&#x27;] != project_id or snapshot[&#x27;grant_id&#x27;] != command.grant_id:</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>                raise_code(&#x27;GRD-403&#x27;, reason=&#x27;source_snapshot_unavailable&#x27;)</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>            observed = build_context_preview(snapshot_row)</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>            definition = ContextManifest(manifest_id=command.manifest_id, revision=command.expected_revision + 1,</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>                project_id=project_id, project_revision=command.project_revision, grant_id=command.grant_id,</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>                grant_revision=command.grant_revision, snapshot_id=command.snapshot_id, snapshot_digest=command.snapshot_digest,</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                snapshot_source_seq=snapshot_row[&#x27;source_seq&#x27;], task_ref=command.task_ref,</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>                items=observed[&#x27;items&#x27;], total_size_bytes=observed[&#x27;total_size_bytes&#x27;], created_by=actor)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>            def gate():</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>                if authorize() != actor:</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>                    raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                fresh, _ = self._grant_state()</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>                self._context_project(fresh, project_id, command.project_revision)</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>                previous = fresh.get(command.manifest_id)</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                if previous:</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                    self._context_owned(fresh, command.manifest_id, &#x27;manifest&#x27;, project_id, actor)</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                    if previous[&#x27;manifest&#x27;][&#x27;schema_version&#x27;]!=1:</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>                        raise_code(&#x27;EVT-101&#x27;,reason=&#x27;context_schema_identity&#x27;)</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>                    if task_identity(previous[&#x27;manifest&#x27;][&#x27;task_ref&#x27;]) != task_identity(definition.model_dump()[&#x27;task_ref&#x27;]):</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                        raise_code(&#x27;EVT-101&#x27;, reason=&#x27;context_target_identity&#x27;)</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>                if (previous[&#x27;manifest&#x27;][&#x27;revision&#x27;] if previous else 0) != command.expected_revision:</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>                    raise_code(&#x27;EVT-101&#x27;, reason=&#x27;stale_revision&#x27;)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>                self._context_quota(fresh, &#x27;manifest&#x27;, project_id)</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                current_snapshot = fresh.get(command.snapshot_id, {})</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                if current_snapshot.get(&#x27;digest&#x27;) != command.snapshot_digest:</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                    raise_code(&#x27;EVT-101&#x27;, reason=&#x27;snapshot_digest_changed&#x27;)</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>                if snapshot[&#x27;grant_revision&#x27;] != command.grant_revision:</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                    raise_code(&#x27;EVT-101&#x27;, reason=&#x27;context_grant_revision&#x27;)</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>                if command.task_ref:</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>                    self._context_task(fresh, command.task_ref.model_dump(), project_id, command.project_revision, actor)</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>                self._snapshot_grant(fresh, project_id, command.grant_id, command.grant_revision)</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                self._context_finish(authorize, actor, fresh, (command.grant_id,))</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>            gate()</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>            resources, row = await self._append_context(definition, &#x27;context_manifest&#x27;, command.manifest_id,</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>                command_id, actor, request_digest, gate)</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>            return self._manifest_summary(resources, row)</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code></code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>    async def context_manifest(self, project_id, manifest_id, revision, *, authorize):</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>            actor = authorize()</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>            await self._open(initialize=False)</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>            resources, _ = self._grant_state()</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>            self._context_owned(resources, manifest_id, &#x27;manifest&#x27;, project_id, actor)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>            row = None</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>            for event in self._session.events_after(0):</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>                if (event.type == &#x27;workspace.resource_committed&#x27; and event.payload[&#x27;resource_kind&#x27;] == &#x27;context_manifest&#x27;</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>                        and event.payload[&#x27;resource_id&#x27;] == manifest_id and event.payload[&#x27;revision&#x27;] == revision):</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>                    definition = self._read_definition(event.payload)</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>                    row = {&#x27;manifest&#x27;: definition.model_dump(), &#x27;digest&#x27;: event.payload[&#x27;digest&#x27;], &#x27;source_seq&#x27;: event.seq,</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>                           &#x27;created_at&#x27;: event.ts, &#x27;created_by&#x27;: event.payload[&#x27;actor_ref&#x27;]}</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>                    break</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>            if row is None:</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>                raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_resource_unavailable&#x27;)</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>            if authorize() != actor:</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>                raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>            self._manifest_access(resources, row, actor)</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>            self._context_finish(authorize, actor, resources, (row[&#x27;manifest&#x27;][&#x27;grant_id&#x27;],))</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>            return self._manifest_summary(resources, row)</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code></code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>    async def context_manifests(self, project_id, *, authorize):</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>        from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>            actor = authorize()</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>            await self._open(initialize=False)</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>            resources, _ = self._grant_state()</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>            self._context_project(resources, project_id)</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>            result = []</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>            for row in resources.values():</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>                if (&#x27;manifest&#x27; not in row or row[&#x27;manifest&#x27;][&#x27;schema_version&#x27;]!=1 or row[&#x27;manifest&#x27;][&#x27;project_id&#x27;] != project_id</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>                        or row[&#x27;manifest&#x27;][&#x27;created_by&#x27;] != actor):</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>                    continue</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>                if authorize() != actor:</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>                    raise_code(&#x27;GRD-403&#x27;, reason=&#x27;context_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>                try:</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>                    self._manifest_access(resources, row, actor)</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>                except PyHError as exc:</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>                    if exc.code == &#x27;GRD-403&#x27;:</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>                        continue  # exact GET remains denied; list reveals no withdrawn source metadata</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>                    raise</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>                item = self._manifest_summary(resources, row)</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>                item.pop(&#x27;items&#x27;)</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>                result.append(item)</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>            # Later rows&#x27; blocking root checks must not let earlier rows outlive grants.</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>            self._context_finish(authorize, actor, resources, (item[&#x27;grant_id&#x27;] for item in result))</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>            return result</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

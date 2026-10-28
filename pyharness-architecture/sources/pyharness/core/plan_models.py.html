@@ -1,0 +1,107 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/plan_models.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/plan_models.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 107 行</span></nav><main class="wrap source-page"><h1>pyharness/core/plan_models.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：57f5cd4f4c0cf41ce5c05c2d01e8874116ed6069<br>SHA-256（内容校验）：1a68a200335f81a75dd43de14a068d6016ce8073f9c32ffdb06223364487a86b</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 8 个类、函数与方法</summary><ul><li><a href="#L38">_utcnow（函数） · L38–L40</a></li><li><a href="#L42">_iso（函数） · L42–L45</a></li><li><a href="#L47">_parse_dt（函数） · L47–L54</a></li><li><a href="#L56">Step（类） · L56–L78</a><ul><li><a href="#L71">Step.__post_init__（方法） · L71–L74</a></li><li><a href="#L76">Step.to_dict（方法） · L76–L78</a></li></ul></li><li><a href="#L80">Plan（类） · L80–L103</a><ul><li><a href="#L97">Plan.summary（方法） · L97–L103</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Plan models: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import logging</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from dataclasses import asdict, dataclass</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from typing import Any, Literal, Optional</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>log = logging.getLogger(&quot;pyharness.plan_mode&quot;)</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>MAX_STEPS = 8                 # 方案步骤上限(超限拒写不落盘)</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>PLAN_TTL_HOURS = 24           # 方案 24h 未确认作废(过期自动 rejected)</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>MAX_RETRY = 2                 # 单步失败重试上限(仍败默认中止)</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>PLAN_PROMPT = (</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    &quot;你是任务拆解器。把用户目标拆成不超过 max_steps 步的可执行方案,每步必须包含:&quot;</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    &quot;action(动作,动词短语)、tool(工具名,选可用工具)、expected(预期结果,可核对)。&quot;</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    &quot;只输出 JSON,不要任何解释。步骤须按执行顺序排列,依赖前置。&quot;</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>DANGER_TABLE: tuple[dict[str, str], ...] = (</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    {&quot;pattern&quot;: &quot;fs.delete_file&quot;, &quot;level&quot;: &quot;critical&quot;},</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    {&quot;pattern&quot;: &quot;exec.*&quot;, &quot;level&quot;: &quot;high&quot;},</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    {&quot;pattern&quot;: &quot;net.*&quot;, &quot;level&quot;: &quot;high&quot;},</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>PlanStatus = Literal[</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    &quot;draft&quot;, &quot;pending&quot;, &quot;approved&quot;, &quot;executing&quot;,</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    &quot;completed&quot;, &quot;rejected&quot;, &quot;aborted&quot;,</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>]</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>_ACTIVE_STATUSES = (&quot;pending&quot;, &quot;approved&quot;, &quot;executing&quot;)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>RiskLevel = Literal[&quot;none&quot;, &quot;low&quot;, &quot;high&quot;, &quot;critical&quot;]</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>def _utcnow() -&gt; datetime:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    &quot;&quot;&quot;当前 UTC aware 时间(会话事件 ts 同口径;避免 naive/aware 比较 TypeError)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    return datetime.now(timezone.utc)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>def _iso(dt: datetime) -&gt; str:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    &quot;&quot;&quot;datetime → ISO8601 UTC 串(Z 结尾,与 Envelope.ts 同形)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    return dt.astimezone(timezone.utc).isoformat(timespec=&quot;microseconds&quot;).replace(</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        &quot;+00:00&quot;, &quot;Z&quot;)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>def _parse_dt(s: Any) -&gt; Optional[datetime]:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    &quot;&quot;&quot;ISO8601 串(含 Z 结尾)→ aware datetime;空/非法返回 None。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    if not s:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        return None</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    try:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        return datetime.fromisoformat(str(s).replace(&quot;Z&quot;, &quot;+00:00&quot;))</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    except ValueError:</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        return None</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>@dataclass</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>class Step:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    &quot;&quot;&quot;方案单步:action/tool/expected/risk(intent = 该步执行意图)。</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    risk 由 F023 同源表打标:high → 执行时独立审批(&quot;审批点&quot;),critical → 本层不可</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    执行(selfcheck 软标,展示用);intent 缺省由 action/tool/expected 拼装(事件</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    载荷不带 intent,回放重建时兜底走此缺省,Step(**s) 兼容事件派生步骤)。</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    action: str</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    tool: str</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    expected: str</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    risk: RiskLevel = &quot;low&quot;</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    intent: str = &quot;&quot;</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    def __post_init__(self) -&gt; None:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        &quot;&quot;&quot;intent 缺省拼装:用 &lt;tool&gt; &lt;action&gt;: &lt;expected&gt;(F045 执行意图)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        if not self.intent:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            self.intent = f&quot;用 {self.tool} {self.action}: {self.expected}&quot;</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    def to_dict(self) -&gt; dict:</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        &quot;&quot;&quot;值拷贝(plan_revise 单步编辑用;模型转 dict 零共享)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        return asdict(self)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>@dataclass</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>class Plan:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    &quot;&quot;&quot;会话级方案(id = plan.proposed 事件 seq;状态只由事件回放重建,INV-01)。</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code></code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    who = 裁决人(approve/reject 后置位;24h 过期自动 rejected 时 who=system)。</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code></code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    id: int</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    goal: str</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    steps: list[Step]                    # ≤8 步(propose 强校验)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    selfcheck_ok: bool = True            # 可执行性/依赖自检结论(展示用不阻断)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    why: str = &quot;&quot;                        # selfcheck 未过原因(空 = 通过)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    status: PlanStatus = &quot;pending&quot;       # draft 仅在 proposed 落盘前在途</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    created_at: Optional[datetime] = None</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    expires_at: Optional[datetime] = None  # created + 24h;过期自动作废</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    who: Optional[str] = None</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    def summary(self) -&gt; str:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        &quot;&quot;&quot;用户可读一行摘要(UI/命令层展示待批方案用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        steps_txt = &quot; → &quot;.join(f&quot;{i}.{s.action}({s.tool})&quot; for i, s in</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                               enumerate(self.steps))</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        check = &quot;自检通过&quot; if self.selfcheck_ok else f&quot;自检未过:{self.why}&quot;</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        return (f&quot;[plan {self.id}] {self.goal} | {self.status} | {check}\n&quot;</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                f&quot;  步骤({len(self.steps)}):{steps_txt}&quot;)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>Step.__module__ = &#x27;pyharness.core.plan_mode&#x27;</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>Plan.__module__ = &#x27;pyharness.core.plan_mode&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

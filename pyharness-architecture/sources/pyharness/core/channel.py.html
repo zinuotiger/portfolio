@@ -1,0 +1,150 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/channel.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/channel.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 150 行</span></nav><main class="wrap source-page"><h1>pyharness/core/channel.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：b85f78fc0eb4cbe9db322d0717d44b2d58c18c92<br>SHA-256（内容校验）：9ef6d3d700c60219c7436d5066426cfa82dcc3e326f8b1becf90139c4af0d3f2</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 9 个类、函数与方法</summary><ul><li><a href="#L48">ChannelKind（类） · L48–L55</a></li><li><a href="#L58">ChannelState（类） · L58–L78</a><ul><li><a href="#L67">ChannelState.is_interactive（方法） · L67–L69</a></li><li><a href="#L71">ChannelState.is_headless（方法） · L71–L73</a></li><li><a href="#L75">ChannelState.is_acceptable（方法） · L75–L78</a></li></ul></li><li><a href="#L81">normalize_channel（函数） · L81–L103</a></li><li><a href="#L106">resolve_channel（函数） · L106–L110</a></li><li><a href="#L113">require_channel（函数） · L113–L132</a></li><li><a href="#L135">default_channel_of（函数） · L135–L143</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/channel.py — 通道解析唯一实现(Channel Contract;N5)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>**为什么要这一层**:修复前&quot;通道&quot;在 6 层被**独立解释**了 5 次</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>(Service 的 ``or`` 合并、Engine 的硬编码默认、Approval 的**精确名**匹配 + 回落、</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>Governance 的 ``hasattr`` 哨兵 + ``or`` 合并),导致同一 ctx 状态在不同层得到</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>**互相矛盾**的判定。实测反例:``&quot;acp:client-7&quot;`` 在 ``approval._ensure_channel``</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>被判为 headless,而在同一文件的 ``_require_human`` 被接受;``&quot;&quot;`` 在治理层静默</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>降级为 ``system``。</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>本模块给出**唯一**的&quot;原始值 → 语义&quot;映射。核心层(approval/service/engine)直接</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>消费它;治理层因 ADR-018:308 依赖方向禁令**不得** import ``pyharness.core.*``,</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>故经其**已有的** ``Principal.from_legacy_by`` 分类消费(该函数已按前缀正确识别</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>``acp:&lt;id&gt;``),并由 ``tests/invariants`` 的真值表断言二者**逐状态一致**</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>(沿用 ``decision.HUMAN_CHANNELS`` 的&quot;受守卫的重复&quot;先例)。</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>**五种状态的冻结语义**(任何改动都是契约变更):</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>===========  ==========================================  ==========================</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>状态          判定条件                                    语义</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>===========  ==========================================  ==========================</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>MISSING      ``ctx`` 无 ``channel`` 属性(从未声明)          **fail-closed(APR-503)**</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>HEADLESS     ``ctx.channel is None``(显式声明无人类通道)    合法:SYSTEM 主体,无审批通道</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>INTERACTIVE  ``&quot;&lt;name&gt;&quot;`` 或 ``&quot;&lt;name&gt;:&lt;id&gt;&quot;``,             合法:人类通道,可发起审批</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>             ``name ∈ HUMAN_CHANNELS``</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>INVALID      非空字符串但 ``name ∉ HUMAN_CHANNELS``        **fail-closed(APR-503)**</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>UNKNOWN      空串 ``&quot;&quot;``(或非字符串)                      **fail-closed(APR-503)**</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>===========  ==========================================  ==========================</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>**归一化规则(关键)**::``&quot;acp:client-7&quot;`` → ``name=&quot;acp&quot;``, ``ident=&quot;client-7&quot;``</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>—— **保留 ACP 身份**,既**不降级为 desktop**,也**不降级为 headless**。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>from dataclasses import dataclass</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>from enum import StrEnum</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code></code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code># 人类交互通道白名单(与 ``core/approval.CHANNELS``、``governance.decision.HUMAN_CHANNELS``</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code># 同源;三处相等由一致性测试断言)。</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>HUMAN_CHANNELS: tuple[str, ...] = (&quot;cli&quot;, &quot;web&quot;, &quot;acp&quot;, &quot;desktop&quot;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code># 无人类通道时的框架主体(沿用 approval 侧 ``by=&quot;system&quot;`` 既有语义,非新规则)。</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>SYSTEM_BY: str = &quot;system&quot;</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>class ChannelKind(StrEnum):</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    &quot;&quot;&quot;通道原始值的五分类(见模块 docstring 的冻结语义表)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    MISSING = &quot;missing&quot;          # 属性缺失 ⇒ fail-closed</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    HEADLESS = &quot;headless&quot;        # 显式 None ⇒ 合法无通道</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    INTERACTIVE = &quot;interactive&quot;  # 合法人类通道</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    INVALID = &quot;invalid&quot;          # 非空串且前缀不在白名单 ⇒ fail-closed</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    UNKNOWN = &quot;unknown&quot;          # 空串/非字符串 ⇒ fail-closed</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>class ChannelState:</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    &quot;&quot;&quot;解析结果(不可变)。``raw`` 保留原值以便报错时如实呈现。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    kind: ChannelKind</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    name: Optional[str] = None    # 归一化通道名(INTERACTIVE 时非 None)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    ident: Optional[str] = None   # 主体 id(``acp:c7`` → ``&quot;c7&quot;``;裸名 → 同 name)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    raw: Any = None</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    @property</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    def is_interactive(self) -&gt; bool:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        return self.kind is ChannelKind.INTERACTIVE</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    @property</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    def is_headless(self) -&gt; bool:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        return self.kind is ChannelKind.HEADLESS</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    @property</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    def is_acceptable(self) -&gt; bool:</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        &quot;&quot;&quot;可接受 = 合法状态(HEADLESS 或 INTERACTIVE)。其余三种 fail-closed。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        return self.kind in (ChannelKind.HEADLESS, ChannelKind.INTERACTIVE)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>def normalize_channel(raw: Any) -&gt; ChannelState:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    &quot;&quot;&quot;原始值 → ``ChannelState``(**纯函数,无副作用,不抛**)。</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code></code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    调用方按 ``kind`` 自行决定 fail-closed,使本函数可在需要&quot;分类而非拒绝&quot;的</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    场景(如装配期留痕)复用。</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    if raw is None:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        return ChannelState(ChannelKind.HEADLESS, raw=None)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    if not isinstance(raw, str):</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        return ChannelState(ChannelKind.UNKNOWN, raw=raw)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    if raw == &quot;&quot;:</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        return ChannelState(ChannelKind.UNKNOWN, raw=raw)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    name, sep, ident = raw.partition(&quot;:&quot;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    if name not in HUMAN_CHANNELS:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        return ChannelState(ChannelKind.INVALID, raw=raw)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    if sep and ident == &quot;&quot;:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        # ``&quot;desktop:&quot;`` —— 前缀后**缺 id**:与 ``governance.decision.Principal.</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        # from_legacy_by`` 的判据一致(它对此抛 APR-503)。不对称会让同一 ctx 状态</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        # 在核心层与治理层得到相反判定,正是本契约要消除的分歧。</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        return ChannelState(ChannelKind.INVALID, raw=raw)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    # ``&quot;acp:client-7&quot;`` → name=&quot;acp&quot;, ident=&quot;client-7&quot;;裸 ``&quot;cli&quot;`` → ident=name</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    return ChannelState(ChannelKind.INTERACTIVE, name=name,</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                        ident=(ident if sep else name), raw=raw)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>def resolve_channel(ctx: Any) -&gt; ChannelState:</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    &quot;&quot;&quot;由 ``ctx`` 解析通道状态(处理&quot;属性缺失&quot;这一维)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    if not hasattr(ctx, &quot;channel&quot;):</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        return ChannelState(ChannelKind.MISSING, raw=None)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    return normalize_channel(getattr(ctx, &quot;channel&quot;, None))</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code></code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>def require_channel(ctx: Any, *, module: str, field: str = &quot;channel&quot;) -&gt; ChannelState:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    &quot;&quot;&quot;解析并**对不可接受状态 fail-closed**(MISSING / INVALID / UNKNOWN → APR-503)。</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code></code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    合法状态原样返回:``HEADLESS``(显式无通道)与 ``INTERACTIVE``(人类通道)。</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    st = resolve_channel(ctx)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    if st.is_acceptable:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        return st</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    why = {</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        ChannelKind.MISSING: &quot;ctx.channel 未声明:通道身份缺失,禁止静默降级为 system&quot;</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                             &quot;(fail-closed)。外壳须显式声明 &quot;</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                             &quot;channel=&#x27;cli&#x27;|&#x27;web&#x27;|&#x27;acp:&lt;id&gt;&#x27;|&#x27;desktop&#x27;,或显式声明 &quot;</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                             &quot;headless(channel=None)。&quot;,</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        ChannelKind.INVALID: f&quot;通道名非法(非白名单前缀):{st.raw!r};&quot;</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                             f&quot;合法前缀 {HUMAN_CHANNELS}(fail-closed,不静默降级)&quot;,</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        ChannelKind.UNKNOWN: &quot;通道值为空串/非字符串:视为未知通道,&quot;</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>                             &quot;禁止 falsy 回退改写声明语义(fail-closed)&quot;,</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    }[st.kind]</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    raise_code(&quot;APR-503&quot;, module=module, field=field, got=repr(st.raw), why=why)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    raise AssertionError(&quot;unreachable&quot;)          # raise_code 恒抛;供类型检查收敛</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code></code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>def default_channel_of(value: Any) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    &quot;&quot;&quot;装配期&quot;缺省通道&quot;归一化(provider 级默认,**非** ctx 回退)。</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    ``&quot;acp:&lt;id&gt;&quot;`` → ``&quot;acp&quot;``;``None``/非法/未知 → ``None``。</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    用途:``ApprovalProvider`` 的 ``user_choice``/信任名单按&quot;本 provider 服务哪个</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    交互外壳&quot;判定。**不得**把它当作 ctx 未声明通道时的回退源(那正是修复前的缺陷)。</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    st = normalize_channel(value)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    return st.name if st.is_interactive else None</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code></code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>__all__ = [</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    &quot;HUMAN_CHANNELS&quot;, &quot;SYSTEM_BY&quot;, &quot;ChannelKind&quot;, &quot;ChannelState&quot;,</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    &quot;normalize_channel&quot;, &quot;resolve_channel&quot;, &quot;require_channel&quot;,</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    &quot;default_channel_of&quot;,</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

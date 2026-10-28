@@ -1,0 +1,169 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/schedule_calendar.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/schedule_calendar.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 169 行</span></nav><main class="wrap source-page"><h1>pyharness/core/schedule_calendar.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：aff25baa40971d1f8410805f3a2fe5c31a62e3df<br>SHA-256（内容校验）：53f7cd329c467232d37d5e9b040b022f8e956f084ccf435498c764b049449aa3</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 12 个类、函数与方法</summary><ul><li><a href="#L8">ScheduleCalendar（类） · L8–L168</a><ul><li><a href="#L11">ScheduleCalendar._parse_spec（方法） · L11–L37</a></li><li><a href="#L39">ScheduleCalendar._as_int（方法） · L39–L46</a></li><li><a href="#L48">ScheduleCalendar._check_cron_fields（方法） · L48–L66</a></li><li><a href="#L68">ScheduleCalendar._field_match（方法） · L68–L84</a></li><li><a href="#L86">ScheduleCalendar._cron_match（方法） · L86–L92</a></li><li><a href="#L94">ScheduleCalendar._spec_of（方法） · L94–L98</a></li><li><a href="#L100">ScheduleCalendar.next_fire（方法） · L100–L113</a></li><li><a href="#L115">ScheduleCalendar._cron_next_fire（方法） · L115–L147</a></li><li><a href="#L149">ScheduleCalendar._first_fire（方法） · L149–L154</a></li><li><a href="#L156">ScheduleCalendar._due（方法） · L156–L164</a></li><li><a href="#L166">ScheduleCalendar._is_night（方法） · L166–L168</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;ScheduleCalendar operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from datetime import datetime, timedelta</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from typing import Any, Optional, Union</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.core.schedule_models import MIN_INTERVAL_SECONDS, CRON_MAX_SCAN_DAYS, _CRON_BOUNDS, _SEG_RE, parse_iso, CronSpec, IntervalSpec, AtSpec, ScheduleJob</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>class ScheduleCalendar:</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    &quot;&quot;&quot;ScheduleCalendar responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    def _parse_spec(self, kind: str, expr: str, *,</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>                    require_future: bool = True) -&gt; Union[CronSpec, IntervalSpec, AtSpec]:</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>        &quot;&quot;&quot;按 kind 解析表达式(require_future=False 供回放重建 at 已过期场景)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>        if kind == &quot;cron&quot;:                    # F048 核心:5 字段 cron</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>            if expr != expr.strip() or &quot;\t&quot; in expr:</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>                raise_code(&quot;CFG-601&quot;, hint=f&quot;cron 表达式含首尾空白/制表符: {expr!r}&quot;,</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>                           advice=&quot;格式:分 时 日 月 周(如 &#x27;0 2 * * *&#x27;),禁首尾空白&quot;)</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>            parts = expr.split()</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>            if len(parts) != 5:               # 段数错误</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>                raise_code(&quot;CFG-601&quot;, hint=f&quot;cron 须 5 字段: {expr}&quot;,</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>                           advice=&quot;格式:分 时 日 月 周(如 &#x27;0 2 * * *&#x27;)&quot;)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>            self._check_cron_fields(parts)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>            return CronSpec(fields=tuple(parts))</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        if kind == &quot;interval&quot;:                # 固定间隔(秒)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>            secs = self._as_int(expr)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>            if secs is None or secs &lt; MIN_INTERVAL_SECONDS:</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>                raise_code(&quot;CFG-601&quot;, hint=f&quot;interval 须 ≥{MIN_INTERVAL_SECONDS} 秒: {expr}&quot;,</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>                           advice=&quot;F048 最小粒度 1 分钟&quot;)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>            return IntervalSpec(seconds=secs)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        if kind == &quot;at&quot;:                      # 绝对时间(一次性)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            dt = parse_iso(expr)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>            if dt is None or (require_future and dt &lt;= self._now()):</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>                raise_code(&quot;CFG-601&quot;, hint=&quot;at 时间须为未来的 ISO8601&quot;,</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                           advice=&quot;示例:2026-09-08T10:30:00&quot;)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            return AtSpec(fire_at=dt)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        raise_code(&quot;EVT-100&quot;, hint=f&quot;kind 非法: {kind}&quot;,</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                   advice=&quot;kind ∈ cron/interval/at&quot;)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code></code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    def _as_int(expr: Any) -&gt; Optional[int]:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        &quot;&quot;&quot;整数解析(纯数字,含正负;非整数串 → None)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        try:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>            v = int(str(expr).strip())</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            return None</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        return v</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    def _check_cron_fields(self, parts: list[str]) -&gt; None:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        &quot;&quot;&quot;5 字段逐一校验:段语法(数值/区间/列表/步长)与值域(越界 → CFG-601)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        for field_, (lo, hi) in zip(parts, _CRON_BOUNDS):</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            for seg in field_.split(&quot;,&quot;):</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                if not seg or not _SEG_RE.match(seg):</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                    raise_code(&quot;CFG-601&quot;, hint=f&quot;cron 段非法: {field_!r}&quot;,</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                               advice=&quot;段 ∈ 数值/a-b/a,b/*/*/n/a-b/n&quot;)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                m = _SEG_RE.match(seg)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                if m.group(1) == &quot;*&quot;:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                    step = int(m.group(3) or 1)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                    if step &lt; 1:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                        raise_code(&quot;CFG-601&quot;, hint=f&quot;cron 步长非法: {seg}&quot;)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>                    continue</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                a = int(m.group(1))</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                b = int(m.group(2)) if m.group(2) else a</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                step = int(m.group(3) or 1)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                if a &lt; lo or b &gt; hi or a &gt; b or step &lt; 1:   # 值域/序/步长</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                    raise_code(&quot;CFG-601&quot;, hint=f&quot;cron 值域越界: {seg}&quot;</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                               f&quot;(字段 {lo}-{hi})&quot;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    def _field_match(field_: str, v: int) -&gt; bool:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        &quot;&quot;&quot;单字段匹配:*,a,a-b,列表,*/n,a-b/n 任一命中即真(注册期已校验语法)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        for seg in field_.split(&quot;,&quot;):</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            m = _SEG_RE.match(seg)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            if not m:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                continue                     # 防御:注册期已拒,绝不 True 误放</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            step = int(m.group(3) or 1)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            if m.group(1) == &quot;*&quot;:            # &#x27;*&#x27; 或 &#x27;*/n&#x27;</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                if v % step == 0:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                    return True</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                continue</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            a = int(m.group(1))</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            b = int(m.group(2)) if m.group(2) else a</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            if a &lt;= v &lt;= b and (v - a) % step == 0:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                return True</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        return False</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    def _cron_match(self, spec: CronSpec, dt: datetime) -&gt; bool:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        &quot;&quot;&quot;cron 分钟匹配:五字段逐一命中(本地时钟;周 0=周日,数据表权威)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        vals = (dt.minute, dt.hour, dt.day, dt.month, (dt.weekday() + 1) % 7)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        for field_, v in zip(spec.fields, vals):</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            if not self._field_match(field_, v):</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                return False</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        return True</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    def _spec_of(self, job: ScheduleJob) -&gt; Union[CronSpec, IntervalSpec, AtSpec]:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        &quot;&quot;&quot;job.spec 惰性解析(重建路径 at 已过期场景容错,require_future=False)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        if job.spec is None:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            job.spec = self._parse_spec(job.kind, job.expr, require_future=False)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        return job.spec</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code></code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    def next_fire(self, job: ScheduleJob, now_dt: datetime) -&gt; Optional[datetime]:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        &quot;&quot;&quot;按 kind 计算下次触发(cron 按日扫描;interval 按 last_fired 推进;</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        at 一次性:fire_at 已过 → None,耗尽)。</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        cron 无未来触发点(如 2/30)→ CFG-601 显式失败:注册期即拒,运行期不再</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        产生&quot;已注册 + next_fire_at=None + 永不触发&quot;的静默状态(BUG-1 修复)。</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        spec = self._spec_of(job)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        if job.kind == &quot;cron&quot;:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            return self._cron_next_fire(spec, job.expr, now_dt)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        if job.kind == &quot;interval&quot;:            # 固定间隔推进(≥60s)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            base = job.last_fired_at or now_dt</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>            return base + timedelta(seconds=spec.seconds)</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        return spec.fire_at if spec.fire_at &gt; now_dt else None   # at:已过即 None</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code></code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    def _cron_next_fire(self, spec: CronSpec, expr: str,</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                        now_dt: datetime) -&gt; datetime:</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        &quot;&quot;&quot;cron 下次触发:按日推进,命中日取当日最早的匹配 (时,分)。</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code></code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        **不再逐分钟扫描**——旧实现上限 1440 分钟(24h),使&quot;下次触发在 24h 之外&quot;</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        的合法表达式(工作日/每周/每月)一律得到 None → 永不触发(BUG-1)。此处</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        按日推进把上限提到完整格里高利周期(CRON_MAX_SCAN_DAYS),整月不匹配时</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        直接跳到下月 1 日,故 400 年上限的实际代价极小。</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code></code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        界内无匹配 ⇒ 该表达式永远无触发点 → CFG-601 显式失败(不返回 None)。</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        minute_f, hour_f, dom_f, month_f, dow_f = spec.fields</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        hours = [h for h in range(24) if self._field_match(hour_f, h)]</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        minutes = [mi for mi in range(60) if self._field_match(minute_f, mi)]</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        start = now_dt.replace(second=0, microsecond=0) + timedelta(minutes=1)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        cursor = start.replace(hour=0, minute=0)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        for _ in range(CRON_MAX_SCAN_DAYS):</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            if not self._field_match(month_f, cursor.month):</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                # 整月不匹配:跳到下月 1 日,不逐日空转</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                cursor = (cursor.replace(day=1)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                          + timedelta(days=32)).replace(day=1)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                continue</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            if (self._field_match(dom_f, cursor.day)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                    and self._field_match(dow_f, (cursor.weekday() + 1) % 7)):</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                for h in hours:                # 升序遍历 → 首个 ≥start 即当日最早</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                    for mi in minutes:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                        cand = cursor.replace(hour=h, minute=mi)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                        if cand &gt;= start:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                            return cand</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            cursor += timedelta(days=1)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        raise_code(&quot;CFG-601&quot;, expr=expr,</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                   hint=f&quot;cron 无未来触发点(400 年内无匹配): {expr}&quot;,</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                   advice=&quot;检查日/月组合是否存在(如 2 月 30 日不存在)&quot;)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code></code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    def _first_fire(self, kind: str, expr: str,</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                    now_dt: datetime) -&gt; Optional[datetime]:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        &quot;&quot;&quot;注册时首次触发窗(= 未来最近一次触发;spec 伪码 _first_fire 落地)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        spec = self._parse_spec(kind, expr, require_future=False)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        probe = ScheduleJob(name=&quot;&quot;, kind=kind, expr=expr, template={}, spec=spec)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        return self.next_fire(probe, now_dt)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code></code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    def _due(self, job: ScheduleJob, now_dt: datetime) -&gt; bool:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        &quot;&quot;&quot;触发窗判定:next_fire_at 已到(cron 额外要求当前分钟命中表达式)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        if job.next_fire_at is None:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>            return False</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        if now_dt &lt; job.next_fire_at:</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            return False</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        if job.kind == &quot;cron&quot;:                # 分钟对齐:当前分钟须命中</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>            return self._cron_match(self._spec_of(job), now_dt)</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        return True                           # interval/at:过窗即到点</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code></code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    def _is_night(self, dt: datetime) -&gt; bool:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        &quot;&quot;&quot;深夜窗判定:23:00 ≤ hour 或 hour &lt; 7:00(默认;可配 night_window)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        return dt.hour &gt;= self._night_start or dt.hour &lt; self._night_end</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

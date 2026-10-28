@@ -1,0 +1,67 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/desktop/platform_api.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/desktop/platform_api.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 67 行</span></nav><main class="wrap source-page"><h1>pyharness/desktop/platform_api.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：60ef42bc3c98f297acc7c3258506891a2dcc696a<br>SHA-256（内容校验）：54bca15baaafc10f1195072d4fed05c2fb3ecd80fad3b6bbbbfad2fac9df07ca</p><p><a href="../../../architecture-detailed.html?node=platform_api">Versioned Platform API（版本化平台接口）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 7 个类、函数与方法</summary><ul><li><a href="#L13">PlatformRoute（类） · L13–L35</a><ul><li><a href="#L14">PlatformRoute.get_route_handler（方法） · L14–L35</a><ul><li><a href="#L16">PlatformRoute.get_route_handler.checked（异步方法） · L16–L34</a></li></ul></li></ul></li><li><a href="#L44">mount_platform（函数） · L44–L67</a><ul><li><a href="#L45">mount_platform.OwnedPlatformRoute（类） · L45–L48</a><ul><li><a href="#L46">mount_platform.OwnedPlatformRoute.service_owner（方法） · L46–L48</a></li></ul></li><li><a href="#L51">mount_platform.service（方法） · L51–L53</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Versioned thin HTTP adapter; authentication remains owned by DesktopApp.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from fastapi import APIRouter, Body, Depends, Request</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from fastapi.exceptions import RequestValidationError</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from fastapi.responses import JSONResponse, Response</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pydantic import ValidationError</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.core.sandbox import fail</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from fastapi.routing import APIRoute</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.integrations.wechat_ilink import ILinkError</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>class PlatformRoute(APIRoute):</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    def get_route_handler(self):</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        handler = super().get_route_handler()</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        async def checked(request):</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>            try:</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>                from pyharness.core.lifecycle import admitted</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>                @admitted</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>                async def owned(owner):</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>                    return await handler(request)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>                return await owned(self.service_owner)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>            except PyHError as exc:</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>                if exc.code.isupper():</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>                    raise</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>                code = exc.code</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>                status = (404 if code.endswith(&#x27;_not_found&#x27;) else</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>                          503 if code in {&#x27;sandbox_unavailable&#x27;,&#x27;knowledge_unavailable&#x27;} else</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>                          409 if any(s in code for s in (&#x27;busy&#x27;,&#x27;pending&#x27;,&#x27;fixed&#x27;,&#x27;in_use&#x27;,&#x27;integrity&#x27;,&#x27;expired&#x27;,&#x27;not_active&#x27;,&#x27;not_pending&#x27;,&#x27;not_allowed&#x27;,&#x27;cannot_delete&#x27;,&#x27;baseline&#x27;,&#x27;deprecated&#x27;)) else 422)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>                return JSONResponse({&#x27;code&#x27;:code,&#x27;message&#x27;:code}, status_code=status)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            except ILinkError as exc:</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>                return JSONResponse({&#x27;code&#x27;:exc.code,&#x27;message&#x27;:&#x27;微信连接操作未完成，请检查连接状态&#x27;},status_code=503)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            except (RequestValidationError, ValidationError, ValueError, TypeError):</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                return JSONResponse({&#x27;code&#x27;:&#x27;invalid_request&#x27;,&#x27;message&#x27;:&#x27;请求字段或状态不合法&#x27;}, status_code=422)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        return checked</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>from .channel_routes import mount_channels</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>from .run_routes import mount_runs</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>from .agent_routes import mount_agents</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>from .artifact_routes import mount_artifacts</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>from .management_routes import mount_management</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>def mount_platform(desktop):</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    class OwnedPlatformRoute(PlatformRoute):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        @property</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        def service_owner(self):</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            return desktop.service</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    router = APIRouter(prefix=&#x27;/api/v1&#x27;, route_class=OwnedPlatformRoute, dependencies=[Depends(desktop._require_api_auth)])</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    def service():</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        desktop.service._ensure_open()</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        return desktop.service.platform</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    mount_channels(router, desktop, service)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    mount_runs(router, desktop, service)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    mount_agents(router, desktop, service)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code></code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    mount_artifacts(router, desktop, service)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    mount_management(router, desktop, service)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    desktop.api.include_router(router)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    from .workspace_api import mount_workspace</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    mount_workspace(desktop)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

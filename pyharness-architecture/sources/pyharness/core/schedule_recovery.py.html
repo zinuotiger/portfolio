@@ -1,0 +1,203 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/schedule_recovery.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/schedule_recovery.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 203 行</span></nav><main class="wrap source-page"><h1>pyharness/core/schedule_recovery.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：278f3eef1fba6a3fa5dcf024223b1b8d1af9f30f<br>SHA-256（内容校验）：6e668aca63114e63f1162133102ea7990390c7c65061694762f461634fe0bb83</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 8 个类、函数与方法</summary><ul><li><a href="#L12">ScheduleRecovery（类） · L12–L202</a><ul><li><a href="#L15">ScheduleRecovery._missed_window（方法） · L15–L17</a></li><li><a href="#L19">ScheduleRecovery._missed_count（方法） · L19–L43</a></li><li><a href="#L45">ScheduleRecovery.recover（异步方法） · L45–L98</a></li><li><a href="#L100">ScheduleRecovery._rebuild_from（方法） · L100–L151</a></li><li><a href="#L153">ScheduleRecovery.rebuild_for_session（方法） · L153–L171</a></li><li><a href="#L173">ScheduleRecovery._ensure_ticker（方法） · L173–L180</a></li><li><a href="#L182">ScheduleRecovery._ticker（异步方法） · L182–L202</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;ScheduleRecovery operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from typing import TYPE_CHECKING</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>if TYPE_CHECKING:</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>    from pyharness.core.schedule import Scheduler</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import asyncio</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from datetime import datetime, timedelta</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.core.schedule_models import log, iso, parse_iso, ScheduleJob</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>class ScheduleRecovery:</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    &quot;&quot;&quot;ScheduleRecovery responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    def _missed_window(self, job: ScheduleJob, now_dt: datetime) -&gt; bool:</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        &quot;&quot;&quot;宕机窗判定:持久化 next_fire_at 已过(窗口落进宕机期)→ 错过。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        return (job.next_fire_at is not None and job.next_fire_at &lt;= now_dt)</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    def _missed_count(self, job: ScheduleJob, now_dt: datetime) -&gt; int:</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        &quot;&quot;&quot;宕机窗内错过的触发机会数(合并计数;PRD:只记 missed 不补跑)。</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        cron:窗口 [next_fire_at, now_dt] 内命中表达式且到点的分钟数(上限 10 万分钟</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        防极端长宕机死循环);interval:过窗周期数;at:1(一次性)。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        nxt = job.next_fire_at</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        if nxt is None:</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>            return 0</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        if job.kind == &quot;at&quot;:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>            return 1</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        spec = self._spec_of(job)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        if job.kind == &quot;interval&quot;:</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>            span = (now_dt - nxt).total_seconds()</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            return max(1, int(span // spec.seconds) + 1)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        t = nxt.replace(second=0, microsecond=0)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        cap = now_dt.replace(second=0, microsecond=0)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        count = 0</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        guard = 0</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        while t &lt;= cap and guard &lt; 100_000:       # 100k 分钟 ≈ 70 天窗口</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            if self._cron_match(spec, t):</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                count += 1</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            t += timedelta(minutes=1)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            guard += 1</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        return max(1, count)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    async def recover(self, ctx: Any = None, *,</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                      now_dt: Optional[datetime] = None) -&gt; int:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        &quot;&quot;&quot;崩溃恢复(F048 …/恢复):回放 schedule.* 重建注册表;宕机期错过的触发</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        只记 schedule.missed 不补跑;窗口重臂后启动分钟 ticker;返回 missed 总数。</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        窗口未到(next_fire_at 仍未来)→ 保持快照原样续跑(与崩溃前一致);</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        窗口已过 → 记 missed 并把 last_fired 清零、从 now 重臂(偏离 3)。</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        now_dt = now_dt or self._now()</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        sess = self._session_ctx(ctx)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        # 事件重建注册表(INV-01):重建含 trigger 派生的 last_fired_at/前推窗口</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        rebuilt = type(self)._rebuild_from(self._iter_session_events())</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        self._jobs = rebuilt._jobs</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        missed_total = 0</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        for j in self._jobs.values():</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            if j.paused:                        # 暂停中:不核算错过</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                continue</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            if self._missed_window(j, now_dt):  # 宕机窗内错过 → 只留痕不补跑</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                await sess.append(&quot;schedule.missed&quot;, {</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                    &quot;job&quot;: j.name, &quot;missed&quot;: self._missed_count(j, now_dt),</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                    &quot;since&quot;: iso(j.next_fire_at), &quot;until&quot;: iso(now_dt)},</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                    actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                missed_total += 1</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>                spec = self._spec_of(j)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                if j.kind == &quot;interval&quot;:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                    # 错过窗已消费:显式从 now 重臂(不依赖 stale last_fired,不补跑)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>                    j.next_fire_at = now_dt + timedelta(seconds=spec.seconds)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                else:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                    j.next_fire_at = self.next_fire(j, now_dt)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                    if j.kind == &quot;at&quot; and j.next_fire_at is None:</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                        continue            # 一次性 at 已彻底过期:由 remove 清理</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            # 窗口未到:保持快照(next_fire_at 未来),继续未来触发</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        # BUG-1 自愈:旧版扫描窗为 24h,使下次触发在 24h 之外的合法 cron(工作日/</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        # 每周/每月)落盘 next_fire_at=null 并永不触发。这类 job 无触发历史,回放</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        # 不会重算窗口 → 在此按新口径重算并显式落 schedule.updated(事件即真源)。</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        for j in self._jobs.values():</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            if j.paused or j.kind != &quot;cron&quot; or j.next_fire_at is not None:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                continue</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            try:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                nxt = self.next_fire(j, now_dt)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            except PyHError as e:               # 真无触发点(如 2/30 的历史遗留)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                await sess.append(&quot;system.error&quot;, {</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                    &quot;code&quot;: e.code,</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                    &quot;hint&quot;: f&quot;schedule:{j.name} 无未来触发点,已跳过&quot;},</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                    actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                continue</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            await sess.append(&quot;schedule.updated&quot;, {</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                &quot;name&quot;: j.name, &quot;paused&quot;: False, &quot;next_fire_at&quot;: iso(nxt)},</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            j.next_fire_at = nxt</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code></code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        if self._auto_ticker:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            self._ensure_ticker(ctx)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        return missed_total</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code></code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    @classmethod</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    def _rebuild_from(cls, events: list[Any]) -&gt; &quot;Scheduler&quot;:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        &quot;&quot;&quot;事件回放重建(INV-01,内部):顺序重放 schedule.registered/updated/removed</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        重建 _jobs;孤儿 updated/removed 防御跳过;补扫 schedule.trigger 重建</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        last_fired_at 并前推 next_fire_at(偏离 2:missed 只计宕机窗)。</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        返回全新注册表实例(类方法,不触碰 self 状态)。</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        m = cls()                               # 清空后按事件重建(无 session:只读)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        for e in events:</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            t = getattr(e, &quot;type&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            p = getattr(e, &quot;payload&quot;, {}) or {}</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>            if t == &quot;schedule.registered&quot;:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                m._jobs[p[&quot;name&quot;]] = ScheduleJob(</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                    name=p[&quot;name&quot;], kind=p[&quot;kind&quot;], expr=p[&quot;expr&quot;],</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                    template={&quot;intent&quot;: p[&quot;template&quot;][&quot;intent&quot;]},</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                    is_risky=bool(p.get(&quot;is_risky&quot;, False)),</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                    paused=bool(p.get(&quot;paused&quot;, False)),</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                    next_fire_at=parse_iso(p.get(&quot;next_fire_at&quot;)),</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                    created_seq=getattr(e, &quot;seq&quot;, 0))</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            elif t == &quot;schedule.updated&quot;:       # 暂停/恢复状态迁移</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                j = m._jobs.get(p.get(&quot;name&quot;))</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                if j is None:</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                    log.warning(&quot;orphan schedule.updated seq=%s&quot;, getattr(e, &quot;seq&quot;, &quot;?&quot;))</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                    continue                    # 孤儿(坏日志):防御跳过</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                j.paused = bool(p.get(&quot;paused&quot;, j.paused))</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                nxt = parse_iso(p.get(&quot;next_fire_at&quot;))</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                if nxt is not None:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>                    j.next_fire_at = nxt</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            elif t == &quot;schedule.removed&quot;:       # 移除留痕</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                m._jobs.pop(p.get(&quot;name&quot;), None)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        # 第二遍:以最后一次 trigger.fired_at 为锚重建 last_fired_at/前推 next_fire_at</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        last_trigger: dict[str, datetime] = {}</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        for e in events:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            p = getattr(e, &quot;payload&quot;, {}) or {}</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            if getattr(e, &quot;type&quot;, &quot;&quot;) == &quot;schedule.trigger&quot;:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                dt = parse_iso(p.get(&quot;fired_at&quot;))</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                if dt is not None and (dt &gt; last_trigger.get(p.get(&quot;job&quot;), datetime.min)):</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                    last_trigger[p.get(&quot;job&quot;)] = dt</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        for name, job in m._jobs.items():</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            fired = last_trigger.get(name)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            if fired is None or job.kind in (&quot;at&quot;,) or job.paused:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                continue                        # 无触发历史/一次性/暂停:快照即权威</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            job.last_fired_at = fired</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            job.spec = m._parse_spec(job.kind, job.expr, require_future=False)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            if job.kind == &quot;interval&quot;:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                # 确定性前推:上一触发 + 间隔(宕机窗 = 上一窗之后)</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                job.next_fire_at = fired + timedelta(seconds=job.spec.seconds)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            else:</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                # cron:fired 之后最近的匹配分钟</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                job.next_fire_at = m.next_fire(job, fired)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        return m                                # 内存态 ≡ 日志派生态(INV-01)</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code></code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    @classmethod</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    def rebuild_for_session(cls, session: Any, *,</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                            task_queue: Any = None,</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                            auto_ticker: bool = False) -&gt; &quot;Scheduler&quot;:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        &quot;&quot;&quot;事件回放重建并绑定会话(命令层/装配层入口,INV-01)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        events: list[Any] = []</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        if session is not None:</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            ea = getattr(session, &quot;events_after&quot;, None)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            if callable(ea):</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                events = list(ea(0))</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>            elif hasattr(session, &quot;replay&quot;):</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                events = list(session.replay())</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        m = cls._rebuild_from(events)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        m.session = session</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        m.task_queue = task_queue</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        m._auto_ticker = bool(auto_ticker)</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        m._stopped = not auto_ticker</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        m._ticker_task = None</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        return m</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code></code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    def _ensure_ticker(self, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        &quot;&quot;&quot;启动/复用分钟泵单协程(INV-07 单写者;已跑不重复起)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        if self._stopped:</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            return</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        if self._ticker_task is not None and not self._ticker_task.done():</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            return</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        self._ticker_task = asyncio.get_running_loop().create_task(</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>            self._ticker(ctx))</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code></code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>    async def _ticker(self, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        &quot;&quot;&quot;常驻协程:睡到下一分钟边界后 _tick(F048 最小粒度 1 分钟);单轮异常不</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        退出泵(记 system.error 后继续下一轮)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        while not self._stopped:</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>            nxt = (self._now() + timedelta(minutes=1)).replace(second=0, microsecond=0)</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>            try:</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                await self._sleep(max(1.0, (nxt - self._now()).total_seconds()))</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>            except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                raise                       # 外部停止:让路</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>            try:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                await self._tick(ctx)       # 每分钟检查一次(F048)</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                raise</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            except Exception as e:          # noqa: BLE001 单轮异常不杀泵</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                log.exception(&quot;schedule tick failed: %s&quot;, e)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>                try:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>                    await self._session_ctx(ctx).append(&quot;system.error&quot;, {</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>                        &quot;code&quot;: &quot;CYC-999&quot;, &quot;hint&quot;: &quot;schedule tick 异常已隔离&quot;},</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>                        actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                except Exception:           # noqa: BLE001 留痕失败不阻断泵存活</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>                    log.exception(&quot;schedule tick error event failed&quot;)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

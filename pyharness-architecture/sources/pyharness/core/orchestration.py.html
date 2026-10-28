@@ -1,0 +1,357 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/orchestration.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/orchestration.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 357 行</span></nav><main class="wrap source-page"><h1>pyharness/core/orchestration.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：a0dac913a669d51b0d5893d136ef8733651e7395<br>SHA-256（内容校验）：9f724ce10a33ca818137be981744ae9580236bd7648fb74d328fababbeed3567</p><p><a href="../../../architecture-detailed.html?node=subagent">Subagent Orchestration（子代理委派与回收）</a> · <a href="../../../architecture-detailed.html?node=jobs">Background Jobs（后台任务与属主控制）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 13 个类、函数与方法</summary><ul><li><a href="#L18">_last_text（函数） · L18–L25</a></li><li><a href="#L28">_runtime_ctx（函数） · L28–L90</a></li><li><a href="#L93">_run_on_session（异步函数） · L93–L139</a></li><li><a href="#L142">EngineIntentRunner（类） · L142–L197</a><ul><li><a href="#L151">EngineIntentRunner.__init__（方法） · L151–L153</a></li><li><a href="#L155">EngineIntentRunner.run（异步方法） · L155–L197</a></li></ul></li><li><a href="#L200">EngineSubagentRunner（类） · L200–L353</a><ul><li><a href="#L203">EngineSubagentRunner.__init__（方法） · L203–L213</a></li><li><a href="#L215">EngineSubagentRunner.child_session（方法） · L215–L258</a><ul><li><a href="#L233">EngineSubagentRunner.child_session._record（异步方法） · L233–L234</a></li></ul></li><li><a href="#L260">EngineSubagentRunner.close_child（方法） · L260–L271</a></li><li><a href="#L273">EngineSubagentRunner.completed_result（方法） · L273–L289</a></li><li><a href="#L291">EngineSubagentRunner.run_child（异步方法） · L291–L353</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Engine-facing adapters for background jobs and subagents.</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>The orchestration modules intentionally depend on injected runners.  This module</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>is the missing production adapter: it turns one intent into a real AgentLoop</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>run while preserving the caller&#x27;s session/scope boundary.</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import asyncio</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pyharness.core.agent import CHANNEL_UNDECLARED</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from pyharness.core.agent_loop import AgentLoop</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>from pyharness.persistence import flush_kwargs_of as _flush_kwargs_of</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>def _last_text(session: Any, after_seq: int) -&gt; str:</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    for env in reversed(list(session.events_after(after_seq))):</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        if getattr(env, &quot;type&quot;, &quot;&quot;) not in (&quot;agent.message&quot;, &quot;llm.response&quot;):</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>            continue</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        content = (getattr(env, &quot;payload&quot;, {}) or {}).get(&quot;content&quot;)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        if content:</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>            return str(content)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    return &quot;&quot;</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>def _runtime_ctx(spine: Any, session: Any, scope: Any, loop: Any, *,</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>                 task_id: Optional[str], owner: Optional[str],</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>                 depth: int = 0) -&gt; Any:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    &quot;&quot;&quot;Build the ctx consumed by AgentLoop for one independent run.</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    Parent-session jobs reuse the parent goal/todo managers.  Child sessions get</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    their own managers so their event projections cannot mix with the parent.</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    Guard/governance remain the parent engine instances. Child approval and</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    questions use the existing providers bound to the child session, routed</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    through the owning service&#x27;s UI by full session identity.</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    depth = 本会话所处递归层级(主=0,子=spec.depth):经</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    ctx.subagent_depth 供 subagent.spawn 计算 d+1,使递归链硬上限 ≤3 生效。</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    governance 与 session/scope/guard/approval 同为必接线。</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    tools_executor._require_wiring 在工具执行前要求其存在;</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    缺失会 fail-closed(CYC-999)。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    if session is getattr(spine, &quot;session&quot;, None):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        goals = getattr(spine, &quot;goals&quot;, None)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        todos = getattr(spine, &quot;todos&quot;, None)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        ask = getattr(spine, &quot;ask&quot;, None)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    else:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        from pyharness.core.goal import GoalManager</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        from pyharness.core.todo import TodoManager</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        from pyharness.core.user_ask import AskProvider</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        goals = GoalManager(session=session)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        todos = TodoManager(session=session)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        ask = AskProvider(session=session, bus=getattr(spine, &quot;bus&quot;, None))</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    return SimpleNamespace(</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        config=getattr(spine, &quot;settings&quot;, None),</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        session=session,</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        scope=scope,</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        llm=getattr(spine, &quot;llm&quot;, None),</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        tools=getattr(spine, &quot;tools&quot;, None),</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        loop=loop,</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        sysprompt=getattr(spine, &quot;sysprompt&quot;, None),</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        compactor=getattr(spine, &quot;compactor&quot;, None),</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        streaming=False,</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        bus=getattr(spine, &quot;bus&quot;, None),</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        registry=getattr(spine, &quot;registry&quot;, None),</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        guard=getattr(spine, &quot;guard&quot;, None),</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        governance=getattr(spine, &quot;governance&quot;, None),</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        approval=getattr(spine, &quot;approval&quot;, None),</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        counters=(getattr(scope, &#x27;_counters&#x27;, None) if session is not getattr(spine, &#x27;session&#x27;, None)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                  else getattr(spine, &quot;counters&quot;, None)),</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        storage=getattr(spine, &quot;storage&quot;, None),</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        goals=goals,</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        todos=todos,</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        ask=ask,</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        skills=getattr(spine, &quot;skills&quot;, None),</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        search_backend=getattr(spine, &quot;search_backend&quot;, None),</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        owner=owner,</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        task_id=task_id,</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        subagent_depth=int(depth),</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        platform_runtime=getattr(spine, &#x27;platform_runtime&#x27;, None),</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        # 通道身份(GAP-11):编排路径(后台 job / 子 Agent)与主链同源——取外壳</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        # 装配期声明的 spine.channel;未声明时不写属性,由 principal_of</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        # APR-503 fail-closed(与 create_agent 同款三态语义)。</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        **({&quot;channel&quot;: spine.channel}</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>           if getattr(spine, &quot;channel&quot;, CHANNEL_UNDECLARED) is not CHANNEL_UNDECLARED</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>           else {}),</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    )</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>async def _run_on_session(spine: Any, session: Any, scope: Any, intent: str, *,</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                          task_id: Optional[str], origin: str,</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                          owner: Optional[str], depth: int = 0,</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                          approval: Any = None, ask: Any = None) -&gt; tuple[Any, int]:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    loop = AgentLoop(getattr(spine, &quot;settings&quot;, None))</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    env = await session.append(</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        &quot;user.message&quot;, {&quot;content&quot;: intent}, actor=&quot;user&quot;,</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        origin=origin, task_id=task_id, sync=True)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    ctx = _runtime_ctx(spine, session, scope, loop, task_id=task_id,</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                       owner=owner, depth=depth)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    if approval is not None:</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        ctx.approval = approval</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    if ask is not None:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        ctx.ask = ask</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    child_runtime = None</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    if session is not getattr(spine,&#x27;session&#x27;,None) and ctx.platform_runtime is not None:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        child_runtime = ctx.platform_runtime.for_child(session.sid)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        ctx.platform_runtime = child_runtime</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    # N2-b:子会话/编排会话拥有**自己的任务段** —— 证据工件需要段锚才能被</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    # ``collect_for_task`` 聚合。修复前本函数不开段 ⇒ 子会话实测 segment.start=0。</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    # 段关闭放在 finally:与 ``TaskQueue._run_task`` 同款保证(段一定配对关闭)。</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    seg_start: Optional[int] = None</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    if task_id:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        seg_env = await session.append(&quot;segment.start&quot;, {&quot;task_id&quot;: task_id},</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                                       actor=&quot;system&quot;, sync=True)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        seg_start = int(getattr(seg_env, &quot;seq&quot;, 0) or 0)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    delegated_owner=getattr(child_runtime,&#x27;delegated_task_lifecycle&#x27;,None)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    try:</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        if callable(delegated_owner):</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            result=await delegated_owner(env,ctx,lambda:loop.wake(env,ctx=ctx))</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        elif ctx.platform_runtime is None:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            result = await loop.wake(env, ctx=ctx)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        else:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>            async def governed_turn():</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                await ctx.platform_runtime.prepare_evidence(env,ctx)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>                return await loop.wake(env,ctx=ctx)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            result = await asyncio.wait_for(governed_turn(),ctx.platform_runtime.definition.timeout)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            if child_runtime is not None and getattr(result,&#x27;reason&#x27;,None)==&#x27;complete&#x27;:</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                await child_runtime.finish(ctx)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    finally:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        if child_runtime is not None and not callable(delegated_owner):</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            await child_runtime.release(ctx)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        if seg_start is not None:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            await session.append(</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                &quot;segment.end&quot;, {&quot;task_id&quot;: task_id, &quot;start_seq&quot;: seg_start},</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    return result, int(getattr(env, &quot;seq&quot;, 0) or 0)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code></code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code></code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>class EngineIntentRunner:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    &quot;&quot;&quot;JobManager runner: execute one background intent on the shared session.</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    经会话 TaskQueue 单飞泵提交(与交互轮次共享同一 loop/泵),避免另起 AgentLoop</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    直驱父会话造成&quot;同会话并发 LLM 驱动 + 共享 counters 预算串扰&quot;(EngineIntentRunner</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    绕过单飞泵,2026-09-13 修复)。无队列装配(轻装配/单测)时兜底直驱。入队用队列</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    自动 task_id(勿传 job id:JobManager 已为该 job id 开段,复用会撞&quot;段已打开&quot;)。</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code></code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    def __init__(self, spine: Any) -&gt; None:</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        self.spine = spine</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        self.queue_tasks: dict[str, str] = {}</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code></code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    async def run(self, ctx: Any, *, intent: str, task_id: str,</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                  budget: Any = None) -&gt; Any:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        tq = getattr(self.spine, &quot;task_queue&quot;, None)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        session = getattr(self.spine, &quot;session&quot;, None)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        if tq is not None and session is not None:</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            # 先落 user.message(泵 runner 按 enqueued_seq 定位),再入队 + 等终态</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            await session.append(&quot;user.message&quot;, {&quot;content&quot;: intent}, actor=&quot;user&quot;,</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                                 origin=&quot;job&quot;, task_id=task_id, sync=True)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>            queued = await tq.submit(intent)          # 队列自动 t-N(避开 job 段)</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>            self.queue_tasks[task_id] = queued</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>            try:</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                res = await tq.wait_for(queued)</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                primary = None</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                try:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                    await tq.cancel(queued)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                except BaseException as exc:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                    primary = exc</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>                # This is cancellation of work, distinct from a waiter&#x27;s timeout.</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                terminal = asyncio.create_task(tq.wait_for(queued))</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                while True:</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                    try:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                        res = await asyncio.shield(terminal)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                        break</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                    except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                        if terminal.done(): raise</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                        # Repeated cancellation cannot abandon the work owner.</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                        continue</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                if primary is not None:</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                    raise primary</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                if not res.ok:</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                    raise</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                # Completion won the race; preserve its actual success.</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            finally:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                self.queue_tasks.pop(task_id, None)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>            ok = bool(getattr(res, &quot;ok&quot;, False))</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>            reason = &quot;complete&quot; if ok else str(getattr(res, &quot;code&quot;, &quot;&quot;) or &quot;error&quot;)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            return SimpleNamespace(reason=reason)     # JobManager 读 .reason 归一</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        result, _ = await _run_on_session(</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            self.spine, session, getattr(self.spine, &quot;scope&quot;, None),</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            intent, task_id=task_id, origin=&quot;job&quot;,</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>            owner=getattr(ctx, &quot;owner&quot;, None))</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        return result</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code></code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code></code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>class EngineSubagentRunner:</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>    &quot;&quot;&quot;SubagentManager runner: execute a child in its isolated session.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code></code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    def __init__(self, spine: Any, sessions_dir: Any,</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                 evidence_producer: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        self.spine = spine</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        self.sessions_dir = sessions_dir</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        self._stores: dict[str, Any] = {}</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        self._child_buses: dict[str, Any] = {}</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        self.approval_providers: dict[str, Any] = {}</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        self.ask_providers: dict[str, Any] = {}</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        # N2-b:证据生产者工厂(由装配层注入;避免本模块反向 import engine)。</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        # 签名 ``(spine_like) -&gt; async handler(type_, env)``。</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        self._evidence_producer = evidence_producer</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code></code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>    def child_session(self, sub_id: str) -&gt; Any:</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        &quot;&quot;&quot;Create a persisted child SessionLog with an isolated bus.</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code></code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        The child must not share the parent bus: the parent engine persists all</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        events seen on its bus, so child events would otherwise be duplicated</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        into the parent JSONL.</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        from pyharness.bus import EventBus, bus_kwargs_of</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        from pyharness.core.session import SessionLog</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        from pyharness.events.vocab import EVENT_TYPES, SYNC_TYPES</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        from pyharness.persistence import open_store</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code></code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        # N1:子会话的 flush 标量同源(装配层解析后注入)</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        store = open_store(sub_id, dir=self.sessions_dir,</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                           **_flush_kwargs_of(getattr(self.spine, &quot;settings&quot;, None)))</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        child_bus = EventBus(**bus_kwargs_of(       # F005 背压阈值同源注入</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>            getattr(self.spine, &quot;settings&quot;, None)))</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code></code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        async def _record(type_: str, payload: Any) -&gt; None:</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            await store.append(payload, sync=type_ in SYNC_TYPES)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code></code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        self._stores[sub_id] = store</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        self._child_buses[sub_id] = child_bus</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        try:</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>            for type_ in EVENT_TYPES:</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                child_bus.subscribe(type_, _record, owner=f&quot;subagent-store:{sub_id}&quot;)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>            # GAP-10:子会话**继承父会话租户**——租户是会话树的横切归属,</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>            # 子 Agent 的事件同样必须可归属到同一租户。</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            log_ = SessionLog(sid=sub_id, persistence=store, bus=child_bus,</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>                              tenant_id=getattr(self.spine.session, &quot;tenant_id&quot;, None))</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            # N2-b:子会话与父会话**同产治理证据** —— 触发点同为段关闭(``segment.end``),</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>            # 只是换了&quot;事件落点&quot;(child log)与&quot;事件汇点&quot;(child bus)。生产者工厂由装配层</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>            # 注入,本模块不反向 import engine(INV-08)。</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>            if self._evidence_producer is not None:</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                holder = SimpleNamespace(</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>                    session=log_, governance=getattr(self.spine, &quot;governance&quot;, None))</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>                child_bus.subscribe(</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>                    &quot;segment.end&quot;, self._evidence_producer(holder),</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>                    owner=f&quot;subagent-evidence:{sub_id}&quot;)</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>            return log_</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        except BaseException as primary:</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            try: self.close_child(sub_id)</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>            except BaseException as secondary: primary.add_note(f&#x27;child rollback failed: {secondary!r}&#x27;)</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            raise</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code></code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>    def close_child(self, sub_id):</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        errors = []</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        child_bus = self._child_buses.pop(sub_id, None)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        if child_bus is not None:</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            for owner in (f&#x27;subagent-store:{sub_id}&#x27;, f&#x27;subagent-evidence:{sub_id}&#x27;):</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>                try: child_bus.unsubscribe_all(owner)</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>                except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        store = self._stores.pop(sub_id, None)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        if store is not None:</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>            try: store.close()</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>            except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        if errors: raise BaseExceptionGroup(&#x27;child cleanup failed&#x27;, errors)</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code></code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>    def completed_result(self, sub_id):</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        &quot;&quot;&quot;Read a closed child&#x27;s terminal facts; caller must establish ownership.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>        import re</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        from pyharness.persistence import SessionReader</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        if not re.fullmatch(r&#x27;[A-Za-z0-9_-]{1,100}&#x27;, sub_id):</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>            return None</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        result = None</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        for event in SessionReader(sub_id, dir=self.sessions_dir).replay():</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>            payload = event.payload</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>            if event.type == &#x27;subagent.joined&#x27; and payload.get(&#x27;sub_id&#x27;) == sub_id:</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>                result = (&#x27;done&#x27;, payload[&#x27;summary&#x27;], None)</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>            elif event.type == &#x27;subagent.failed&#x27; and payload.get(&#x27;sub_id&#x27;) == sub_id:</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>                match = re.match(r&#x27;\[([A-Z]+-\d+)\]&#x27;, payload.get(&#x27;summary&#x27;,&#x27;&#x27;))</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                result = (&#x27;failed&#x27;, None, match[1] if match else &#x27;CYC-999&#x27;)</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>            elif event.type == &#x27;system.cancelled&#x27; and payload.get(&#x27;what&#x27;) == &#x27;subagent:&#x27;+sub_id:</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>                result = (&#x27;cancelled&#x27;, None, None)</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        return result</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code></code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>    async def run_child(self, env: Any) -&gt; str:</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>        from pyharness.core.approval import ApprovalProvider</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>        from pyharness.core.user_ask import AskProvider</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>        # Local event sequences are only unique within a session. Sharing a</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        # provider would collide two children with the same approval sequence.</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        # Children await their own loop directly, so they must not pause/resume</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        # another child&#x27;s or the parent&#x27;s TaskQueue.</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        approval = ApprovalProvider(session=env.session,</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>            bus=self._child_buses.get(env.sub_id), config=self.spine.settings,</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>            channel=getattr(self.spine, &#x27;channel&#x27;, None))</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>        ask = AskProvider(session=env.session, bus=self._child_buses.get(env.sub_id))</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        self.approval_providers[env.sub_id] = approval</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        self.ask_providers[env.sub_id] = ask</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>        try:</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>            if env.scope is None:</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>                raise PyHError(&#x27;GRD-403&#x27;, ctx={&#x27;reason&#x27;:&#x27;child_scope_unavailable&#x27;})</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>            result, start_seq = await _run_on_session(</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>                self.spine, env.session, env.scope,</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>                env.spec.task, task_id=f&quot;subagent:{env.sub_id}&quot;,</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>                origin=f&quot;subagent:{env.sub_id}&quot;, owner=&quot;system&quot;,</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>                depth=int(getattr(env.spec, &quot;depth&quot;, 0)), approval=approval, ask=ask)</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>            # Returning from the loop only means it stopped. A public plan or</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>            # earlier response cannot turn a failed/budget-limited child into a</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>            # successful join. Preserve the same explicit-success contract as</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>            # TaskQueue, including cancellation propagation to the work owner.</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>            reason = getattr(result, &#x27;reason&#x27;, None)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>            if reason == &#x27;cancelled&#x27;:</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>                raise asyncio.CancelledError</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>            if reason != &#x27;complete&#x27;:</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>                from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>                code = getattr(result, &#x27;error_code&#x27;, None) or (</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>                    &#x27;LLM-305&#x27; if reason == &#x27;budget&#x27; else &#x27;CYC-999&#x27;)</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>                raise PyHError(code)</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>            text = _last_text(env.session, start_seq)</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>            text = text or str(getattr(result, &quot;reason&quot;, &quot;&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>            # notify=False suppresses parent notifications, not durable child</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>            # outcome facts. Reopening a completed child must not report a crash.</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>            from pyharness.core.subagent import summarize</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>            await env.session.append(&#x27;subagent.joined&#x27;,</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>                {&#x27;sub_id&#x27;:env.sub_id,&#x27;summary&#x27;:summarize(text,2000)},actor=&#x27;agent&#x27;,sync=True)</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>            return text</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        except BaseException as exc:</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>            if isinstance(exc, asyncio.CancelledError):</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>                await env.session.append(&#x27;system.cancelled&#x27;,</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>                    {&#x27;what&#x27;:&#x27;subagent:&#x27;+env.sub_id,&#x27;reason&#x27;:&#x27;cancelled&#x27;},actor=&#x27;system&#x27;,sync=True)</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>            else:</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>                await env.session.append(&#x27;subagent.failed&#x27;,</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>                    {&#x27;sub_id&#x27;:env.sub_id,&#x27;summary&#x27;:&#x27;[&#x27;+str(getattr(exc,&#x27;code&#x27;,&#x27;CYC-999&#x27;))+&#x27;]&#x27;},</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>                    actor=&#x27;agent&#x27;,sync=True)</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>            raise</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        finally:</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>            try:</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>                from pyharness.core import proc</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>                await asyncio.to_thread(proc.close_session, env.sub_id)</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>            finally:</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>                try:</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>                    await approval.aclose()</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>                finally:</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>                    self.approval_providers.pop(env.sub_id, None)</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>                    self.ask_providers.pop(env.sub_id, None)</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>                    if getattr(env, &#x27;sub_id&#x27;, &#x27;&#x27;) in self._stores:</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>                        self.close_child(env.sub_id)</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code></code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code></code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code></code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>__all__ = [&quot;EngineIntentRunner&quot;, &quot;EngineSubagentRunner&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

@@ -1,0 +1,144 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/desktop_native/product_execution_control.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/desktop_native/product_execution_control.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 144 行</span></nav><main class="wrap source-page"><h1>pyharness/desktop_native/product_execution_control.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：3df8891f0baba0022db572a846007b7490e017f3<br>SHA-256（内容校验）：998405914e325042bfdbc500369de3a799226d103d04f8b63073c4cc66b7d88c</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 16 个类、函数与方法</summary><ul><li><a href="#L12">ProductExecutionControl（类） · L12–L144</a><ul><li><a href="#L13">ProductExecutionControl.__init__（方法） · L13–L26</a></li><li><a href="#L28">ProductExecutionControl.identity（方法） · L28–L34</a></li><li><a href="#L36">ProductExecutionControl.invalidate（方法） · L36–L38</a></li><li><a href="#L40">ProductExecutionControl.dispose（方法） · L40–L45</a></li><li><a href="#L47">ProductExecutionControl.closeEvent（方法） · L47–L48</a></li><li><a href="#L50">ProductExecutionControl.controls（方法） · L50–L54</a></li><li><a href="#L56">ProductExecutionControl.scope（方法） · L56–L56</a></li><li><a href="#L58">ProductExecutionControl.live（方法） · L58–L59</a></li><li><a href="#L61">ProductExecutionControl.start（方法） · L61–L65</a></li><li><a href="#L67">ProductExecutionControl.finished（方法） · L67–L71</a></li><li><a href="#L73">ProductExecutionControl.command（方法） · L73–L78</a></li><li><a href="#L80">ProductExecutionControl.checked_control（方法） · L80–L88</a></li><li><a href="#L90">ProductExecutionControl.checked_stop（方法） · L90–L97</a></li><li><a href="#L99">ProductExecutionControl.show_stop（方法） · L99–L102</a></li><li><a href="#L104">ProductExecutionControl.operate（异步方法） · L104–L144</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Qt exact product stop control; the existing application remains authority.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import asyncio</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import re</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from PySide6.QtCore import Qt</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from PySide6.QtWidgets import QFormLayout,QHBoxLayout,QLabel,QLineEdit,QPushButton,QVBoxLayout,QWidget</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.accounts import current_actor</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.execution_contracts import AttemptReference,CancelExecution,ExecutionReference</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.application.execution_cancellation_store import ExecutionCancellationStore</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>class ProductExecutionControl(QWidget):</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    def __init__(self,controller,parent=None):</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>        super().__init__(parent);self.controller=controller;self.target=None;self.inflight=None;self.epoch=0;self.dead=False;self.hint=None</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        layout=QVBoxLayout(self);layout.addWidget(QLabel(&#x27;产品运行控制&#x27;))</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        form=QFormLayout();self.project_input=QLineEdit();self.project_input.setPlaceholderText(&#x27;p-…&#x27;)</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        self.attempt_input=QLineEdit();self.attempt_input.setPlaceholderText(&#x27;ra-…&#x27;)</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        form.addRow(&#x27;项目 ID&#x27;,self.project_input);form.addRow(&#x27;运行尝试 ID&#x27;,self.attempt_input);layout.addLayout(form)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        row=QHBoxLayout();self.refresh_button=QPushButton(&#x27;只读核对&#x27;);self.stop_button=QPushButton(&#x27;停止精确执行&#x27;);self.query_button=QPushButton(&#x27;只读核对原停止键&#x27;)</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        for button in (self.refresh_button,self.stop_button,self.query_button):row.addWidget(button)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        layout.addLayout(row);self.status_label=QLabel(&#x27;先核对项目与运行尝试。查询不会启动执行。&#x27;);self.status_label.setWordWrap(True)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        self.status_label.setTextFormat(Qt.PlainText);layout.addWidget(self.status_label)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        self.project_input.textChanged.connect(self.invalidate);self.attempt_input.textChanged.connect(self.invalidate)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        controller.sessions_changed.connect(self.invalidate)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        self.refresh_button.clicked.connect(lambda:self.start(&#x27;refresh&#x27;));self.stop_button.clicked.connect(lambda:self.start(&#x27;stop&#x27;));self.query_button.clicked.connect(lambda:self.start(&#x27;query&#x27;))</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        self.controls()</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    def identity(self):</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        service=self.controller.service;actor=current_actor.get()</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        user=actor.get(&#x27;user_id&#x27;) if actor else &#x27;local-operator&#x27;</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        tenant=getattr(service,&#x27;tenant_id&#x27;,self.controller.tenant_id)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        root=getattr(service,&#x27;tenant_root&#x27;,None)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        realm=(tenant,user,str(root().resolve()) if callable(root) else &#x27;&#x27;)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        return service,realm</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    def invalidate(self,*args):</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        self.epoch+=1;self.target=None;self.hint=None</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        if not self.dead:self.status_label.setText(&#x27;目标或主体已变化，请重新只读核对。&#x27;);self.controls()</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code></code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    def dispose(self):</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        if self.dead:return</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        self.dead=True;self.epoch+=1;self.target=None;self.hint=None</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        try:self.controller.sessions_changed.disconnect(self.invalidate)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        except (RuntimeError,TypeError):pass</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        self.controls()</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    def closeEvent(self,event):</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        self.dispose();super().closeEvent(event)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    def controls(self):</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        busy=self.inflight is not None</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        self.refresh_button.setEnabled(not self.dead and not busy)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        self.stop_button.setEnabled(not self.dead and not busy and self.target is not None and self.target[&#x27;execution_ref&#x27;] is not None and self.target[&#x27;cancellation&#x27;] is None)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        self.query_button.setEnabled(not self.dead and not busy and self.target is not None and self.target[&#x27;execution_ref&#x27;] is not None)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    def scope(self):return self.project_input.text().strip(),self.attempt_input.text().strip()</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    def live(self,epoch,identity,scope):</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        return not self.dead and self.epoch==epoch and self.identity()==identity and self.scope()==scope</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code></code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    def start(self,action):</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        if self.dead or self.inflight is not None:return</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        identity=self.identity();scope=self.scope();epoch=self.epoch</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        self.inflight=asyncio.create_task(self.operate(action,epoch,identity,scope));self.controls()</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        self.inflight.add_done_callback(self.finished)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    def finished(self,task):</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        try:task.result()</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        except asyncio.CancelledError:pass</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        if self.inflight is task:self.inflight=None</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        if not self.dead:self.controls()</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    def command(self,realm,project,target):</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        # The same exact target yields the same original command after restart.</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        # No prompt, private result, source path, or capability is persisted here.</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        value=digest_of(canonical(dict(operation=&#x27;native.execution.stop&#x27;,realm=realm,project=project,execution_ref=target[&#x27;execution_ref&#x27;])))</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        command=CancelExecution(schema_version=1,cancellation_id=&#x27;ec-&#x27;+value[:16],execution_ref=target[&#x27;execution_ref&#x27;])</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        return dict(body=command.model_dump(),key=&#x27;native-stop-&#x27;+value,request_digest=ExecutionCancellationStore._cancellation_request(project,command))</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    def checked_control(self,value,project,attempt):</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        if (type(value.get(&#x27;schema_version&#x27;)) is not int or value[&#x27;schema_version&#x27;]!=1 or value.get(&#x27;control_only&#x27;) is not True or</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                value.get(&#x27;project_id&#x27;)!=project or value.get(&#x27;status&#x27;) not in (&#x27;authorized&#x27;,&#x27;not_authorized&#x27;)):raise ValueError(&#x27;控制回执范围不符&#x27;)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        reference=AttemptReference.model_validate(value[&#x27;attempt_ref&#x27;])</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        if reference.attempt_id!=attempt:raise ValueError(&#x27;运行尝试不符&#x27;)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        execution=value.get(&#x27;execution_ref&#x27;)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        if execution is not None:ExecutionReference.model_validate(execution)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        if (value[&#x27;status&#x27;]==&#x27;authorized&#x27;)!=(execution is not None):raise ValueError(&#x27;控制状态不符&#x27;)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        return value</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    def checked_stop(self,value,project,target,hint=None):</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        if (value.get(&#x27;schema_version&#x27;)!=1 or type(value.get(&#x27;schema_version&#x27;)) is not int or value.get(&#x27;project_id&#x27;)!=project or</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                value.get(&#x27;execution_ref&#x27;)!=target[&#x27;execution_ref&#x27;] or value.get(&#x27;persisted&#x27;) is not True or</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                value.get(&#x27;status&#x27;)!=&#x27;cancellation_requested&#x27; or (value.get(&#x27;execution_stopped&#x27;) is not None and type(value[&#x27;execution_stopped&#x27;]) is not bool)):</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            raise ValueError(&#x27;停止回执范围不符&#x27;)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        if hint and (value.get(&#x27;submission_key&#x27;)!=hint[&#x27;key&#x27;] or value.get(&#x27;request_digest&#x27;)!=hint[&#x27;request_digest&#x27;] or</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                value.get(&#x27;cancellation_id&#x27;)!=hint[&#x27;body&#x27;][&#x27;cancellation_id&#x27;]):raise ValueError(&#x27;原停止键不符&#x27;)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        return value</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    def show_stop(self,value):</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        stopped=value.get(&#x27;execution_stopped&#x27;)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        text=&#x27;实际执行已停&#x27; if stopped is True else &#x27;停止已请求，实际执行仍待确认&#x27; if stopped is False else &#x27;停止已记录，当前服务无法确认实际执行是否已停&#x27;</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        self.status_label.setText(text+&#x27;。不会重发模型或工具；执行停止不等于业务验收通过。&#x27;)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    async def operate(self,action,epoch,identity,scope):</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        service,realm=identity;project,attempt=scope</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        try:</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            if not re.fullmatch(r&#x27;p-[0-9a-f]{16}&#x27;,project) or not re.fullmatch(r&#x27;ra-[0-9a-f]{16}&#x27;,attempt):raise ValueError(&#x27;请输入完整项目和运行尝试 ID&#x27;)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            target=self.checked_control(await service.projects.execution_control_for_attempt(project,attempt),project,attempt)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            if not self.live(epoch,identity,scope):return</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            self.target=target</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            if target[&#x27;execution_ref&#x27;] is None:</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                self.status_label.setText(&#x27;该尝试尚无执行授权；没有启动或停止任何任务。&#x27;);return</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            if target[&#x27;cancellation&#x27;] is not None:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                stopped=self.checked_stop(target[&#x27;cancellation&#x27;],project,target)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                if action==&#x27;query&#x27;:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                    command=CancelExecution(schema_version=1,cancellation_id=stopped[&#x27;cancellation_id&#x27;],execution_ref=target[&#x27;execution_ref&#x27;])</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                    expected=dict(body=command.model_dump(),key=stopped[&#x27;submission_key&#x27;],request_digest=ExecutionCancellationStore._cancellation_request(project,command))</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                    found=await service.projects.cancellation_submission(project,expected[&#x27;key&#x27;])</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                    if not self.live(epoch,identity,scope):return</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                    if (type(found.get(&#x27;schema_version&#x27;)) is not int or found[&#x27;schema_version&#x27;]!=1 or found.get(&#x27;project_id&#x27;)!=project or</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                            found.get(&#x27;submission_key&#x27;)!=expected[&#x27;key&#x27;] or found.get(&#x27;status&#x27;)!=&#x27;committed&#x27;):raise ValueError(&#x27;原停止键记录未确认&#x27;)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                    stopped=self.checked_stop(found[&#x27;cancellation&#x27;],project,target,expected)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                self.show_stop(stopped)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                return</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            hint=self.command(realm,project,target);self.hint=hint</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>            if action==&#x27;refresh&#x27;:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                self.status_label.setText(&#x27;精确执行已核对：&#x27;+target[&#x27;execution_ref&#x27;][&#x27;execution_id&#x27;]+&#x27;。只读查询没有发出停止或启动命令。&#x27;)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>                return</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            if action==&#x27;query&#x27;:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                found=await service.projects.cancellation_submission(project,hint[&#x27;key&#x27;])</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                if not self.live(epoch,identity,scope):return</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                if (found.get(&#x27;schema_version&#x27;)!=1 or found.get(&#x27;project_id&#x27;)!=project or found.get(&#x27;submission_key&#x27;)!=hint[&#x27;key&#x27;]):raise ValueError(&#x27;原键查询范围不符&#x27;)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                if found[&#x27;status&#x27;]==&#x27;not_found&#x27;:self.status_label.setText(&#x27;原键尚无已确认停止记录。没有自动重发；显式停止仍使用相同原键。&#x27;);return</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                if found[&#x27;status&#x27;]!=&#x27;committed&#x27;:raise ValueError(&#x27;停止记录状态未确认&#x27;)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                value=self.checked_stop(found[&#x27;cancellation&#x27;],project,target,hint)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            else:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                self.status_label.setText(&#x27;正在停止精确执行，原键：&#x27;+hint[&#x27;key&#x27;])</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                value=await service.projects.cancel_execution(project,hint[&#x27;body&#x27;],hint[&#x27;key&#x27;])</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                if not self.live(epoch,identity,scope):return</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                value=self.checked_stop(value,project,target,hint)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            target[&#x27;cancellation&#x27;]=value;self.show_stop(value)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        except Exception as exc:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            if self.live(epoch,identity,scope):</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                self.target=None;self.status_label.setText(&#x27;操作未确认：&#x27;+str(exc)+&#x27;。先只读核对；不会自动重发或更换停止键。&#x27;)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

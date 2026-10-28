@@ -1,0 +1,376 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/spill.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/spill.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 376 行</span></nav><main class="wrap source-page"><h1>pyharness/core/spill.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：d4ac3770e6ff617ef28274ac3b97f209a934fb58<br>SHA-256（内容校验）：532dcd0b76f10f7f31760f1ef2151e52503add3e055a0467d03ff3cddfa222a6</p><p><a href="../../../architecture-detailed.html?node=spill_kv">Session Spill and Key Value Storage（会话长输出与键值存储）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 14 个类、函数与方法</summary><ul><li><a href="#L110">enter（异步函数） · L110–L134</a></li><li><a href="#L138">put（异步函数） · L138–L192</a></li><li><a href="#L196">read（异步函数） · L196–L234</a></li><li><a href="#L238">_resolve_ref（函数） · L238–L265</a></li><li><a href="#L286">SpillReadHandle（类） · L286–L300</a><ul><li><a href="#L295">SpillReadHandle.handle（异步方法） · L295–L300</a></li></ul></li><li><a href="#L303">register（函数） · L303–L312</a></li><li><a href="#L315">_read_definition（函数） · L315–L328</a></li><li><a href="#L332">SpillProvider（类） · L332–L364</a><ul><li><a href="#L342">SpillProvider.__init__（方法） · L342–L343</a></li><li><a href="#L346">SpillProvider.enter（异步方法） · L346–L351</a></li><li><a href="#L353">SpillProvider.put（异步方法） · L353–L355</a></li><li><a href="#L357">SpillProvider.read（异步方法） · L357–L360</a></li><li><a href="#L362">SpillProvider.detach（异步方法） · L362–L364</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/spill.py — 输出溢出 spill 基础设施(specs/spill.py.md 契约;F039)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F039(输出溢出)· 联动 F034(读文件超 64KB)/F038(抓取超 32KB)/</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>F052(子进程输出)/tools_executor 关4(结果 finalize)/F060(repair 读窗口)。</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>权威口径:specs/spill.py.md(编码契约)、DIS-SEAM §6.1(seam A Provider 接口/</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>Consumer/生命周期)、CFG.md §3.6(storage.spill_dir=~/.pyharness/spill、</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>storage.spill.max_per_file_bytes=10MB)、EVENT-SCHEMA §2/§3.4.6</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>(tool.result.spill_ref={ref,chars,lines,preview}),ERR.md §2.3(PERS-221/222/223)。</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>一句话:工具输出溢出基础设施(基础设施型 seam,Consumer=脊柱结果检查器,</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>LLM 不直调 put)——超限原始大文本落**会话私有 spill 区(workspace 外、</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>目录权限 700、文件权限 600)**,上下文只放 ≤2KB 摘要 + spill_ref 引用;模型要全文经 LLM 可见的</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>读工具 storage.spill 按行取回,已读量计入 ctx.counters(spill_read_chars)</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>防循环烧预算;**截断不吞事实,溢出部分可查**。</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>核心语义(spec 逐条兑现):</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>1. put:Consumer(tools_executor 关4)输出 &gt;2KB → put(text, kind) 写入会话</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>   私有区 spill_dir/&lt;session_id&gt;/spill-&lt;8hex&gt;.txt(临时文件+rename 原子</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>   落盘,坏行不落地);返回 {spilled, ref, chars, lines, preview(头500字符)}</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>   ——与 EVENT-SCHEMA spill_ref 字段级一致,大文本不进上下文/事件/日志。</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>2. 上限与摘要固定:spill 单文件 ≤10MB(storage.spill.max_per_file_bytes,</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>   默认 10485760),超限 PERS-223 拒写回喂;摘要 = 头 500 字符 + 行数 + 大小</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   (固定三要素);chars=len(text)、lines=text.count(&quot;\\n&quot;)+1。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>3. read:LLM 经读工具按行取回(ref/start/limit,默认 0/200),返回 content+</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   more;ref 解析强制会话私有区 containment——绝对路径/`..`/符号链接逃逸/</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>   跨会话引用一律 PERS-222 **零读取**(同 call 无部分返回)。</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>4. 防循环烧预算:每次 read 的返回字符数累入 ctx.counters 的</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   spill_read_chars 键,预算/轮数闸可据此终止&quot;读全文-再读&quot;死循环。</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>5. 生命周期:enter=会话首访惰性建目录(权限 700,Windows ACL 尽力而为,主防线</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   =位置与路径 containment);detach=幂等摘除(摘读工具、摘定位器、摘订阅,</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>   **文件不删**——留 F060 归档/repair 读取窗口);purge_session 订阅</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>   session.finished 删除本会话 spill 目录(删除前 containment 校验、目录</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   不存在幂等)。</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>6. 出口脱敏(INV-09):put 落盘前对 text 执行 ctx.redact(F016 全出口脱敏)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   ——spill 文件是 SECURITY §4 明文列出的出口之一。</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>7. LLM 可见面最小化:LLM 只见&quot;读&quot;工具(storage.spill);put 是 Provider 内部</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>   方法,不进工具表(防模型拿 put 当存储滥写)。</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code></code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>偏离说明(契约=spec 伪代码;以下为与既有实现冲突/空白处的取舍,均列理由):</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>1. ctx.cfg 兼容读取:spec 伪码用 ctx.cfg[&quot;storage.spill_dir&quot;] 点分 dict 读法,</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>   而本项目 config.py 落地为 pydantic Settings(属性形态,agent.Ctx 挂</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>   ctx.config)→ 内部 _cfg() 双形态兼容:dict(点分键/嵌套)与属性链都收,</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>   契约面(键名/默认值)不变。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>2. containment 补强为&quot;会话级&quot;:spec 模块职责 3 明示&quot;本会话 ref 只指本会话</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>   spill 文件(防跨会话越权)&quot;,但伪码 _resolve_ref 只校验&quot;首段=所在目录名&quot;</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>   (根内即可,未锁当前会话)→ 补当前会话 id 相等比较(ctx 无会话 id 的</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>   场景——如 F060 repair 直读——回落伪码口径,不误伤);行为多拒不误放。</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>3. read 行切分与 put 行数口径对齐:伪码 read 用 splitlines(),而 put 的</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>   lines=text.count(&quot;\\n&quot;)+1(尾随换行会产生第 N+1 个空行,splitlines 会丢</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>   尾空行致 roundtrip 行数不一致)→ read 用 split(&quot;\\n&quot;) 与 put 口径严格</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>   同源,取回的 content 以 &quot;\\n&quot; 拼回即原文。</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>4. Windows 路径与权限:containment 比对用 Path.relative_to(Windows 路径</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>   比较大小写不敏感,字符串 startswith 会误伤大小写归一);chmod(0o600) 在</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>   Windows 上尽力而为(底层 ACL 不由 Python 管),主防线=目录位置+ref 路径</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>   containment;ref 内 &quot;\\&quot; 与 &quot;/&quot; 统一由 Path 解析(WindowsPath 双分隔符)。</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>5. 删除残留 .tmp:purge 除 spill-*.txt 外顺带清 spill-*.tmp(中断写入残留),</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>   否则 rmdir 收口会因残留失败(伪码只删 spill-*.txt)。</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>6. register 落 ToolDefinition 实契约:伪码 defn 无 owner 字段,本项目</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>   tools_registry.py T-05 五要素要求 owner 必填(能力 id)→ 补 owner=&quot;spine&quot;</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>   (DIS-SEAM §6.1 ② 同值);expose_to_llm 是能力层标志不属 Definition,</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>   由装配层 announce 消费(agent.py 先例)。</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>7. put 的 kind 参数按 spec 参数表保留为来源标注(入错误现场与审计扩展点),</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>   文件名暂不含 kind(spec 伪码文件名 = spill-&lt;8hex&gt;.txt 权威,&quot;可扩展&quot;不</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>   是必须)。</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>8. ctx.log 缺失容错:spec 伪码多处 ctx.log.warning,本项目 Ctx 无 log 属性</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>   → 内部统一 _log_warn()(有 ctx.log 用之,否则模块 logger),行为不变。</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>9. 会话总量 100MB(storage.spill.max_per_session_mb,N3)闸:spec 函数清单</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>   与伪码均未实现(只锁单文件 10MB),Consumer 无调用面 → 本文件同样不实现</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>   (装配层/会话级配额后续功能落地时补,列理由不欠账)。</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>10. put 返回 ref 用 d.name 而非伪码的 d.parent.name:spec 伪码 enter 返回的</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    d = spill_dir/&lt;session_id&gt;,d.parent.name = spill 根目录名;按 spec 依赖</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    节&quot;目录布局&quot;行(ref 恒为相对 `&lt;session_id&gt;/spill-xxxx.txt`)与 EVENT-</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    SCHEMA 语义,ref 首段必须是会话 id → 取 d.name(伪码此处为笔误,布局表</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    权威)。</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>依赖方向(INV-08):本文件 → errors(raise_code)、config(仅 F016 脱敏函数</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>兜底 import)、tools_registry(ToolDefinition 登记);不 import tools_executor</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>内部符号(Consumer 反向经 ctx.storage.spill 注入)。外部:pathlib/os/uuid。</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>import logging</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>import os</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>import uuid</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code># ------------------------------------------------------------------ 常量</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code># 会话 spill 区**总量**上限(R24 接线:`storage.spill.max_per_session_mb`;此前零读取者)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code># PERS-222 回喂文案(spec 异常表;经 raise_code 的 advice 落 tool.error)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code># PERS-223 回喂文案(超限拒写)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code># PERS-221 回喂文案(写失败)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code># ------------------------------------------------------------------ 配置/上下文辅助</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>from pyharness.core.config_access import _cfg_holder</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code></code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code></code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>from pyharness.core.config_access import _cfg</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code># ------------------------------------------------------------------ enter</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>from pyharness.core.spill_policy import (log, SUMMARY_PREVIEW, DEFAULT_MAX_PER_FILE, DEFAULT_MAX_PER_SESSION_MB, DEFAULT_LIMIT, MAX_READ_LIMIT, MODE_PRIVATE, _MODE_PRIVATE_DIR, TOOL_NAME, COUNTER_KEY, SPILL_PATTERN, FILE_PREFIX, _REFUSED_ADVICE, _TOO_BIG_ADVICE, _WRITE_FAIL_ADVICE, _spill_root, _session_id, _max_per_file, _max_per_session_bytes, _session_dir_bytes, _redact, _bump_counter, _log_warn, _maybe_await)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>from pyharness.core.spill_lifecycle import (detach, _unsubscribe_purge, purge_session, subscribe_purge)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>async def enter(ctx: Any) -&gt; Path:</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    &quot;&quot;&quot;会话首访建私有目录(F039,幂等):spill_dir/&lt;session_id&gt;,权限 700。</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    已存在则幂等返回;创建/权限失败 → PERS-221 结构化上抛(Consumer 转</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    tool.error 回喂&quot;输出归档写入失败,请重试&quot;)。返回归一后的会话 spill</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    目录 Path(后续 containment 基准)。</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    root = _spill_root(ctx)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    if root is None:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        raise_code(&quot;PERS-221&quot;, hint=&quot;storage.spill_dir 未配置(ctx.cfg/config 缺失)&quot;,</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                   advice=_WRITE_FAIL_ADVICE)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    sid = _session_id(ctx)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    if not sid:</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        raise_code(&quot;PERS-221&quot;, hint=&quot;ctx.session.session_id 缺失(spill 装配错误)&quot;,</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                   advice=_WRITE_FAIL_ADVICE)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    d = root / sid</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    try:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        d.mkdir(parents=True, exist_ok=True, mode=_MODE_PRIVATE_DIR)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        try:</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            os.chmod(d, _MODE_PRIVATE_DIR)       # POSIX owner 可遍历；Windows ACL 尽力而为</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        except OSError as e:                     # 权限设置失败同样上抛(spec 伪码)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            raise_code(&quot;PERS-221&quot;, dir=str(d), cause=e, advice=_WRITE_FAIL_ADVICE)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    except OSError as e:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        raise_code(&quot;PERS-221&quot;, dir=str(d), cause=e, advice=_WRITE_FAIL_ADVICE)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    return d.resolve()                           # 归一根,后续 containment 基准</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code></code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code></code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code># ------------------------------------------------------------------ put</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>async def put(text: str, kind: str = &quot;output&quot;, ctx: Any = None) -&gt; dict:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    &quot;&quot;&quot;超限输出落盘(F039,Consumer 唯一入口):原文 → 会话私有 spill 文件。</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code></code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    顺序(spec 伪码权威):单文件超 10MB 先拒(PERS-223)→ 惰性建目录</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    (enter,PERS-221)→ ctx.redact 出口脱敏(INV-09)→ 临时文件+rename 原子</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    落盘(坏行不落地)→ 返回 EVENT-SCHEMA 同形 SpillMeta</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>    {spilled, ref, chars, lines, preview(头500)}。</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code></code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    kind = 来源标注(read/fetch/exec/pty…,入错误现场与审计扩展点,偏离 7)。</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    if ctx is None:</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        raise_code(&quot;PERS-221&quot;, hint=&quot;ctx 缺失:put 必须带会话门面&quot;, advice=_WRITE_FAIL_ADVICE)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    if not isinstance(text, str):                # 契约:Consumer 已 render 成 str</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        raise_code(&quot;PERS-221&quot;, hint=&quot;put 仅接受 str(Consumer 须先 render_result_text)&quot;,</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                   advice=_WRITE_FAIL_ADVICE)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    limit = _max_per_file(ctx)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    if len(text.encode(&quot;utf-8&quot;)) &gt; limit:        # 单文件 ≤10MB(**字节**,与键名同口径)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        raise_code(&quot;PERS-223&quot;, bytes=len(text.encode(&quot;utf-8&quot;)), max=limit,</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                   advice=_TOO_BIG_ADVICE)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>    d = await enter(ctx)                         # 惰性建目录(幂等;失败 PERS-221)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    # 会话总量闸(R24 接线 `storage.spill.max_per_session_mb`):单文件闸挡不住</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    # &quot;同一会话反复 spill&quot; ⇒ 此处按**目录现有字节 + 本次**判上限,超则拒写。</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>    cap = _max_per_session_bytes(ctx)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    if cap &gt; 0:</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        incoming = len(text.encode(&quot;utf-8&quot;))</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        if _session_dir_bytes(d) + incoming &gt; cap:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>            raise_code(&quot;PERS-223&quot;, op=&quot;per_session&quot;,</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                       session_bytes=_session_dir_bytes(d), incoming=incoming,</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                       max=cap,</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>                       advice=&quot;会话 spill 总量超上限&quot;</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                              &quot;(storage.spill.max_per_session_mb);清理会话区内&quot;</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                              &quot; spill-*.txt 或调大该键&quot;)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    text = _redact(ctx, text)                    # 出口脱敏(INV-09,spill=明文出口)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    name = f&quot;{FILE_PREFIX}{uuid.uuid4().hex[:8]}.txt&quot;</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    tmp = d / (name + &quot;.tmp&quot;)                    # 临时文件:坏行不落地(rename 前不可见)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    created = False</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>    try:</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        with open(tmp, &quot;x&quot;, encoding=&quot;utf-8&quot;, newline=&quot;&quot;,</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                  opener=lambda path, flags: os.open(path, flags, MODE_PRIVATE)) as fh:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>            created = True</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            fh.write(text)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        os.replace(tmp, d / name)                # 原子替换(Windows os.replace 同 rename)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    except OSError as e:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        try:                                    # 清理残留临时文件(尽力而为)</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>            if created:                         # 不删独占创建失败时他人已有的文件</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                tmp.unlink(missing_ok=True)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        except OSError:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>            pass</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        raise_code(&quot;PERS-221&quot;, dir=str(d), kind=kind, cause=e,</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                   advice=_WRITE_FAIL_ADVICE)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>    return {&quot;spilled&quot;: True,</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>            &quot;ref&quot;: f&quot;{d.name}/{name}&quot;,         # 会话内相对引用:ref=&lt;sid&gt;/spill-*.txt</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>            &quot;chars&quot;: len(text),</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>            &quot;lines&quot;: text.count(&quot;\n&quot;) + 1,</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            &quot;preview&quot;: text[:SUMMARY_PREVIEW]}   # 头 500 字符固定</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code></code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code></code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code># ------------------------------------------------------------------ read</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>async def read(ref: str, start: int = 0, limit: int = DEFAULT_LIMIT,</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>               ctx: Any = None) -&gt; dict:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>    &quot;&quot;&quot;按行取回(F039/LLM 可见工具 storage.spill):行区间 [start, start+limit)。</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code></code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    ref 必须先过 _resolve_ref containment(PERS-222 零读取);文件不存在(已</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>    清理/会话结束)→ TLB-802;start&lt;0/limit 超界 → TLB-803 零执行(schema 已</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>    拦,Provider 直调路径兜底)。返回 {content, more, start, returned} 并把</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    已读字符数累入 counters.spill_read_chars(防循环烧预算)。</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>    if ctx is None:</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        raise_code(&quot;PERS-222&quot;, ref=ref, advice=_REFUSED_ADVICE)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    try:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        start = int(start)</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        limit = int(limit)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>    except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        raise_code(&quot;TLB-803&quot;, tool=TOOL_NAME, field=&quot;start/limit&quot;,</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                   advice=&quot;start/limit 须为整数;未执行任何操作&quot;)</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>    if start &lt; 0 or limit &lt; 1 or limit &gt; MAX_READ_LIMIT:</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        raise_code(&quot;TLB-803&quot;, tool=TOOL_NAME, start=start, limit=limit,</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>                   advice=f&quot;start≥0 且 1≤limit≤{MAX_READ_LIMIT};未执行任何操作&quot;)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    f = _resolve_ref(ref, ctx)                   # containment 单点判定</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>    if f is None:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        raise_code(&quot;PERS-222&quot;, ref=ref, advice=_REFUSED_ADVICE)   # 零读取</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>    if not f.is_file():                          # ref 失效(已清理/会话结束/非文件)</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        raise_code(&quot;TLB-802&quot;, tool=TOOL_NAME, ref=ref,</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>                   advice=&quot;spill 引用已失效;重跑源头工具重新生成输出&quot;)</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>    try:</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        with f.open(&quot;r&quot;, encoding=&quot;utf-8&quot;, newline=&quot;&quot;) as fh:</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            raw = fh.read()</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>    except OSError as e:                         # 读 IO 失败 → 同样按失效回喂</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        raise_code(&quot;TLB-802&quot;, tool=TOOL_NAME, ref=ref, cause=e,</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                   advice=&quot;spill 文件读取失败;重跑源头工具重新生成输出&quot;)</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>    lines = raw.split(&quot;\n&quot;)                      # 与 put 行数口径严格同源(偏离 3)</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>    chunk = lines[start:start + limit]</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>    more = (start + limit) &lt; len(lines)          # 还有后续行</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    body = &quot;\n&quot;.join(chunk)</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>    _bump_counter(ctx, COUNTER_KEY, len(body))   # 已读量防循环</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>    return {&quot;content&quot;: body, &quot;more&quot;: more, &quot;start&quot;: start,</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            &quot;returned&quot;: len(chunk)}</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code></code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code></code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code># ------------------------------------------------------------------ containment 单点</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>def _resolve_ref(ref: Any, ctx: Any) -&gt; Optional[Path]:</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>    &quot;&quot;&quot;ref → 私有区内绝对 Path;任一逃逸形态返回 None(PERS-222 唯一判定)。</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code></code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>    拒绝:空/非 str、绝对路径(含盘符)、`..` 段、符号链接解析后越出 spill</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>    根、跨会话引用(当前会话 id 已知时,偏离 2);全部零读取语义由调用方兑现。</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>    if not isinstance(ref, str) or not ref:</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        return None</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>    if os.path.isabs(ref) or &quot;..&quot; in Path(ref).parts:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        return None</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>    root = _spill_root(ctx)</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>    if root is None:</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        return None</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>    root = root.resolve()                        # 根归一(符号链接在根级先解)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    cand = (root / ref).resolve()                # 解符号链接后归一(逃逸即越界)</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>    try:</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        cand.relative_to(root)                   # 最终落点必须在根内(Windows</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>    except ValueError:                           # 路径比较大小写不敏感,偏离 4)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        return None</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>    parts = Path(ref).parts</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>    if not parts:</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        return None</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>    if cand.parent.name != parts[0]:             # 首段必须是实际所在目录</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        return None</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>    sid = _session_id(ctx)                       # 会话级隔离(偏离 2):本会话</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>    if sid is not None and parts[0] != sid:      # ref 只指本会话 spill 文件</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        return None</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>    return cand</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code></code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code></code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code># ------------------------------------------------------------------ detach</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code></code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code></code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code># ------------------------------------------------------------------ purge</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code></code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code></code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code># ------------------------------------------------------------------ register</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>READ_SCHEMA: dict = {&quot;type&quot;: &quot;object&quot;,</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>                     &quot;properties&quot;: {&quot;ref&quot;: {&quot;type&quot;: &quot;string&quot;},</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>                                    &quot;start&quot;: {&quot;type&quot;: &quot;integer&quot;, &quot;minimum&quot;: 0,</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>                                              &quot;default&quot;: 0},</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>                                    &quot;limit&quot;: {&quot;type&quot;: &quot;integer&quot;, &quot;minimum&quot;: 1,</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>                                              &quot;maximum&quot;: MAX_READ_LIMIT,</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                                              &quot;default&quot;: DEFAULT_LIMIT}},</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>                     &quot;required&quot;: [&quot;ref&quot;],</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>                     &quot;additionalProperties&quot;: False}</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code></code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code></code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>class SpillReadHandle:</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>    &quot;&quot;&quot;storage.spill 读工具的 Provider 实现(executor 契约 handle(args, ctx))。</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code></code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>    只读面(模块职责 7):把 LLM 参数转发到模块 read;put 不在此类,也不登记</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>    为工具。schema 已带默认值(start=0/limit=200),args 恒含两键(INV-06)。</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code></code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>    name: str = TOOL_NAME</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code></code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>    async def handle(self, args: dict, ctx: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        &quot;&quot;&quot;executor 关3 Provider 调用面:经模块 read 返回 SpillReadOut。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        return await read(args.get(&quot;ref&quot;, &quot;&quot;),</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                          args.get(&quot;start&quot;, 0),</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                          args.get(&quot;limit&quot;, DEFAULT_LIMIT),</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                          ctx=ctx)</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code></code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code></code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>def register(registry: Any) -&gt; list[str]:</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>    &quot;&quot;&quot;读工具登记(DIS-SEAM §6.1 ⑥ announce):storage.spill 挂 tools 表。</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code></code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>    五要素齐备,danger=none(owner=&quot;spine&quot;,偏离 6),expose_to_llm=True 由</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>    装配层 announce 消费;put 不注册为工具(职责 7)。登记后装配层执行</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>    locator.mount(&quot;storage.spill&quot;)。返回注册名 list[str]。</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>    defn = _read_definition()</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>    registry.register_tool(defn, provider=SpillReadHandle())</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>    return [defn.name]</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code></code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code></code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>def _read_definition() -&gt; Any:</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>    &quot;&quot;&quot;读工具 ToolDefinition(spec register 伪码 defn 的实契约形态)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>    from pyharness.core.tools_registry import ToolDefinition</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>    return ToolDefinition(</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        name=TOOL_NAME,</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        danger=&quot;none&quot;,</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>        description=&quot;按行读回 spill 溢出文件内容(ref/start/limit);工具输出超限时,&quot;</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>                    &quot;由结果中的 spill_ref 指引使用本工具取回全文&quot;,</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        schema=READ_SCHEMA,</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        timeout_s=15,                            # 只读文件切片,15s 足够</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        owner=&quot;spine&quot;,                           # 脊柱支撑服务(DIS-SEAM §6.1 ②)</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        ctx_path=&quot;storage.spill&quot;,                # 定位器键(消费者寻址面)</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        version=&quot;1.0.0&quot;,</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>    )</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code></code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code></code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code># ------------------------------------------------------------------ SpillProvider</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>class SpillProvider:</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>    &quot;&quot;&quot;DIS-SEAM §6.1 ③ Provider 接口:绑定会话 ctx 的能力实例。</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code></code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>    装配层 activate 后挂 ctx.storage.spill(定位器),Consumer 经</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>    ctx.storage.spill.put(text, kind) 调用(executor 关4,唯一 put 消费方);</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>    read 的 LLM 可见面由 register() 登记的 storage.spill 工具经 handle 承担。</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>    enter = 建目录 + 订阅 session.finished → purge;detach = 幂等摘除</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>    (工具/定位器/订阅),文件不删(F060 窗口),随 ctx.close() 收尾。</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code></code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>    def __init__(self, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>        self._ctx = ctx</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code></code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>    # ---- Provider 生命周期(seam A ③⑤)</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>    async def enter(self, ctx: Any = None) -&gt; Path:</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>        &quot;&quot;&quot;首访:建会话私有目录(幂等)+ 订阅清理。返回归一目录 Path。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>        c = ctx or self._ctx</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>        d = await enter(c)                       # 模块 enter(建目录,PERS-221)</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>        subscribe_purge(c)                       # session.finished → purge</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>        return d</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code></code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>    async def put(self, text: str, kind: str = &quot;output&quot;) -&gt; dict:</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        &quot;&quot;&quot;Provider 内部方法(不进工具表):落盘 + 返回 SpillMeta。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>        return await put(text, kind=kind, ctx=self._ctx)</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code></code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>    async def read(self, ref: str, start: int = 0,</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>                   limit: int = DEFAULT_LIMIT) -&gt; dict:</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>        &quot;&quot;&quot;Provider 方法面(供内部/repair 直读;LLM 面走工具 handle)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>        return await read(ref, start, limit, ctx=self._ctx)</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code></code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>    async def detach(self, ctx: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        &quot;&quot;&quot;幂等摘除(文件保留,spec 职责 5)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        await detach(ctx or self._ctx)</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code></code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code></code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>__all__ = [</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>    # 模块函数(spec 函数清单,签名一致)</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>    &quot;enter&quot;, &quot;put&quot;, &quot;read&quot;, &quot;detach&quot;, &quot;purge_session&quot;, &quot;register&quot;,</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>    # 内部/装配件</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>    &quot;_resolve_ref&quot;, &quot;subscribe_purge&quot;, &quot;SpillProvider&quot;, &quot;SpillReadHandle&quot;,</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>    # 常量</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>    &quot;SUMMARY_PREVIEW&quot;, &quot;DEFAULT_MAX_PER_FILE&quot;, &quot;DEFAULT_LIMIT&quot;,</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>    &quot;MAX_READ_LIMIT&quot;, &quot;MODE_PRIVATE&quot;, &quot;TOOL_NAME&quot;, &quot;COUNTER_KEY&quot;,</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>    &quot;READ_SCHEMA&quot;,</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

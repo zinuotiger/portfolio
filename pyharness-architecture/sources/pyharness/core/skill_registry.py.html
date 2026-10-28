@@ -1,0 +1,327 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/skill_registry.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/skill_registry.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 327 行</span></nav><main class="wrap source-page"><h1>pyharness/core/skill_registry.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：7840d2475c71e2ab19261404af5ad4063cfd8244<br>SHA-256（内容校验）：ae654177b7c913ef366333a37f9c2da351933748fbae7da4c01effbc0d79c9e9</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 19 个类、函数与方法</summary><ul><li><a href="#L29">_safe_name（函数） · L29–L39</a></li><li><a href="#L42">_safe_under（函数） · L42–L57</a></li><li><a href="#L60">SkillInstaller（类） · L60–L324</a><ul><li><a href="#L63">SkillInstaller.__init__（方法） · L63–L75</a></li><li><a href="#L78">SkillInstaller._read_url（异步方法） · L78–L111</a></li><li><a href="#L113">SkillInstaller.fetch_registry（异步方法） · L113–L123</a></li><li><a href="#L125">SkillInstaller.search（异步方法） · L125–L153</a></li><li><a href="#L156">SkillInstaller._entry（方法） · L156–L160</a></li><li><a href="#L162">SkillInstaller._version_entry（方法） · L162–L172</a></li><li><a href="#L174">SkillInstaller._sha256（方法） · L174–L176</a></li><li><a href="#L178">SkillInstaller._safe_extract（方法） · L178–L209</a></li><li><a href="#L211">SkillInstaller._find_skill_root（方法） · L211–L217</a></li><li><a href="#L219">SkillInstaller._frontmatter_name（方法） · L219–L227</a></li><li><a href="#L229">SkillInstaller._replace_active（方法） · L229–L244</a></li><li><a href="#L246">SkillInstaller._current_version（方法） · L246–L251</a></li><li><a href="#L253">SkillInstaller.install（异步方法） · L253–L291</a></li><li><a href="#L293">SkillInstaller.rollback（方法） · L293–L306</a></li><li><a href="#L308">SkillInstaller.remove（方法） · L308–L319</a></li><li><a href="#L321">SkillInstaller.versions（方法） · L321–L324</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Safe skill registry search/install/rollback primitives.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code></code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import hashlib</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import io</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import json</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import logging</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>import os</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import re</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import shutil</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>import tempfile</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>import zipfile</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pathlib import Path, PurePosixPath</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from typing import Optional</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>from urllib.parse import unquote, urlparse</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>import httpx</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>log = logging.getLogger(&quot;pyharness.skill_registry&quot;)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>_NAME_RE = re.compile(r&quot;^[A-Za-z0-9._-]{1,64}$&quot;)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>_MAX_REGISTRY_BYTES = 2 * 1024 * 1024</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>_MAX_ZIP_BYTES = 5 * 1024 * 1024</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>_MAX_FILES = 200</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>def _safe_name(name) -&gt; str:</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    &quot;&quot;&quot;技能名/版本段安全校验(CND-04:外部输入不得直接作资源路径依据)。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code></code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    非空 + `_NAME_RE` + **拒 &quot;.&quot;/&quot;..&quot;**——`_NAME_RE` 字符集含 `.`,只靠它会放行</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    `name=&quot;.&quot;/&quot;..&quot;` → `dir / &quot;..&quot;` 越界(remove 甚至 `rmtree` 父目录)。</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    nm = str(name or &quot;&quot;)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    if not _NAME_RE.fullmatch(nm) or nm in (&quot;.&quot;, &quot;..&quot;):</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        raise_code(&quot;EVT-100&quot;, field=&quot;name&quot;, name=nm[:64],</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>                   advice=&quot;Skill 名称/版本段非法(仅 [A-Za-z0-9._-] 且不得为 . 或 ..)&quot;)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    return nm</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>def _safe_under(root: Path, *segments: str) -&gt; Path:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    &quot;&quot;&quot;`root/segments…` 归一后必须仍在 root 内(纵深防御,SECURITY §文件影响域单点归一)。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    防 symlink/junction 越界(POL-FS-3)与拼接绕过;逃逸 → POL-FS-2 拒。</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    root_r = root.resolve()</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    target = root_r.joinpath(*segments).resolve()</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    if target != root_r and root_r not in target.parents:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        # POL-FS-* 是 **guard 拒绝原因**(ERR.md §2.11),不是错误码;与 tool_fs</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        # ``resolve_in_workspace`` 同款:GRD-401 + reason=POL-FS-2。此前把原因当码用</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        # ⇒ ``raise_code`` 按未登记码**静默改写为 CYC-999**(R19):路径穿越的拒绝在</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        # 审计/HTTP 上退化成&quot;未知内部错误&quot;,丢了安全语义。</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        raise_code(&quot;GRD-401&quot;, reason=&quot;POL-FS-2&quot;, path=str(target),</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                   root=str(root_r),</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                   advice=&quot;Skill 路径逃逸出根目录,拒绝(路径穿越)&quot;)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    return target</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>class SkillInstaller:</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    &quot;&quot;&quot;Download, verify, quarantine and install SKILL.md packages.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    def __init__(self, skills_dir: Path, *, state_dir: Optional[Path] = None,</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                 max_package_bytes: int = _MAX_ZIP_BYTES,</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                 max_files: int = _MAX_FILES) -&gt; None:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        self.skills_dir = Path(skills_dir).expanduser()</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        self.state_dir = Path(state_dir).expanduser() if state_dir else \</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            self.skills_dir.parent / &quot;skill_state&quot;</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        self.versions_dir = self.state_dir / &quot;versions&quot;</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        self.quarantine_dir = self.state_dir / &quot;quarantine&quot;</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        self.max_package_bytes = int(max_package_bytes)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        self.max_files = int(max_files)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        self.skills_dir.mkdir(parents=True, exist_ok=True)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        self.versions_dir.mkdir(parents=True, exist_ok=True)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        self.quarantine_dir.mkdir(parents=True, exist_ok=True)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    # ------------------------------------------------------------ transport</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    async def _read_url(self, url: str, *, max_bytes: int) -&gt; bytes:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        parsed = urlparse(str(url or &quot;&quot;))</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        if parsed.scheme == &quot;file&quot;:</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            path = Path(unquote(parsed.path.lstrip(&quot;/&quot;))) if os.name == &quot;nt&quot; else Path(unquote(parsed.path))</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            try:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                data = path.read_bytes()</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            except OSError as exc:                     # noqa: BLE001</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                raise_code(&quot;TLB-805&quot;, url=url, stage=&quot;file&quot;,</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                           cause=exc, advice=&quot;本地 Skill 包无法读取&quot;)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            if len(data) &gt; max_bytes:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                raise_code(&quot;TLB-805&quot;, url=url, stage=&quot;size&quot;,</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                           advice=f&quot;Skill 包超过上限 {max_bytes} bytes&quot;)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            return data</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        if parsed.scheme not in (&quot;http&quot;, &quot;https&quot;):</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            raise_code(&quot;CFG-601&quot;, field=&quot;url&quot;, url=url,</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                       advice=&quot;Skill Registry 仅支持 http/https/file URL&quot;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        chunks: list[bytes] = []</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        size = 0</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        try:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                async with client.stream(&quot;GET&quot;, url) as resp:</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                    if resp.status_code &gt;= 400:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                        raise_code(&quot;TLB-805&quot;, url=url, http_status=resp.status_code,</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                                   advice=&quot;Skill Registry 下载失败&quot;)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                    async for chunk in resp.aiter_bytes():</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                        size += len(chunk)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                        if size &gt; max_bytes:</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                            raise_code(&quot;TLB-805&quot;, url=url, stage=&quot;size&quot;,</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                                       advice=f&quot;下载超过上限 {max_bytes} bytes&quot;)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                        chunks.append(chunk)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        except httpx.HTTPError as exc:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            raise_code(&quot;TLB-805&quot;, url=url, stage=&quot;transport&quot;,</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                       cause=exc, advice=&quot;Skill Registry 网络失败&quot;)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        return b&quot;&quot;.join(chunks)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    async def fetch_registry(self, url: str) -&gt; dict:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        raw = await self._read_url(url, max_bytes=_MAX_REGISTRY_BYTES)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        try:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            data = json.loads(raw.decode(&quot;utf-8&quot;))</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        except (UnicodeDecodeError, ValueError) as exc:  # noqa: BLE001</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            raise_code(&quot;TLB-805&quot;, url=url, stage=&quot;registry&quot;,</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                       cause=exc, advice=&quot;Skill Registry 不是合法 JSON&quot;)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        if not isinstance(data, dict) or not isinstance(data.get(&quot;skills&quot;), list):</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;registry&quot;,</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                       advice=&quot;Registry 必须包含 skills 数组&quot;)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        return data</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    async def search(self, query: str, registry_url: str, *, limit: int = 20) -&gt; list[dict]:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        data = await self.fetch_registry(registry_url)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        q = str(query or &quot;&quot;).strip().lower()</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        rows: list[dict] = []</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        for skill in data.get(&quot;skills&quot;, []):</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            if not isinstance(skill, dict):</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                continue</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            name = str(skill.get(&quot;name&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            desc = str(skill.get(&quot;description&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            tags = &quot; &quot;.join(str(x) for x in (skill.get(&quot;tags&quot;) or []))</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            hay = f&quot;{name} {desc} {tags}&quot;.lower()</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            if q and q not in hay:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                continue</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            versions = skill.get(&quot;versions&quot;) or []</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            version_rows = [v for v in versions if isinstance(v, dict)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                            and v.get(&quot;version&quot;)]</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            version_ids = [str(v.get(&quot;version&quot;)) for v in version_rows]</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            latest = str(skill.get(&quot;latest&quot;) or</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                         (version_ids[-1] if version_ids else &quot;&quot;))</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            latest_entry = next((v for v in reversed(version_rows)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                                 if str(v.get(&quot;version&quot;)) == latest), {})</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            rows.append({&quot;name&quot;: name, &quot;description&quot;: desc,</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                         &quot;tags&quot;: list(skill.get(&quot;tags&quot;) or []),</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                         &quot;latest&quot;: latest,</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                         &quot;versions&quot;: version_ids,</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                         &quot;sha256&quot;: str(latest_entry.get(&quot;sha256&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>                         &quot;source&quot;: str(latest_entry.get(&quot;source&quot;) or</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                                       latest_entry.get(&quot;url&quot;) or registry_url)})</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        return rows[:max(1, int(limit))]</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code></code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    # ------------------------------------------------------------ install</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    def _entry(self, registry: dict, name: str) -&gt; dict:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        for row in registry.get(&quot;skills&quot;, []):</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            if isinstance(row, dict) and str(row.get(&quot;name&quot;)) == str(name):</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                return row</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        raise_code(&quot;EVT-101&quot;, skill=name, advice=&quot;Registry 中不存在该 Skill&quot;)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code></code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    def _version_entry(entry: dict, version: Optional[str]) -&gt; dict:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        versions = [v for v in (entry.get(&quot;versions&quot;) or []) if isinstance(v, dict)]</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        if not versions:</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;versions&quot;, advice=&quot;Skill 没有可用版本&quot;)</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        wanted = str(version or entry.get(&quot;latest&quot;) or versions[-1].get(&quot;version&quot;))</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        for row in versions:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            if str(row.get(&quot;version&quot;)) == wanted:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                return row</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        raise_code(&quot;EVT-101&quot;, skill=entry.get(&quot;name&quot;), version=wanted,</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                   advice=&quot;Registry 中不存在该版本&quot;)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code></code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    def _sha256(data: bytes) -&gt; str:</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        return hashlib.sha256(data).hexdigest()</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code></code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>    def _safe_extract(self, raw: bytes, target: Path) -&gt; None:</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        try:</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>            zf = zipfile.ZipFile(io.BytesIO(raw))</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        except zipfile.BadZipFile as exc:                # noqa: BLE001</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>            raise_code(&quot;TLB-805&quot;, stage=&quot;unzip&quot;, cause=exc,</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                       advice=&quot;Skill 包不是合法 zip&quot;)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        infos = zf.infolist()</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        if len(infos) &gt; self.max_files:</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>            raise_code(&quot;TLB-805&quot;, stage=&quot;unzip&quot;,</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                       advice=f&quot;Skill 包文件数超过上限 {self.max_files}&quot;)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        total = 0</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        for info in infos:</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>            name = info.filename.replace(&quot;\\&quot;, &quot;/&quot;)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>            path = PurePosixPath(name)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            if path.is_absolute() or &quot;..&quot; in path.parts:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                raise_code(&quot;TLB-805&quot;, stage=&quot;path&quot;,</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                           advice=f&quot;Skill 包包含非法路径:{name}&quot;)</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            if info.flag_bits &amp; 0x1:</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                raise_code(&quot;TLB-805&quot;, stage=&quot;encrypted&quot;,</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>                           advice=&quot;不支持加密 Skill 包&quot;)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            total += int(info.file_size)</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            if total &gt; self.max_package_bytes:</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>                raise_code(&quot;TLB-805&quot;, stage=&quot;size&quot;,</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                           advice=f&quot;解压后大小超过上限 {self.max_package_bytes}&quot;)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        target.mkdir(parents=True, exist_ok=True)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        try:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>            zf.extractall(target)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        except (OSError, zipfile.BadZipFile) as exc:     # noqa: BLE001</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>            raise_code(&quot;TLB-805&quot;, stage=&quot;unzip&quot;, cause=exc,</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                       advice=&quot;Skill 包解压失败&quot;)</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        finally:</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            zf.close()</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>    def _find_skill_root(root: Path) -&gt; Path:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        matches = list(root.rglob(&quot;SKILL.md&quot;))</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        if len(matches) != 1:</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;SKILL.md&quot;,</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                       advice=&quot;Skill 包必须恰好包含一个 SKILL.md&quot;)</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        return matches[0].parent</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code></code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>    def _frontmatter_name(skill_root: Path) -&gt; str:</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        from pyharness.core.skill import _parse_frontmatter</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        text = (skill_root / &quot;SKILL.md&quot;).read_text(encoding=&quot;utf-8&quot;)</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        meta = _parse_frontmatter(text)</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        if not meta or not _NAME_RE.fullmatch(str(meta.get(&quot;name&quot;) or &quot;&quot;)):</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;SKILL.md&quot;,</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                       advice=&quot;SKILL.md frontmatter 缺合法 name&quot;)</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        return str(meta[&quot;name&quot;])</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code></code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>    def _replace_active(self, name: str, version_dir: Path, version: str) -&gt; None:</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        active = self.skills_dir / name</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        backup = self.versions_dir / name / self._current_version(name)</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        if active.exists() and not backup.exists():</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            try:</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>                shutil.copytree(active, backup)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>            except OSError:                              # noqa: BLE001</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>                log.warning(&quot;active skill backup failed name=%s&quot;, name, exc_info=True)</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        tmp = self.skills_dir / f&quot;.{name}.installing-{os.getpid()}&quot;</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        if tmp.exists():</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>            shutil.rmtree(tmp)</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        shutil.copytree(version_dir, tmp)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        (tmp / &quot;.pyharness-version&quot;).write_text(version, encoding=&quot;utf-8&quot;)</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        if active.exists():</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            shutil.rmtree(active)</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        tmp.replace(active)</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code></code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>    def _current_version(self, name: str) -&gt; str:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        marker = self.skills_dir / name / &quot;.pyharness-version&quot;</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        try:</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>            return marker.read_text(encoding=&quot;utf-8&quot;).strip() or &quot;unknown&quot;</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        except OSError:</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>            return &quot;unknown&quot;</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code></code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>    async def install(self, name: str, *, registry_url: str,</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                      version: Optional[str] = None,</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>                      approved_by: Optional[str] = None) -&gt; dict:</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        if not approved_by:</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>            raise_code(&quot;GRD-401&quot;, reason=&quot;skill-install-approval&quot;,</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>                       advice=&quot;Skill 安装必须由人类显式批准&quot;)</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        name = _safe_name(name)            # CND-04:外部 name 不得直接作路径依据</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        registry = await self.fetch_registry(registry_url)</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        entry = self._entry(registry, name)</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        selected = self._version_entry(entry, version)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        package_url = str(selected.get(&quot;url&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        expected = str(selected.get(&quot;sha256&quot;) or &quot;&quot;).lower()</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        if not package_url or not re.fullmatch(r&quot;[0-9a-f]{64}&quot;, expected):</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>            raise_code(&quot;EVT-100&quot;, skill=name, version=selected.get(&quot;version&quot;),</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>                       advice=&quot;版本必须包含 url 与合法 sha256&quot;)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        raw = await self._read_url(package_url, max_bytes=self.max_package_bytes)</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        actual = self._sha256(raw)</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        if actual != expected:</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            raise_code(&quot;GRD-401&quot;, reason=&quot;skill-hash-mismatch&quot;, skill=name,</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>                       expected=expected, actual=actual,</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>                       advice=&quot;SHA-256 不匹配，拒绝安装&quot;)</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        version_id = _safe_name(selected.get(&quot;version&quot;))   # CND-04:版本段亦外部输入</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>        with tempfile.TemporaryDirectory(prefix=&quot;skill-&quot;, dir=self.quarantine_dir) as td:</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>            extract_root = Path(td) / &quot;extract&quot;</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>            self._safe_extract(raw, extract_root)</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>            skill_root = self._find_skill_root(extract_root)</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>            fm_name = self._frontmatter_name(skill_root)</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>            if fm_name != name:</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                raise_code(&quot;EVT-100&quot;, skill=name, actual=fm_name,</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>                           advice=&quot;Registry name 与 SKILL.md frontmatter 不一致&quot;)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>            version_dir = _safe_under(self.versions_dir, name, version_id)</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>            if version_dir.exists():</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>                shutil.rmtree(version_dir)</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>            version_dir.parent.mkdir(parents=True, exist_ok=True)</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>            shutil.copytree(skill_root, version_dir)</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            self._replace_active(name, version_dir, version_id)</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        return {&quot;ok&quot;: True, &quot;name&quot;: name, &quot;version&quot;: version_id,</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                &quot;sha256&quot;: actual, &quot;source&quot;: package_url,</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                &quot;approved_by&quot;: approved_by, &quot;path&quot;: str(self.skills_dir / name)}</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code></code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>    def rollback(self, name: str, version: str, *, approved_by: Optional[str] = None) -&gt; dict:</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>        if not approved_by:</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>            raise_code(&quot;GRD-401&quot;, reason=&quot;skill-rollback-approval&quot;,</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>                       advice=&quot;Skill 回滚必须由人类显式批准&quot;)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        name = _safe_name(name)            # CND-04:外部 name/version 不得直接作路径依据</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        version = _safe_name(version)</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>        version_dir = _safe_under(self.versions_dir, name, version)</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        if not version_dir.is_dir():</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>            raise_code(&quot;EVT-101&quot;, skill=name, version=version,</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                       advice=&quot;目标版本不存在&quot;)</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        previous = self._current_version(name)</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>        self._replace_active(name, version_dir, version)</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>        return {&quot;ok&quot;: True, &quot;name&quot;: name, &quot;from_version&quot;: previous,</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                &quot;to_version&quot;: version, &quot;approved_by&quot;: approved_by}</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code></code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>    def remove(self, name: str, *, approved_by: Optional[str] = None) -&gt; dict:</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>        if not approved_by:</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>            raise_code(&quot;GRD-401&quot;, reason=&quot;skill-remove-approval&quot;,</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>                       advice=&quot;Skill 卸载必须由人类显式批准&quot;)</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        name = _safe_name(name)            # CND-04:外部 name 不得直接作路径依据</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        active = _safe_under(self.skills_dir, name)</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>        if not active.exists():</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>            return {&quot;ok&quot;: False, &quot;name&quot;: name, &quot;removed&quot;: False}</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        version = self._current_version(name)</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        shutil.rmtree(active)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        return {&quot;ok&quot;: True, &quot;name&quot;: name, &quot;removed&quot;: True,</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>                &quot;version&quot;: version, &quot;approved_by&quot;: approved_by}</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code></code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>    def versions(self, name: str) -&gt; list[str]:</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        name = _safe_name(name)            # CND-04:外部 name 不得直接作路径依据</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        root = _safe_under(self.versions_dir, name)</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        return sorted(p.name for p in root.iterdir() if p.is_dir()) if root.exists() else []</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code></code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code></code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>__all__ = [&quot;SkillInstaller&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

@@ -1,0 +1,157 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/execution_effects.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/execution_effects.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 157 行</span></nav><main class="wrap source-page"><h1>pyharness/application/execution_effects.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：4e87a8c6bad0b6488bc8e306d96908acb2debb35<br>SHA-256（内容校验）：ec259f900982709ec1b4926b3fae8a46bbc409b2cdf439723fad295e58646b00</p><p><a href="../../../architecture-detailed.html?node=execution_effects">ExecutionEffects（工具影响回执）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 16 个类、函数与方法</summary><ul><li><a href="#L13">confirmed_events（函数） · L13–L14</a></li><li><a href="#L17">confirmed_prefix_events（函数） · L17–L19</a></li><li><a href="#L22">_confirmed_events（函数） · L22–L40</a></li><li><a href="#L43">flush_confirmed（异步函数） · L43–L47</a></li><li><a href="#L50">invocation_decision（函数） · L50–L74</a><ul><li><a href="#L52">invocation_decision.denied（方法） · L52–L52</a></li></ul></li><li><a href="#L77">EffectRecorder（类） · L77–L157</a><ul><li><a href="#L78">EffectRecorder.__init__（方法） · L78–L81</a></li><li><a href="#L83">EffectRecorder._append（异步方法） · L83–L89</a></li><li><a href="#L91">EffectRecorder._binding（方法） · L91–L105</a><ul><li><a href="#L92">EffectRecorder._binding.denied（方法） · L92–L92</a></li></ul></li><li><a href="#L107">EffectRecorder.invoke（异步方法） · L107–L108</a></li><li><a href="#L110">EffectRecorder.invoke_observed（异步方法） · L110–L111</a></li><li><a href="#L113">EffectRecorder._invoke_observed（异步方法） · L113–L132</a></li><li><a href="#L134">EffectRecorder._invoke_provider（异步方法） · L134–L135</a></li><li><a href="#L137">EffectRecorder._invoke_provider_observed（异步方法） · L137–L157</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Provider observations on the original runtime log, never a second result store.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import asyncio</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import hashlib</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.core.execution_result import _approval_binding</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.core.invocation_binding import current_invocation</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.core.provider_result import ProviderOutcome</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.core.result_text import render_result_text</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.persistence import detect_truncation, session_data_paths</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>def confirmed_events(session):</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    return _confirmed_events(session,allow_pending=False)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>def confirmed_prefix_events(session):</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    &quot;&quot;&quot;Allow only the ordinary buffered suffix, never an unconfirmed strong fact.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    return _confirmed_events(session,allow_pending=True)</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>def _confirmed_events(session,*,allow_pending):</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    &quot;&quot;&quot;Do not mistake EventBus-isolated persistence errors for a commit receipt.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    store = getattr(session, &#x27;_persistence&#x27;, None)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    if store is None or not getattr(store, &#x27;path&#x27;, None):</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        raise_code(&#x27;PERS-202&#x27;, reason=&#x27;execution_persistence_required&#x27;)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    for path in session_data_paths(store.path):</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        if not path.is_file() or detect_truncation(path) is not None:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;execution_log_incomplete&#x27;)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    events = list(store.replay())</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    if store._quarantine:</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        raise_code(&#x27;PERS-202&#x27;, reason=&#x27;execution_log_corrupt&#x27;)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    actual=[e.model_dump() for e in events];memory=list(session.events_after(0))</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    expected=[e.model_dump() for e in memory]</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    from pyharness.events.vocab import SYNC_TYPES</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    if (actual!=expected[:len(actual)] or len(actual)&gt;len(expected) or</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>            (not allow_pending and len(actual)!=len(expected)) or</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            any(e.type in SYNC_TYPES for e in memory[len(actual):])):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        raise_code(&#x27;PERS-202&#x27;, reason=&#x27;execution_log_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    return events</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code></code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>async def flush_confirmed(session):</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    store = getattr(session, &#x27;_persistence&#x27;, None)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    if store is None:raise_code(&#x27;PERS-202&#x27;, reason=&#x27;execution_persistence_required&#x27;)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    await store.flush(session.stats()[&#x27;seq&#x27;])</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    return confirmed_events(session)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>def invocation_decision(events, binding, task_id):</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    &quot;&quot;&quot;One checked decision binding for live invocation and historical replay.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    def denied():raise_code(&#x27;GRD-403&#x27;, reason=&#x27;execution_invocation_unbound&#x27;)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    call = next((e for e in events if e.seq == binding.tool_call_seq), None)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    if (call is None or call.type != &#x27;tool.call&#x27; or call.actor != &#x27;tool&#x27; or</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>            call.task_id not in (None, str(task_id)) or call.payload[&#x27;name&#x27;] != binding.tool or</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>            call.payload[&#x27;call_id&#x27;] != binding.call_id or</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            _approval_binding(SimpleNamespace(name=binding.tool), call.payload[&#x27;args&#x27;]) != binding.inputs_digest):denied()</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    decisions = [e for e in events if e.type == &#x27;decision.issued&#x27; and e.seq &gt; call.seq</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                 and (e.trace or {}).get(&#x27;call_id&#x27;) == binding.call_id]</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    if not decisions:denied()</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    decision = decisions[-1]</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    if (decision.actor != &#x27;system&#x27; or decision.payload[&#x27;tool&#x27;] != binding.tool or</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            decision.payload[&#x27;inputs_digest&#x27;] != binding.inputs_digest or</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            decision.payload[&#x27;verdict&#x27;] not in (&#x27;allow&#x27;, &#x27;approval&#x27;)):denied()</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    if decision.payload[&#x27;verdict&#x27;] == &#x27;approval&#x27;:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        approval_ref = decision.payload.get(&#x27;approval_ref&#x27;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        request = next((e for e in events if e.seq == approval_ref), None)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        if (request is None or request.type != &#x27;approval.requested&#x27; or</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                (request.trace or {}).get(&#x27;call_id&#x27;) != binding.call_id or</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                request.payload[&#x27;tool&#x27;] != binding.tool):denied()</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        outcomes = [e for e in events if e.type in (&#x27;approval.granted&#x27;, &#x27;approval.denied&#x27;, &#x27;approval.timeout&#x27;)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                    and e.payload[&#x27;approval_id&#x27;] == approval_ref and request.seq &lt; e.seq &lt; decision.seq]</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        if len(outcomes) != 1 or outcomes[0].type != &#x27;approval.granted&#x27;:denied()</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    return decision</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>class EffectRecorder:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    def __init__(self, execution_id, authorization_digest, authorize):</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        self.execution_id = execution_id</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        self.authorization_digest = authorization_digest</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        self.authorize = authorize</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    async def _append(self, ctx, payload):</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        event = await ctx.session.append(&#x27;execution.effect&#x27;, payload,</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            actor=&#x27;system&#x27;, task_id=str(ctx.task_id), sync=True)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        events = confirmed_events(ctx.session)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        if not any(e == event for e in events):</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;execution_effect_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        return event</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    def _binding(self, ctx, binding, events):</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        def denied(): raise_code(&#x27;GRD-403&#x27;, reason=&#x27;execution_invocation_unbound&#x27;)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        if binding is None: denied()</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        from pyharness.application.execution_delegation import own_lifecycle</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        lifecycle=own_lifecycle(events,ctx.session.sid)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        bound = [e for e in lifecycle if</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                 e.payload[&#x27;execution_id&#x27;] == self.execution_id and</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                 e.payload[&#x27;phase&#x27;] == &#x27;bound&#x27; and e.task_id == str(ctx.task_id) and</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                 e.payload[&#x27;authorization_digest&#x27;] == self.authorization_digest]</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        if len(bound) != 1: denied()</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        if lifecycle[-1].payload[&#x27;phase&#x27;] != &#x27;running&#x27;: denied()</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        decision = invocation_decision(events, binding, ctx.task_id)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        if any(e.type == &#x27;execution.effect&#x27; and e.payload[&#x27;tool_call_seq&#x27;] == binding.tool_call_seq for e in events):</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            raise_code(&#x27;GRD-402&#x27;, reason=&#x27;execution_effect_already_started&#x27;)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        return decision</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code></code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    async def invoke(self, ctx, original):</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        return await self._invoke_observed(ctx,original,None)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    async def invoke_observed(self,ctx,original,observer):</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        return await self._invoke_observed(ctx,original,observer)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    async def _invoke_observed(self,ctx,original,observer):</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        binding = current_invocation.get()</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        if binding is None: raise_code(&#x27;GRD-403&#x27;, reason=&#x27;execution_invocation_unbound&#x27;)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        # The journal owns this lock: distinct recorder instances cannot race the</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        # same durable call identity. Assignment has no await on the owning loop.</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        if not hasattr(ctx.session, &#x27;_execution_effect_lock&#x27;):</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            ctx.session._execution_effect_lock = asyncio.Lock()</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        async with ctx.session._execution_effect_lock:</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            self.authorize()</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            decision = self._binding(ctx, binding, confirmed_events(ctx.session))</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            payload = dict(schema_version=1, execution_id=self.execution_id,</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                phase=&#x27;started&#x27;, tool=binding.tool, call_id=binding.call_id,</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                tool_call_seq=binding.tool_call_seq, inputs_digest=binding.inputs_digest,</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                decision_seq=decision.seq)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>            started = await self._append(ctx, payload)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            self.authorize()</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        from pyharness.application.execution_delegation import current_delegation,DelegationInvocation</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        token=current_delegation.set(DelegationInvocation(ctx,binding,decision.seq,started.seq,self.execution_id,self.authorization_digest))</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        try:return await self._invoke_provider_observed(ctx,original,payload,started,observer)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        finally:current_delegation.reset(token)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    async def _invoke_provider(self,ctx,original,payload,started):</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        return await self._invoke_provider_observed(ctx,original,payload,started,None)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code></code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    async def _invoke_provider_observed(self,ctx,original,payload,started,observer):</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        entered=False;files={}</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        try:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            if observer is not None:await observer.before()</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            self.authorize();entered=True</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            result = await original()</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            if observer is not None:files=await observer.after(result)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        except BaseException as exc:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            # An exception cannot prove the absence of a partial external effect.</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            outcome = dict(payload, phase=&#x27;unknown&#x27;, started_seq=started.seq,</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                reason=&#x27;waiting_cancelled&#x27; if isinstance(exc, asyncio.CancelledError) else &#x27;provider_raised&#x27; if entered else &#x27;observation_failed&#x27;)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            try: await self._append(ctx, outcome)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>            except BaseException as receipt_error:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                exc.add_note(&#x27;effect outcome unavailable: &#x27; + type(receipt_error).__name__)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>            raise</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        outcome = dict(payload, phase=&#x27;returned&#x27;, started_seq=started.seq,</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            result_digest=hashlib.sha256(render_result_text(result).encode(&#x27;utf-8&#x27;)).hexdigest(),</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>            provider_ok=bool(result.get(&#x27;ok&#x27;)) if isinstance(result, ProviderOutcome) else None)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        outcome.update(files)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        await self._append(ctx, outcome)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        return result</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

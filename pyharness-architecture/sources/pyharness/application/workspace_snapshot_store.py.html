@@ -1,0 +1,259 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/workspace_snapshot_store.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/workspace_snapshot_store.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 259 行</span></nav><main class="wrap source-page"><h1>pyharness/application/workspace_snapshot_store.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：b4b07e6b7444905cbabc242bc6f1cbe1210fe2df<br>SHA-256（内容校验）：0feb273764eca7c730040a8ae439d89eb8dc7e504608d45c835a556885d73a65</p><p><a href="../../../architecture-detailed.html?node=workspace_snapshot">SourceSnapshot（来源与工作区快照）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 18 个类、函数与方法</summary><ul><li><a href="#L11">WorkspaceSnapshotStore（类） · L11–L259</a><ul><li><a href="#L15">WorkspaceSnapshotStore._workspace_capture_lock（异步方法） · L15–L22</a></li><li><a href="#L24">WorkspaceSnapshotStore._workspace_quota（方法） · L24–L26</a></li><li><a href="#L28">WorkspaceSnapshotStore._workspace_grant_ids（方法） · L28–L31</a></li><li><a href="#L33">WorkspaceSnapshotStore._workspace_snapshot_access（方法） · L33–L46</a></li><li><a href="#L48">WorkspaceSnapshotStore._workspace_latest（方法） · L48–L54</a></li><li><a href="#L56">WorkspaceSnapshotStore._workspace_snapshot_summary（方法） · L56–L72</a></li><li><a href="#L74">WorkspaceSnapshotStore._verify_workspace_content（方法） · L74–L90</a></li><li><a href="#L92">WorkspaceSnapshotStore._validate_workspace_snapshot_definition（方法） · L92–L104</a></li><li><a href="#L106">WorkspaceSnapshotStore._workspace_confirmation（方法） · L106–L112</a></li><li><a href="#L114">WorkspaceSnapshotStore._collect_workspace_candidate（异步方法） · L114–L132</a><ul><li><a href="#L121">WorkspaceSnapshotStore._collect_workspace_candidate.before_body_read（方法） · L121–L129</a></li></ul></li><li><a href="#L134">WorkspaceSnapshotStore._workspace_storage_geometry（方法） · L134–L140</a></li><li><a href="#L142">WorkspaceSnapshotStore._workspace_capture_gate（方法） · L142–L153</a></li><li><a href="#L155">WorkspaceSnapshotStore.preview_workspace_snapshot（异步方法） · L155–L167</a></li><li><a href="#L169">WorkspaceSnapshotStore.capture_workspace_snapshot（异步方法） · L169–L217</a></li><li><a href="#L219">WorkspaceSnapshotStore.workspace_snapshots（异步方法） · L219–L234</a></li><li><a href="#L236">WorkspaceSnapshotStore.workspace_snapshot（异步方法） · L236–L259</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Git input capture on the existing owner, immutable content and SessionLog protocol.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import asyncio</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import time</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from contextlib import asynccontextmanager</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.workspace_capture import collect_workspace_git</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.workspace_snapshot import WorkspaceSnapshot,change_flags</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.errors import PyHError,raise_code</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>class WorkspaceSnapshotStore:</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    MAX_WORKSPACE_SNAPSHOTS=200</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    MAX_WORKSPACE_CAPTURE_SECONDS=25</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    @asynccontextmanager</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    async def _workspace_capture_lock(self,started):</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        remaining=self.MAX_WORKSPACE_CAPTURE_SECONDS-(time.monotonic()-started)</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        if remaining&lt;=0: raise_code(&#x27;EVT-104&#x27;,reason=&#x27;workspace_capture_time_limit&#x27;)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        try: await asyncio.wait_for(self._lock.acquire(),remaining)</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        except TimeoutError: raise_code(&#x27;EVT-104&#x27;,reason=&#x27;workspace_capture_time_limit&#x27;)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        try: yield</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        finally: self._lock.release()</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    def _workspace_quota(self,resources,project_id):</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        if sum(row.get(&#x27;workspace_snapshot&#x27;,{}).get(&#x27;project_id&#x27;)==project_id for row in resources.values())&gt;=self.MAX_WORKSPACE_SNAPSHOTS:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>            raise_code(&#x27;EVT-100&#x27;,reason=&#x27;workspace_snapshot_history_limit&#x27;)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    def _workspace_grant_ids(snapshot):</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        o=snapshot[&#x27;observation&#x27;]</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        return (o[&#x27;grant_id&#x27;],)+((o[&#x27;metadata_grant_id&#x27;],) if o[&#x27;metadata_grant_id&#x27;] else ())</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    def _workspace_snapshot_access(self,resources,row,actor):</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        value=row[&#x27;workspace_snapshot&#x27;];project=value[&#x27;project_id&#x27;]</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        self._context_owned({value[&#x27;snapshot_id&#x27;]:row},value[&#x27;snapshot_id&#x27;],&#x27;workspace_snapshot&#x27;,project,actor)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        self._context_project(resources,project)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        o=value[&#x27;observation&#x27;]</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        source=self._snapshot_grant(resources,project,o[&#x27;grant_id&#x27;])</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        if (source[&#x27;grant&#x27;][&#x27;revision&#x27;]!=o[&#x27;grant_revision&#x27;] or source[&#x27;source_seq&#x27;]!=o[&#x27;source_seq&#x27;]</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                or source[&#x27;grant&#x27;][&#x27;root_identity&#x27;]!=value[&#x27;root_identity&#x27;]):</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;workspace_snapshot_source_unavailable&#x27;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        if o[&#x27;metadata_grant_id&#x27;]:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>            meta=self._snapshot_grant(resources,project,o[&#x27;metadata_grant_id&#x27;])</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>            if (meta[&#x27;grant&#x27;][&#x27;revision&#x27;]!=o[&#x27;metadata_grant_revision&#x27;] or meta[&#x27;source_seq&#x27;]!=value[&#x27;metadata_grant_source_seq&#x27;]</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>                    or meta[&#x27;grant&#x27;][&#x27;root_identity&#x27;]!=value[&#x27;metadata_root_identity&#x27;]):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                raise_code(&#x27;GRD-403&#x27;,reason=&#x27;workspace_snapshot_source_unavailable&#x27;)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    def _workspace_latest(resources,value):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        matching=[row for row in resources.values() if &#x27;workspace_snapshot&#x27; in row</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            and row[&#x27;workspace_snapshot&#x27;][&#x27;project_id&#x27;]==value[&#x27;project_id&#x27;]</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            and row[&#x27;workspace_snapshot&#x27;][&#x27;created_by&#x27;]==value[&#x27;created_by&#x27;]</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>            and row[&#x27;workspace_snapshot&#x27;][&#x27;observation&#x27;][&#x27;grant_id&#x27;]==value[&#x27;observation&#x27;][&#x27;grant_id&#x27;]]</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        return max(matching,key=lambda row:row[&#x27;source_seq&#x27;])[&#x27;workspace_snapshot&#x27;][&#x27;snapshot_id&#x27;]</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    def _workspace_snapshot_summary(self,resources,row,*,detail=True):</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        value=row[&#x27;workspace_snapshot&#x27;];o=value[&#x27;observation&#x27;]</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        reasons=[]</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        if resources[value[&#x27;project_id&#x27;]][&#x27;project&#x27;][&#x27;revision&#x27;]!=value[&#x27;project_revision&#x27;]: reasons.append(&#x27;project_revision_changed&#x27;)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        if self._workspace_latest(resources,value)!=value[&#x27;snapshot_id&#x27;]: reasons.append(&#x27;workspace_snapshot_superseded&#x27;)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        public={k:v for k,v in value.items() if k not in {&#x27;created_by&#x27;,&#x27;observation&#x27;,&#x27;source_identity_digest&#x27;}}</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        public.update({k:v for k,v in o.items() if k not in {&#x27;source_seq&#x27;,&#x27;status&#x27;,&#x27;scope&#x27;,&#x27;persisted&#x27;,&#x27;executable&#x27;,&#x27;items&#x27;}})</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        public.update(items=[{**item,**change_flags(item)} for item in o[&#x27;items&#x27;]],</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            grant_source_seq=o[&#x27;source_seq&#x27;],source_seq=row[&#x27;source_seq&#x27;],digest=row[&#x27;digest&#x27;],created_at=row[&#x27;created_at&#x27;],</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            selected_untracked_paths=[item[&#x27;path&#x27;] for item in o[&#x27;items&#x27;] if item[&#x27;selected_untracked&#x27;]],</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            total_size_bytes=sum(item[&#x27;working&#x27;][&#x27;size_bytes&#x27;] for item in o[&#x27;items&#x27;] if item[&#x27;working&#x27;]),</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            status=&#x27;stale&#x27; if reasons else &#x27;captured&#x27;,stale_reasons=reasons,persisted=True,executable=False,live_source_freshness=&#x27;not_asserted&#x27;)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        if not detail:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            for field in (&#x27;items&#x27;,&#x27;tracked_paths&#x27;,&#x27;selected_untracked_paths&#x27;): public.pop(field)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        public[&#x27;receipt_digest&#x27;]=digest_of(canonical(public))</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        return public</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    def _verify_workspace_content(self,snapshot):</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        from pyharness.application.workspace_store import digest_of</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        from pyharness.application.source_snapshot import checked_private_bytes</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        seen={}</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        for item in snapshot.observation.items:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            for layer in (item.head,item.index,item.working):</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                if layer is not None: seen[layer.digest]=layer.size_bytes</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        for digest,size in seen.items():</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            try:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                path=self._snapshot_content(digest)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                if path.stat().st_size!=size: raise_code(&#x27;PERS-202&#x27;,reason=&#x27;workspace_content_size&#x27;)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                raw=checked_private_bytes(path)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            except OSError: raise_code(&#x27;PERS-202&#x27;,reason=&#x27;workspace_content_missing&#x27;)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            except PyHError as error:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                if error.code==&#x27;PERS-202&#x27;:raise</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                raise_code(&#x27;PERS-202&#x27;,reason=&#x27;workspace_content_unavailable&#x27;)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            if len(raw)!=size or digest_of(raw)!=digest: raise_code(&#x27;PERS-202&#x27;,reason=&#x27;workspace_content_digest&#x27;)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    def _validate_workspace_snapshot_definition(self,definition,resources,previous,event):</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        value=definition.model_dump();o=value[&#x27;observation&#x27;]</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        try:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            self._context_project(resources,value[&#x27;project_id&#x27;],value[&#x27;project_revision&#x27;])</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            self._workspace_quota(resources,value[&#x27;project_id&#x27;])</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            if previous is not None or value[&#x27;created_by&#x27;]!=event.payload[&#x27;actor_ref&#x27;]: raise ValueError(&#x27;immutable capture owner&#x27;)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            for ident,revision,seq,identity in [(o[&#x27;grant_id&#x27;],o[&#x27;grant_revision&#x27;],o[&#x27;source_seq&#x27;],value[&#x27;root_identity&#x27;]),</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                (o[&#x27;metadata_grant_id&#x27;],o[&#x27;metadata_grant_revision&#x27;],value[&#x27;metadata_grant_source_seq&#x27;],value[&#x27;metadata_root_identity&#x27;])]:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                if ident is None: continue</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                row=resources.get(ident,{});grant=row.get(&#x27;grant&#x27;,{})</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                if (grant.get(&#x27;project_id&#x27;)!=value[&#x27;project_id&#x27;] or grant.get(&#x27;revoked&#x27;) or grant.get(&#x27;revision&#x27;)!=revision</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                        or row.get(&#x27;source_seq&#x27;)!=seq or grant.get(&#x27;root_identity&#x27;)!=identity): raise ValueError(&#x27;capture source binding&#x27;)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        except (ValueError,PyHError): raise_code(&#x27;PERS-202&#x27;,reason=&#x27;workspace_capture_definition_binding&#x27;)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    def _workspace_confirmation(candidate,source,metadata,command):</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        return digest_of(canonical({&#x27;project_revision&#x27;:command.project_revision,&#x27;observation&#x27;:candidate.observation,</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            &#x27;identity_digest&#x27;:candidate.identity_digest,&#x27;root_identity&#x27;:source[&#x27;grant&#x27;][&#x27;root_identity&#x27;],</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            &#x27;metadata_root_identity&#x27;:metadata[&#x27;grant&#x27;][&#x27;root_identity&#x27;] if metadata else None,</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>            &#x27;metadata_source_seq&#x27;:metadata[&#x27;source_seq&#x27;] if metadata else None,&#x27;tracked_paths&#x27;:list(candidate.tracked_paths)}))</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    async def _collect_workspace_candidate(self,resources,project_id,grant_id,command,started,actor,authorize):</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        self._context_project(resources,project_id,command.project_revision)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        source=self._snapshot_grant(resources,project_id,grant_id,command.expected_revision)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        meta=self._snapshot_grant(resources,project_id,command.metadata_grant_id,command.metadata_grant_revision) if command.metadata_grant_id else None</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        self._workspace_storage_geometry(source,meta)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        remaining=self.MAX_WORKSPACE_CAPTURE_SECONDS-(time.monotonic()-started)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        if remaining&lt;=0: raise_code(&#x27;EVT-104&#x27;,reason=&#x27;workspace_capture_time_limit&#x27;)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        def before_body_read():</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            if authorize()!=actor: raise_code(&#x27;GRD-403&#x27;,reason=&#x27;workspace_capture_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            self._context_project(resources,project_id,command.project_revision)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            self._snapshot_grant(resources,project_id,grant_id,command.expected_revision)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            if command.metadata_grant_id:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                self._snapshot_grant(resources,project_id,command.metadata_grant_id,command.metadata_grant_revision)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>            self._workspace_storage_geometry(source,meta)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            self._context_finish(authorize,actor,resources,self._workspace_grant_ids({&#x27;observation&#x27;:{&#x27;grant_id&#x27;:grant_id,&#x27;metadata_grant_id&#x27;:command.metadata_grant_id}}))</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            if time.monotonic()-started&gt;=self.MAX_WORKSPACE_CAPTURE_SECONDS: raise_code(&#x27;EVT-104&#x27;,reason=&#x27;workspace_capture_time_limit&#x27;)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        try: candidate=await asyncio.wait_for(collect_workspace_git(source,meta,command,before_body_read=before_body_read),remaining)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        except TimeoutError: raise_code(&#x27;EVT-104&#x27;,reason=&#x27;workspace_capture_time_limit&#x27;)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        return candidate,source,meta</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    def _workspace_storage_geometry(self,source,metadata):</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        private=self.root.resolve(strict=True)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        for row in (source,metadata):</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            if row is None: continue</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            protected=Path(row[&#x27;grant&#x27;][&#x27;canonical_root&#x27;]).resolve(strict=True)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            if private.is_relative_to(protected) or protected.is_relative_to(private):</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                raise_code(&#x27;GRD-403&#x27;,reason=&#x27;workspace_storage_source_overlap&#x27;)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code></code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    def _workspace_capture_gate(self,project_id,grant_id,command,actor,authorize,candidate,started):</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        if authorize()!=actor: raise_code(&#x27;GRD-403&#x27;,reason=&#x27;workspace_capture_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        try: candidate.verify()</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        except (OSError,ValueError): raise_code(&#x27;GRD-403&#x27;,reason=&#x27;workspace_source_unavailable&#x27;)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        fresh,_=self._grant_state()</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        self._context_project(fresh,project_id,command.project_revision)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        self._snapshot_grant(fresh,project_id,grant_id,command.expected_revision)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        if command.metadata_grant_id:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>            self._snapshot_grant(fresh,project_id,command.metadata_grant_id,command.metadata_grant_revision)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        self._context_finish(authorize,actor,fresh,(grant_id,)+((command.metadata_grant_id,) if command.metadata_grant_id else ()))</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        if time.monotonic()-started&gt;=self.MAX_WORKSPACE_CAPTURE_SECONDS: raise_code(&#x27;EVT-104&#x27;,reason=&#x27;workspace_capture_time_limit&#x27;)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        return fresh</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code></code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    async def preview_workspace_snapshot(self,project_id,grant_id,command,*,authorize):</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            actor=authorize();await self._open(initialize=False)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>            resources,_=self._grant_state()</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            candidate,source,meta=await self._collect_workspace_candidate(resources,project_id,grant_id,command,started,actor,authorize)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            self._workspace_capture_gate(project_id,grant_id,command,actor,authorize,candidate,started)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>            result={**candidate.observation,&#x27;status&#x27;:&#x27;workspace_snapshot_confirmation_required&#x27;,&#x27;project_revision&#x27;:command.project_revision,</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                &#x27;tracked_paths&#x27;:list(candidate.tracked_paths),&#x27;scope&#x27;:&#x27;tracked_plus_selected_untracked&#x27;,</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                &#x27;confirmation_digest&#x27;:self._workspace_confirmation(candidate,source,meta,command)}</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>            from pyharness.application.workspace_store import canonical</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>            if len(canonical(result))&gt;self.MAX_CONTEXT_BYTES: raise_code(&#x27;EVT-100&#x27;,reason=&#x27;workspace_preview_bytes_limit&#x27;)</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            return result</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code></code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    async def capture_workspace_snapshot(self,project_id,grant_id,command,*,command_id,authorize):</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>            actor=authorize();await self._open(initialize=False)</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            request=digest_of(canonical({&#x27;operation&#x27;:&#x27;workspace_snapshot.capture&#x27;,&#x27;project_id&#x27;:project_id,&#x27;grant_id&#x27;:grant_id,&#x27;command&#x27;:command.model_dump()}))</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>            self._context_envelope(&#x27;workspace_snapshot&#x27;,command.snapshot_id,1,command_id,actor,request)</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            resources,commands=self._grant_state();self._context_project(resources,project_id)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>            old=commands.get((actor,command_id))</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            if old:</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                if old[0]!=request: raise_code(&#x27;EVT-100&#x27;,reason=&#x27;idempotency_conflict&#x27;)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                self._workspace_snapshot_access(resources,old[1],actor)</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                self._context_finish(authorize,actor,resources,self._workspace_grant_ids(old[1][&#x27;workspace_snapshot&#x27;]))</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                return self._workspace_snapshot_summary(resources,old[1])</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>            if command.snapshot_id in resources: raise_code(&#x27;EVT-101&#x27;,reason=&#x27;stale_revision&#x27;)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>            self._workspace_quota(resources,project_id)</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>            candidate,source,meta=await self._collect_workspace_candidate(resources,project_id,grant_id,command,started,actor,authorize)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>            confirmation=self._workspace_confirmation(candidate,source,meta,command)</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>            if confirmation!=command.confirmation_digest: raise_code(&#x27;EVT-101&#x27;,reason=&#x27;workspace_confirmation_changed&#x27;)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            definition=WorkspaceSnapshot(snapshot_id=command.snapshot_id,project_id=project_id,project_revision=command.project_revision,</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                created_by=actor,root_identity=source[&#x27;grant&#x27;][&#x27;root_identity&#x27;],metadata_root_identity=meta[&#x27;grant&#x27;][&#x27;root_identity&#x27;] if meta else None,</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                metadata_grant_source_seq=meta[&#x27;source_seq&#x27;] if meta else None,observation=candidate.observation,</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                tracked_paths=list(candidate.tracked_paths),confirmation_digest=confirmation,source_identity_digest=candidate.identity_digest)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            if len(canonical(definition.model_dump()))&gt;self.MAX_CONTEXT_BYTES: raise_code(&#x27;EVT-100&#x27;,reason=&#x27;workspace_capture_manifest_limit&#x27;)</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            # Include public per-layer flags and selected-untracked names in the</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            # pre-write budget. An unreadable oversized receipt must never commit.</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            prospective={&#x27;workspace_snapshot&#x27;:definition.model_dump(),&#x27;source_seq&#x27;:sum(1 for _ in self._session.events_after(0))+1,</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                &#x27;digest&#x27;:digest_of(canonical(definition.model_dump())),&#x27;created_at&#x27;:&#x27;2099-12-31T23:59:59.999999Z&#x27;}</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>            public=self._workspace_snapshot_summary({**resources,command.snapshot_id:prospective},prospective)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            if len(canonical(public))+1024&gt;self.MAX_CONTEXT_BYTES: raise_code(&#x27;EVT-100&#x27;,reason=&#x27;workspace_capture_receipt_limit&#x27;)</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            self._workspace_storage_geometry(source,meta)</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            self._workspace_capture_gate(project_id,grant_id,command,actor,authorize,candidate,started)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>            for digest,raw in candidate.contents.items(): self._write_snapshot_blob(self._snapshot_content(digest),raw)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            def gate():</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>                # A later immutable write must not leave an earlier referenced</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                # content blob corrupt at the commit decision.</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                self._verify_workspace_content(definition)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>                fresh=self._workspace_capture_gate(project_id,grant_id,command,actor,authorize,candidate,started)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                if command.snapshot_id in fresh: raise_code(&#x27;EVT-101&#x27;,reason=&#x27;stale_revision&#x27;)</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                self._workspace_quota(fresh,project_id)</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            resources,row=await self._append_context(definition,&#x27;workspace_snapshot&#x27;,command.snapshot_id,command_id,actor,request,gate)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>            try:</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>                self._workspace_snapshot_access(resources,row,actor)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                self._context_finish(authorize,actor,resources,self._workspace_grant_ids(row[&#x27;workspace_snapshot&#x27;]))</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            except PyHError:</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>                # The fact already committed. Deny the receipt, but never report</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>                # a pre-commit 403 that would discard the caller&#x27;s original key.</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                raise_code(&#x27;PERS-202&#x27;,reason=&#x27;workspace_commit_receipt_unavailable&#x27;)</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            return self._workspace_snapshot_summary(resources,row)</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code></code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>    async def workspace_snapshots(self,project_id,*,authorize,query):</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>            actor=authorize();await self._open(initialize=False)</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>            resources,_=self._grant_state();self._context_project(resources,project_id)</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            rows=[];ids=[]</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            for row in resources.values():</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>                value=row.get(&#x27;workspace_snapshot&#x27;)</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                if not value or value[&#x27;project_id&#x27;]!=project_id or value[&#x27;created_by&#x27;]!=actor: continue</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                try: self._workspace_snapshot_access(resources,row,actor)</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                except PyHError as exc:</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                    if exc.code==&#x27;GRD-403&#x27;: continue</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                    raise</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                rows.append(self._workspace_snapshot_summary(resources,row,detail=False));ids.extend(self._workspace_grant_ids(value))</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            self._context_finish(authorize,actor,resources,ids)</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            from pyharness.application.workspace_input_pages import workspace_input_page</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            return workspace_input_page(rows,query,kind=&#x27;snapshots&#x27;,project=project_id,actor=actor,watermark=sum(1 for _ in self._session.events_after(0)))</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code></code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    async def workspace_snapshot(self,project_id,snapshot_id,*,authorize,item_index=None,layer=None):</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>            actor=authorize();await self._open(initialize=False)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>            resources,_=self._grant_state()</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>            row=self._context_owned(resources,snapshot_id,&#x27;workspace_snapshot&#x27;,project_id,actor)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>            self._workspace_snapshot_access(resources,row,actor)</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>            result=self._workspace_snapshot_summary(resources,row)</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            if item_index is not None:</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>                items=row[&#x27;workspace_snapshot&#x27;][&#x27;observation&#x27;][&#x27;items&#x27;]</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>                if not 0&lt;=item_index&lt;len(items) or layer not in {&#x27;head&#x27;,&#x27;index&#x27;,&#x27;working&#x27;} or items[item_index][layer] is None:</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                    raise_code(&#x27;GRD-403&#x27;,reason=&#x27;workspace_file_unavailable&#x27;)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                file=items[item_index][layer]</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>                from pyharness.application.source_snapshot import checked_private_bytes</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                def before_read():</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>                    self._workspace_snapshot_access(resources,row,actor)</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>                    self._context_finish(authorize,actor,resources,self._workspace_grant_ids(row[&#x27;workspace_snapshot&#x27;]))</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>                try: raw=checked_private_bytes(self._snapshot_content(file[&#x27;digest&#x27;]),before_read=before_read)</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>                except OSError: raise_code(&#x27;PERS-202&#x27;,reason=&#x27;workspace_content_missing&#x27;)</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                from pyharness.application.workspace_store import digest_of</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>                if len(raw)!=file[&#x27;size_bytes&#x27;] or digest_of(raw)!=file[&#x27;digest&#x27;]: raise_code(&#x27;PERS-202&#x27;,reason=&#x27;workspace_content_digest&#x27;)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>                result=(raw,file[&#x27;digest&#x27;])</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>                self._workspace_snapshot_access(resources,row,actor)</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            self._context_finish(authorize,actor,resources,self._workspace_grant_ids(row[&#x27;workspace_snapshot&#x27;]))</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>            return result</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

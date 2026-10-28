@@ -1,0 +1,519 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/agent.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/agent.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 519 行</span></nav><main class="wrap source-page"><h1>pyharness/core/agent.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：77031fed0eb4d414cd9b5b86eabe1b510c412576<br>SHA-256（内容校验）：ca7eef0faa804ac8c456895deebeb8852d25d36020aacfc5a386f90651057472</p><p><a href="../../../architecture-detailed.html?node=agent">Agent Lifecycle（代理生命周期）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 22 个类、函数与方法</summary><ul><li><a href="#L71">_raise_busy（函数） · L71–L78</a></li><li><a href="#L82">Ctx（类） · L82–L122</a><ul><li><a href="#L95">Ctx.__init__（方法） · L95–L118</a></li><li><a href="#L120">Ctx.__repr__（方法） · L120–L122</a></li></ul></li><li><a href="#L126">_CapabilityHost（类） · L126–L140</a><ul><li><a href="#L134">_CapabilityHost.__init__（方法） · L134–L135</a></li><li><a href="#L137">_CapabilityHost.close（异步方法） · L137–L140</a></li></ul></li><li><a href="#L144">_resolve_headless（函数） · L144–L159</a></li><li><a href="#L162">_created_model（函数） · L162–L173</a></li><li><a href="#L177">Agent（类） · L177–L441</a><ul><li><a href="#L191">Agent.__init__（方法） · L191–L209</a></li><li><a href="#L212">Agent.enter（异步方法） · L212–L245</a></li><li><a href="#L247">Agent._rollback_enter（方法） · L247–L257</a></li><li><a href="#L259">Agent._release_occupancy（方法） · L259–L264</a></li><li><a href="#L267">Agent.submit（异步方法） · L267–L298</a></li><li><a href="#L301">Agent.close（异步方法） · L301–L347</a></li><li><a href="#L350">Agent.attach_capability（异步方法） · L350–L369</a></li><li><a href="#L371">Agent.announce（异步方法） · L371–L385</a></li><li><a href="#L387">Agent.detach_capability（异步方法） · L387–L410</a></li><li><a href="#L413">Agent._on_bus_event（异步方法） · L413–L422</a></li><li><a href="#L426">Agent.snapshot（方法） · L426–L441</a></li></ul></li><li><a href="#L445">create_agent（函数） · L445–L516</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/agent.py — 会话实体 + ctx 门面(specs/agent.py.md 契约;阶段 1 核心)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Agent 是会话的宿主(F007/F064 联动):持有 agent_id ↔ session_id 1:1 句柄,管理</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>生命周期 init/ready/busy/stopping/closed,是能力 seam 的消费端总闸。ctx 门面</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>构造期按拓扑序注入脊柱 8 模块(persistence→session→{scope,llm,tools,</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>system_prompt}→loop),能力层经 ctx.* 命名空间挂载调用(attach_capability =</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>DIS-SEAM announce 语义的消费侧入口)。</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>核心语义:</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>- 一会话一 agent:spine.active_agents 占位登记 + _session_lock 双保险(防双</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>  loop 竞争 seq);create_agent 查重 → BUSY;close 释放。</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>- submit = 外壳唯一写口:状态校验 → user.message 强同步落盘(先落盘后执行,</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>  崩溃一致性锚点)→ loop.wake;headless 模式 run 结束自动 close(reason)。</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>- session.finished 全生命周期至多一条(EVT-104),唯一合法写入路径 = close;</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>  close 幂等(stopping/closed 直接返回)。</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>- 错误全走 raise_code(EVT-1xx/PERS-2xx/BUSY/TLB-8xx),禁裸 raise str。</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>偏离说明(契约以 specs/agent.py.md 为准,以下为与既有实现冲突处的取舍):</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>1. created payload 的 model 字段:spec 伪码用 config.llm.primary,但 config.py</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>   已落地键面为 llm.model(CFG.md §3 权威,DEFAULTS/ENV_WHITELIST 同键)→ 取</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>   cfg.llm.model;llm 缺省时回落 &quot;deepseek-chat&quot;。</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>2. headless 判定:config.Settings 无 headless 键(CFG.md R8:headless 由外壳按</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   stdin 是否 tty 判定,无配置开关;load_settings 未知键被 extra=ignore 丢弃)→</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   解析顺序 cfg.headless(如存在)→ spine.headless → False,见 _resolve_headless。</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>3. registry.updated 留痕:spec 伪码 append 入会话日志,但 events.vocab 把</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>   registry.updated 列为瞬时事件,已实现的 session.append 对瞬时事件拒写</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>   (EVT-100,见 session.py 校验链)→ attach/announce/detach 的留痕改经</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   bus.emit 广播(与 &quot;registry.updated 仅经总线分发&quot; 的 events 层语义一致);</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   相应地 announce 无落盘信封可返,返回 None(签名保持 Optional[Envelope])。</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>4. 命名空间遮蔽护栏:ctx 六命名空间 {agent,session,storage,sys,ui,tools} 中与</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>   脊柱注入成员重名者(session/tools/storage/sys)若直接 setattr 会遮蔽 agent</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>   自身依赖的 ctx.session 等 → 按 INV-08 &quot;cap 不可覆盖脊柱对象&quot; 拒绝(仍抛</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   TLB-802);白名单外(ns=llm/scope/loop…)同样 TLB-802(GWT-A2-04 断言)。</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>5. submit 对 state=init 显式拒 BUSY(spec 状态机要求 enter 激活后方可 submit,</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   伪码未列此态,补防御)。</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>6. close 落盘 finished 失败时回滚 state 至原态再上抛——spec 异常表要求 close</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>   &quot;幂等可重入(PERS-202 repair 后重试)&quot;,若停在 stopping 则重试会被幂等短路,</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   永远写不上 finished;finished 落盘后的终局清理(摘订阅/注销/逆序 detach)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>   尽力而为,单步失败记日志不阻断终局达成。</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>7. _on_bus_event 的订阅模式 session:{sid}:* 按阶段 0 总线语义(按事件 type 前缀</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>   匹配)实际不命中任何会话事件——事件由 session 分发/落盘,此处订阅仅为</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>   规范占位 + 会话语义兜底过滤。2026-09-14 S1-02(ADR-014):原&quot;approval.granted</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>   + loop.state=paused → loop.resume()&quot;分支已删除——AgentLoop 从无 paused 态、</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>   亦无 resume() 方法,该分支不可达且一旦可达即 AttributeError。运行时暂停/</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>   恢复推迟至 v1.1 Runtime Recovery。</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>import logging</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>import uuid</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>from typing import TYPE_CHECKING, Any, Optional</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code></code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>if TYPE_CHECKING:  # 仅类型标注;装配对象一律鸭子注入,不硬 import 阶段后模块</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    from pyharness.events import Envelope</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>log = logging.getLogger(&quot;pyharness.agent&quot;)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code># 通道身份未声明哨兵(GAP-11)。**三态**:具体字符串 = 人类通道;``None`` = 外壳</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code># 已显式声明 headless(无人类通道,合法 SYSTEM 主体);本哨兵 = 装配层从未声明</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code># ⇒ ``create_agent``/``_runtime_ctx`` **不写** ``ctx.channel`` 属性 ⇒ 治理层</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code># ``principal_of`` 见属性缺失即 ``APR-503`` fail-closed。三种情形互不等价,</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code># 故不能用 ``None`` 兼任&quot;未声明&quot;——那正是修复前静默降级为 system 的根因。</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>CHANNEL_UNDECLARED: Any = object()</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code># 生命周期合法取值(§状态机;类型标注 + 文档锚,不引入运行时枚举开销)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>AGENT_STATES = (&quot;init&quot;, &quot;ready&quot;, &quot;busy&quot;, &quot;stopping&quot;, &quot;closed&quot;)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>def _raise_busy(**ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    &quot;&quot;&quot;字面量 BUSY 上抛(BUSY = 无域前缀字面量码,ERR.md §2.11)。</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    errors.raise_code 对未登记码兜底改判 CYC-999,故 BUSY 按 spec 伪码</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    (raise PyHError(&quot;BUSY&quot;, ctx=…))直接构造——code 字段保持字面量 BUSY,</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    供调用方/测试按 .code 断言;结构化错误(EVT/PERS/TLB)仍走 raise_code。</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    raise PyHError(&quot;BUSY&quot;, ctx=dict(ctx))</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code># ------------------------------------------------------------------ ctx 门面</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>class Ctx:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    &quot;&quot;&quot;Agent.ctx 门面:内聚 session/scope/tools/llm/loop + 能力挂载面。</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    构造期按拓扑序注入脊柱模块(依赖环不可能,INV-08);bus/registry/config/</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    host 由 create_agent 装配期补线。能力经 attach_capability 以命名空间挂载</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    (setattr),能力层只认 ctx 契约不认实现(原则 2)。</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    # 六命名空间白名单:能力挂载点(PRD §2.3);脊柱对象(scope/llm/loop/bus/</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    # registry/config/host 等)不在白名单 → 挂载越界即 TLB-802(GWT-A2-04)。</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    NAMESPACES: frozenset = frozenset(</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        {&quot;agent&quot;, &quot;session&quot;, &quot;storage&quot;, &quot;sys&quot;, &quot;ui&quot;, &quot;tools&quot;})</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    def __init__(self, *, session: Any = None, scope: Any = None,</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                 tools: Any = None, llm: Any = None, loop: Any = None,</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                 sys: Any = None, storage: Any = None,</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                 persistence: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        # 脊柱 8 模块(按注入拓扑序;scope/llm/tools 可能为 None——阶段 1 装配期</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        # 逐模块落地,agent 只依赖 session/loop/tools/bus/registry)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        self.session = session          # SessionLog 事件日志门面</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        self.scope = scope              # 作用域:预算/窗口(F032 闸源)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        self.tools = tools              # 工具注册表(register_definition…)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        self.llm = llm                  # LLM 客户端(唯一 chat 出口归 agent_loop)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        self.loop = loop                # 三态机循环驱动器(wake/cancel/resume)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        self.sys = sys                  # 系统边界能力命名空间占位</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        self.storage = storage          # 域存储(spill/kv)占位</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        # JSONL 真源存储(SessionStore)。**当前无 in-repo 读取方**(L-14):</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        # spec `desktop.py.md:266` 曾规定 `self.ctx.persistence.flush_sync()` 作兜底</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        # flush,但实现已由 `DesktopApp._flush_persistence_async` + `Manager.shutdown_all`</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        # 取代(R14-13)。**保留为可用门面**(插件/未来消费方可直达 store);</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        # 会话内的真源读写正路仍是 `SessionLog._persistence`。</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        self.persistence = persistence</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        # 装配期后补(create_agent 接线;None 哨兵 = 尚未注入)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        self.bus: Any = None            # EventBus:注册表/能力留痕出口</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        self.registry: Any = None       # Registry:plugin/tool/capability 索引</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        self.config: Any = None         # Settings 启动只读快照</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        self.host: Any = None           # 能力宿主(close = 逆序 detach 全部 caps)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code></code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    def __repr__(self) -&gt; str:  # 调试可读</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        return (f&quot;&lt;Ctx session={getattr(self.session, &#x27;sid&#x27;, None)!r} &quot;</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                f&quot;loop={getattr(self.loop, &#x27;state&#x27;, None)!r}&gt;&quot;)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code></code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code># ------------------------------------------------------------------ 能力宿主</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>class _CapabilityHost:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    &quot;&quot;&quot;能力宿主适配器(DIS-SEAM §2.4):ctx.host.close = 逆序 detach 已装载能力。</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code></code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    真正的 CapabilityHost(注册表驱动,阶段 3+)落地前,由本适配器把&quot;会话关闭</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    → 逆序 detach 全部 caps&quot;的职责绑到 Agent 自身挂载面;半卸 &gt; 僵尸——单个</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    detach 内部消化失败,不阻断其余摘除(见 detach_capability)。</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    def __init__(self, agent: &quot;Agent&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        self._agent = agent</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code></code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    async def close(self) -&gt; None:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        &quot;&quot;&quot;逆序摘除全部已挂载能力(后挂先摘,与 attach 序相反)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        for ns in reversed(list(self._agent.caps)):</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            await self._agent.detach_capability(ns)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code></code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code></code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code># ------------------------------------------------------------------ 装配辅助</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>def _resolve_headless(config: Any, spine: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    &quot;&quot;&quot;headless 解析(config.Settings 无此键,CFG.md R8:外壳按 stdin tty 判定)。</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code></code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    顺序:cfg.headless(显式注入/非 Settings 配置对象)→ spine.headless(装配层</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    挂载的运行上下文)→ False(交互默认)。见模块 docstring 偏离 2。</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    for holder in (config, spine):</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        if holder is None:</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            continue</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        try:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>            v = getattr(holder, &quot;headless&quot;, None)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        except Exception:  # noqa: BLE001 防御:第三方对象 getattr 钩子异常</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            v = None</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        if v is not None:</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            return bool(v)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    return False</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code></code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code></code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>def _created_model(config: Any) -&gt; str:</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    &quot;&quot;&quot;session.created payload 的 model 字段取值。</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code></code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    spec 伪码用 config.llm.primary;config.py 已实现键面为 llm.model</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    (CFG.md §3 权威)→ 取 llm.model,缺失回落默认模型名(见偏离 1)。</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    llm = getattr(config, &quot;llm&quot;, None)</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    if llm is not None:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        model = getattr(llm, &quot;model&quot;, None)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        if model:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            return model</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    return &quot;deepseek-chat&quot;</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code></code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code></code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code># ------------------------------------------------------------------ Agent</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>class Agent:</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>    &quot;&quot;&quot;会话实体(F007/F064):一会话一 agent 句柄 + ctx 门面 + 生命周期管理。</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code></code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    状态机(§specs/agent.py.md):</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        INIT ─enter()→ READY ─submit()→ BUSY ─run 结束(loop idle)→ READY</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        READY/BUSY ─close()→ STOPPING →(清理完成)→ CLOSED(终局)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        CLOSED 后 submit/enter → BUSY 显式拒(不排队不静默)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code></code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    字段:agent_id/session_id(1:1 不可换)、state、ctx(Ctx 门面)、caps(已挂载</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>    命名空间 → iface 束)、config(Settings 只读)、headless(自动关会话判定)、</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    _session_lock(一会话一 agent 互斥:enter 抢占,close 释放)、_created_event</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>    (created 首事件守卫,EVT-106)。</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code></code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    def __init__(self, agent_id: str, session_id: str,</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                 state: str = &quot;init&quot;, config: Any = None,</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                 caps: Optional[dict[str, Any]] = None, *,</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                 headless: Optional[bool] = None) -&gt; None:</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>        if state not in AGENT_STATES:  # 构造期即锁死合法态(防非法字面量漂移)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>            _raise_busy(state=state, detail=&quot;非法生命周期初值&quot;)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        self.agent_id: str = agent_id</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        self.session_id: str = session_id</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        self.state: str = state</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        self.config: Any = config              # CFG 启动只读快照(Settings)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        self.caps: dict[str, Any] = dict(caps or {})   # 已挂载能力命名空间</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        # headless 决定 run 结束是否自动 close;显式注入优先,否则回落配置</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        self.headless: bool = (bool(headless) if headless is not None</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                               else _resolve_headless(config, None))</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        self.ctx: Ctx = None                   # 门面:create_agent 硬接线注入</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        self._spine: Any = None                # 装配束引用(active_agents 释放)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        self._session_lock: bool = False       # 一会话一 agent 互斥(enter 抢占)</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        self._created_event: bool = False      # created 已落守卫(EVT-106)</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        self._registered: bool = False         # registry 插件注册记账(幂等注销)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    # ========================================================== 会话占位激活</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>    async def enter(self) -&gt; None:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        &quot;&quot;&quot;会话占位激活:引导 created(新会话 seq=1)→ 注册 → 订阅 → ready。</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code></code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        幂等:已 ready/busy 直接返回;stopping/closed 拒(BUSY,建议新建 agent)。</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        失败回滚:释放 active_agents 占位与注册表项,保持可重试(enter 失败则</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        回滚释放,spec 工厂注释语义)。</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        if self.state in (&quot;ready&quot;, &quot;busy&quot;):</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>            return                                # 幂等:已激活直接返回</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        if self.state in (&quot;stopping&quot;, &quot;closed&quot;):</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>            _raise_busy(advice=&quot;句柄已关闭,请 create 新 agent&quot;)</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        try:</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            # 新会话引导:首事件 seq=1(EVT-106 守卫由 session.append 把关);</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>            # 会话已有事件(恢复回放)则 created 已在日志,跳过追加</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>            if (not self._created_event</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                    and self.ctx.session.stats()[&quot;seq&quot;] == 0):</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                await self.ctx.session.append(</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                    &quot;session.created&quot;,</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                    {&quot;title&quot;: &quot;&quot;, &quot;model&quot;: _created_model(self.config)},</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                    actor=&quot;system&quot;, sync=True)</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            self._created_event = True</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            # F003:注册自身,可被外壳/宿主寻址(plugin:{agent_id})</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            self.ctx.registry.register(&quot;plugin&quot;, self.agent_id, self)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>            self._registered = True</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>            # 订阅本会话事件流(owner=agent_id,close 时按属主精确摘除)</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>            self.ctx.bus.subscribe(f&quot;session:{self.session_id}:*&quot;,</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>                                   self._on_bus_event, owner=self.agent_id)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>            self.state = &quot;ready&quot;</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>            self._session_lock = True             # 抢占会话互斥(占用占位)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>            log.info(&quot;agent ready&quot;, agent_id=self.agent_id,</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>                     session=self.session_id)</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        except BaseException:</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            self._rollback_enter()</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            raise</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code></code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>    def _rollback_enter(self) -&gt; None:</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        &quot;&quot;&quot;enter 失败回滚:注销已注册插件项 + 释放会话占位(半激活 &gt; 僵尸)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        if self._registered:</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>            try:</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>                self.ctx.registry.unregister(&quot;plugin&quot;, self.agent_id)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>            except PyHError as e:</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>                if e.code != &quot;TLB-801&quot;:</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                    log.error(&quot;enter rollback unregister failed&quot;,</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>                              code=e.code)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            self._registered = False</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        self._release_occupancy()</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code></code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>    def _release_occupancy(self) -&gt; None:</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        &quot;&quot;&quot;释放会话占位:active_agents 摘除 + 互斥锁复位(close/回滚共用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        self._session_lock = False</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        aa = getattr(self._spine, &quot;active_agents&quot;, None)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        if aa is not None and aa.get(self.session_id) is self:</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            aa.pop(self.session_id, None)</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code></code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>    # ========================================================== 外壳唯一入口</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>    async def submit(self, text: str, *,</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>                     meta: Optional[dict] = None) -&gt; Any:</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        &quot;&quot;&quot;外壳唯一写口:user.message 强同步落盘 → loop.wake(idle 拉起/入队)。</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code></code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        三壳(CLI/桌面/ACP)平权同路径,无特权通道;写操作与用户输入同级过</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        session.append 校验链。headless=True 且 run 同步结束时自动 close。</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        返回 loop.wake 的结果(RunResult | None;RunResult 属 agent_loop 模块,</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        此处鸭子返回)。meta 为外壳透传参数(当前规范未消费,保留签名)。</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code></code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        异常:BUSY(未 enter/已关闭)、EVT-100(空消息)、PERS-202(强同步落盘</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        失败,repair 后重试——输入未生效不丢话)。</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        if self.state == &quot;init&quot;:                  # 状态机:enter 后方可 submit</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>            _raise_busy(advice=&quot;agent 未激活:先 await enter() 再 submit&quot;)</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        if self.state in (&quot;stopping&quot;, &quot;closed&quot;):</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>            _raise_busy(advice=&quot;会话已关闭,请新开会话&quot;)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        if not text or not text.strip():          # 空消息:信封层前置拒绝</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;content&quot;, advice=&quot;消息不能为空&quot;)</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        self.state = &quot;busy&quot;                       # busy = loop running 透传</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        try:</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>            # 强同步①:user.message 落盘成功才继续(崩溃一致性锚点,§3.6)</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            env = await self.ctx.session.append(</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                &quot;user.message&quot;, {&quot;content&quot;: text}, actor=&quot;user&quot;, sync=True)</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>            result = await self.ctx.loop.wake(env)   # idle→run;running→入队</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>            if self.headless and result is not None: # headless:run 结束即关会话</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>                await self.close(reason=getattr(result, &quot;reason&quot;, &quot;complete&quot;))</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            return result</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>        finally:</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>            # 交互模式:run 自然结束(loop 回 idle)且会话保持 → 回 READY</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>            if (self.state == &quot;busy&quot;</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>                    and getattr(self.ctx.loop, &quot;state&quot;, None) == &quot;idle&quot;):</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                self.state = &quot;ready&quot;</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code></code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>    # ========================================================== 会话关闭</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>    async def close(self, reason: str = &quot;idle&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        &quot;&quot;&quot;会话关闭(session.finished 唯一归属;幂等)。</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code></code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>        流程:stopping 置位 → 在途 run 声明式取消(cancel reason=close)→</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>        session.finished 强同步落盘(EVT-104 单次;失败回滚 state 供重试)→</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>        终局清理(close_marker/摘订阅/注销插件句柄/逆序 detach 全部 caps,</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        尽力而为)→ 释放会话互斥 → closed。</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code></code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>        异常:EVT-104(日志已有 finished = 绕过本路径的写口,INV-01 追查)、</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        PERS-202(finished 落盘失败,state 回滚,repair 后重试可重入)。</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        if self.state in (&quot;stopping&quot;, &quot;closed&quot;):</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>            return                                  # 幂等:双触发(外壳/repair)安全</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>        prev, self.state = self.state, &quot;stopping&quot;</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        # 1) 有在途 run → 先声明式取消(协作式,不杀进程)。S1-02:原判据含 &quot;paused&quot;,</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        #    但 loop 无该态(ADR-014),收敛为唯一在途态 &quot;running&quot;。</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        if getattr(self.ctx.loop, &quot;state&quot;, None) == &quot;running&quot;:</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>            await self.ctx.loop.cancel(reason=&quot;close&quot;)</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        # 2) finished 唯一写路径:失败回滚 state → close 可重入(见偏离 6)</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        try:</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>            await self.ctx.session.append(&quot;session.finished&quot;,</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>                                          {&quot;reason&quot;: reason},</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>                                          actor=&quot;system&quot;, sync=True)</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        except BaseException:</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>            self.state = prev</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>            raise</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        # 3) 终局清理:单步失败记日志不阻断终局(半卸 &gt; 僵尸)</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        try:</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>            self.ctx.session.close_marker()          # SessionLog._closed=True</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>            self.ctx.bus.unsubscribe_all(owner=self.agent_id)  # 摘订阅</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>            if self._registered:                     # 释放句柄寻址</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>                try:</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>                    self.ctx.registry.unregister(&quot;plugin&quot;, self.agent_id)</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>                except PyHError as e:                # TLB-801:已摘(双触发/repair)</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>                    if e.code != &quot;TLB-801&quot;:</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>                        raise</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>                finally:</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>                    self._registered = False</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>            await self.ctx.host.close()              # 逆序 detach 全部 caps</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>        except PyHError as e:</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>            log.error(&quot;agent close cleanup failed&quot;, agent_id=self.agent_id,</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>                      code=e.code, exc=str(e))</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>        finally:</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>            self._release_occupancy()                # 释放会话互斥(可新开)</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>            self.state = &quot;closed&quot;                    # 终局</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>        log.info(&quot;agent closed&quot;, agent_id=self.agent_id,</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>                 session=self.session_id, reason=reason)</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code></code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>    # ========================================================== 能力挂载面</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>    async def attach_capability(self, ns: str, iface: Any) -&gt; None:</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>        &quot;&quot;&quot;能力挂载(announce 语义消费侧入口):白名单校验 → 挂载 → announce。</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code></code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        ns 越出六命名空间白名单 → TLB-802;ns 与脊柱注入成员重名(遮蔽 agent</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        自身依赖)→ TLB-802(INV-08 cap 不可覆盖);重复挂载 → TLB-801。</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>        挂载成功后 ctx.{ns} 立即可消费,并 announce 留痕广播(DIS-SEAM §2.4)。</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        if ns not in Ctx.NAMESPACES:                 # 白名单越界(TLB-802)</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>            raise_code(&quot;TLB-802&quot;, what=f&quot;ctx.{ns}&quot;,</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>                       advice=&quot;脊柱命名空间不接受插件挂载(INV-08);&quot;</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>                              &quot;脊柱子系统注册走 BUS-002&quot;)</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>        if ns in self.caps:</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>            raise_code(&quot;TLB-801&quot;, what=f&quot;ctx.{ns}&quot;,</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>                       detail=f&quot;命名空间 {ns} 已挂载:先 detach_capability 再挂&quot;)</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        if hasattr(self.ctx, ns):                    # 遮蔽脊柱成员 = 破坏依赖</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>            raise_code(&quot;TLB-802&quot;, what=f&quot;ctx.{ns}&quot;,</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>                       advice=&quot;命名空间与脊柱注入成员重名,cap 不可覆盖(INV-08)&quot;)</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>        self.caps[ns] = iface                        # iface = Definition + Provider 束</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>        setattr(self.ctx, ns, iface)                 # 挂载后 ctx.{ns} 立即可消费</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>        await self.announce(ns)                      # registry.updated 留痕广播</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code></code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>    async def announce(self, ns: str) -&gt; Optional[&quot;Envelope&quot;]:</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>        &quot;&quot;&quot;能力就绪宣布:registry.updated 广播 + expose_to_llm 进 tools 注册表。</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code></code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>        无此能力(attach 前调用)→ 静默返回 None。留痕为瞬时总线广播(session</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>        append 拒瞬时事件,见偏离 3),无落盘信封可返 → 恒返回 None。</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>        iface = self.caps.get(ns)</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        if iface is None:</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>            return None                              # 无此能力:静默</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>        if getattr(iface, &quot;expose_to_llm&quot;, False):   # 声明对 LLM 可见</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>            self.ctx.tools.register_definition(iface.definition)</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        await self.ctx.bus.emit(                     # F003 语义留痕(瞬时)</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>            &quot;registry.updated&quot;,</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>            {&quot;op&quot;: &quot;attach&quot;, &quot;kind&quot;: &quot;capability&quot;, &quot;key&quot;: ns})</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>        return None</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code></code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>    async def detach_capability(self, ns: str) -&gt; None:</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>        &quot;&quot;&quot;能力摘除(幂等):注销工具定义 → ctx 摘除 → registry.updated(op=del)。</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code></code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>        未挂载 → 直接返回;单步失败内部消化并告警留痕,继续摘除剩余步骤</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>        (半卸 &gt; 僵尸,spec:detach 抛错仍继续,失败标记 broken)。</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>        if ns not in self.caps:</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>            return                                   # 幂等:已 detached</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>        iface = self.caps.pop(ns)</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>        try:</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>            if getattr(iface, &quot;expose_to_llm&quot;, False):</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>                self.ctx.tools.unregister_definition(iface.definition.name)</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>            if hasattr(self.ctx, ns):</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>                delattr(self.ctx, ns)                # ctx 门面摘除</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>            await self.ctx.bus.emit(                 # op=del 留痕(瞬时)</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>                &quot;registry.updated&quot;,</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>                {&quot;op&quot;: &quot;del&quot;, &quot;kind&quot;: &quot;capability&quot;, &quot;key&quot;: ns})</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>        except Exception as e:                       # 半卸 &gt; 僵尸:告警不中断</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>            log.error(&quot;cap detach failed&quot;, ns=ns, exc=e)</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>            try:</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>                await self.ctx.bus.emit(&quot;bus.backpressure&quot;,</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>                                        {&quot;ns&quot;: ns, &quot;broken&quot;: True})</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>            except Exception:                        # noqa: BLE001 告警自身失败</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>                log.error(&quot;cap detach alert failed&quot;, ns=ns)</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code></code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>    # ========================================================== 事件订阅回调</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>    async def _on_bus_event(self, type_: str, env: Any) -&gt; None:</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>        &quot;&quot;&quot;会话事件订阅入口(owner=agent_id;按 session:{sid}:* 前缀投递)。</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code></code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>        前缀订阅兜底过滤(env.session_id 必须为本会话);事件事实已在日志,</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>        本钩子只做可见性判定,**绝不改动状态**(S1-02 删除原 approval.granted →</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>        loop.resume 分支,该分支不可达且引用了不存在的方法,见模块 docstring 7)。</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>        订阅者异常由总线 EVT-103 封装隔离。</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>        if getattr(env, &quot;session_id&quot;, None) != self.session_id:</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>            return                                   # 前缀订阅兜底过滤</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>        # 其余事件:事实已在日志,此处只做可见性钩子,禁止改动状态</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code></code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>    # ========================================================== 只读查询</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>    def snapshot(self) -&gt; dict:</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>        &quot;&quot;&quot;只读句柄查询(外壳/审计):纯只读,禁止由此路径修改状态。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>        loop_state = getattr(self.ctx.loop, &quot;state&quot;, None) if self.ctx else None</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>        seq = 0</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>        if self.ctx is not None and self.ctx.session is not None:</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>            seq = self.ctx.session.stats()[&quot;seq&quot;]</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>        pending = getattr(self.ctx.loop, &quot;pending&quot;, None) if self.ctx else None</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>        return {</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>            &quot;agent_id&quot;: self.agent_id,</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>            &quot;session_id&quot;: self.session_id,</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>            &quot;state&quot;: self.state,</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>            &quot;loop_state&quot;: loop_state,</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>            &quot;seq&quot;: seq,</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>            &quot;queue_len&quot;: len(pending) if pending is not None else 0,</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>            &quot;caps&quot;: sorted(self.caps),</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>        }</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code></code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code></code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code># ------------------------------------------------------------------ 工厂</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>def create_agent(session_id: str, spine: Any, cfg: Any) -&gt; Agent:</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>    &quot;&quot;&quot;会话实体工厂:脊柱硬接线 + ctx 装配 + 会话占位登记(纯构造,不 activate)。</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code></code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>    一会话一 agent(DIS §2.6-1):active_agents 已有同会话 agent → BUSY(防双</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>    loop 竞争 seq)。构造 state=init,必须经 await agent.enter() 激活方可</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>    submit;enter 失败则回滚释放占位。</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code></code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>    异常:BUSY(同会话已有 active agent / state 非法)、TLB-801(enter 阶段</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>    registry 重名注册,由 enter 上抛)。</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code></code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>    参数:spine = 8 模块束(session/bus/registry/scope/tools/llm/loop/… +</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>    active_agents 占位表);cfg = 分层配置 Settings。</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>    aa = getattr(spine, &quot;active_agents&quot;, None)</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>    if aa is None:                     # 防御:装配束未建占位表 → 就地补建</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>        aa = {}</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>        spine.active_agents = aa</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>    if session_id in aa:</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>        _raise_busy(session_id=session_id,</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>                   advice=&quot;该会话已有 active agent,请复用句柄或新开会话&quot;)</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>    ag = Agent(agent_id=uuid.uuid4().hex, session_id=session_id,</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>               state=&quot;init&quot;, config=cfg, caps={},</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>               headless=_resolve_headless(cfg, spine))</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code>    # ctx 装配:脊柱 8 模块按拓扑序注入(依赖环不可能,INV-08);sys/storage/</code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code>    # persistence 允许缺席(阶段装配期逐模块落地,getattr 兜底 None)</code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>    ag.ctx = Ctx(session=spine.session, scope=getattr(spine, &quot;scope&quot;, None),</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>                 tools=getattr(spine, &quot;tools&quot;, None),</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>                 llm=getattr(spine, &quot;llm&quot;, None),</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>                 loop=getattr(spine, &quot;loop&quot;, None),</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>                 sys=getattr(spine, &quot;sys&quot;, None),</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code>                 storage=getattr(spine, &quot;storage&quot;, None),</code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>                 persistence=getattr(spine, &quot;persistence&quot;, None))</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>    ag.ctx.bus = spine.bus                       # 事件总线(留痕/订阅出口)</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code>    ag.ctx.registry = spine.registry             # 注册表(F003 寻址)</code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code>    ag.ctx.config = cfg</code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code>    ag.ctx.platform_runtime = getattr(spine, &#x27;platform_runtime&#x27;, None)</code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>    # 出口脱敏单口(F016/INV-09):tool_fs / tool_web / spill 三处读 ``ctx.redact``,</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>    # 但 2026-09-21 R10 前**全库无注入点** ⇒ 生产恒缺失 ⇒ fs/web 出口静默降级为</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>    # 不打码(实测 read_file 输出的 `API_KEY=sk-AAAA…` 原文进事件与 LLM 上下文)。</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>    # 唯一注入源 = `config.redactor_of(cfg)`(含 log.redact_enabled 开关语义)。</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code>    from pyharness.config import redactor_of</code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>    ag.ctx.redact = redactor_of(cfg)</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code>    # 通道身份(GAP-11):外壳在装配期经 ``EngineSpine.channel`` 声明,此处落到</code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code>    # agent ctx——治理层 ``authorize()`` 收到的是**本 ctx**,不是外壳自己的 ctx,</code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>    # 故该跳缺失会让每次决策静默降级为 SYSTEM 主体。未声明(= 哨兵)时**不写属性**,</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>    # 由 ``principal_of`` 见属性缺失即 APR-503 fail-closed(绝不静默降级)。</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code>    _chan = getattr(spine, &quot;channel&quot;, CHANNEL_UNDECLARED)</code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code>    if _chan is not CHANNEL_UNDECLARED:</code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code>        ag.ctx.channel = _chan</code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code>    ag.ctx.guard = getattr(spine, &quot;guard&quot;, None)      # guard 链(executor 关3,F031 兜底)</code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code>    ag.ctx.governance = getattr(spine, &quot;governance&quot;, None)  # 治理层单实例(ADR-018;S2-3)</code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code>    ag.ctx.approval = getattr(spine, &quot;approval&quot;, None)  # 审批(executor 转审批 F015)</code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code>    ag.ctx.counters = getattr(spine, &quot;counters&quot;, None)  # F032 预算闸数据源(report_usage 写)</code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code>    ag.ctx.sysprompt = getattr(spine, &quot;sysprompt&quot;, None)  # F010 装配器(agent 出网前挂)</code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code>    ag.ctx.compactor = getattr(spine, &quot;compactor&quot;, None)  # F058 压缩器(请求边界触发)</code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>    ag.ctx.goals = getattr(spine, &quot;goals&quot;, None)  # F047 目标管理器(goal.* 工具 + sysprompt 段)</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code>    ag.ctx.todos = getattr(spine, &quot;todos&quot;, None)  # #32 待办管理器(todo.* 工具)</code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code>    ag.ctx.ask = getattr(spine, &quot;ask&quot;, None)      # #38 反问宿主(user.ask 工具)</code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>    ag.ctx.skills = getattr(spine, &quot;skills&quot;, None)  # F073 技能管理器(skill.load + 目录段)</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>    ag.ctx.plan = getattr(spine, &quot;plan&quot;, None)    # F045/F046 计划模式</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code>    ag.ctx.schedule = getattr(spine, &quot;schedule&quot;, None)  # F048 调度器</code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code>    ag.ctx.jobs = getattr(spine, &quot;jobs&quot;, None)    # F051 后台任务</code></div>
+<div class="code-line" id="L507"><a class="line-number" href="#L507">507</a><code>    ag.ctx.subagent = getattr(spine, &quot;subagent&quot;, None)  # F049 子 Agent</code></div>
+<div class="code-line" id="L508"><a class="line-number" href="#L508">508</a><code>    ag.ctx.search_backend = getattr(spine, &quot;search_backend&quot;, None)  # F037</code></div>
+<div class="code-line" id="L509"><a class="line-number" href="#L509">509</a><code>    ag.ctx.streaming = bool(getattr(spine, &quot;streaming&quot;, False))  # F027 流式开关</code></div>
+<div class="code-line" id="L510"><a class="line-number" href="#L510">510</a><code>    ag.ctx.budget = getattr(spine, &quot;budget&quot;, None)  # F032 只读预算门面(仪表盘/报表)</code></div>
+<div class="code-line" id="L511"><a class="line-number" href="#L511">511</a><code>    ag.ctx.session_query = getattr(spine, &quot;fts&quot;, None)  # F057 索引句柄(懒激活后回填)</code></div>
+<div class="code-line" id="L512"><a class="line-number" href="#L512">512</a><code>    ag.ctx.tool_registry = getattr(spine, &quot;tool_registry&quot;, None)  # 工具注册表(F057 announce 注册面)</code></div>
+<div class="code-line" id="L513"><a class="line-number" href="#L513">513</a><code>    ag.ctx.host = _CapabilityHost(ag)            # 关闭时逆序 detach 全部 caps</code></div>
+<div class="code-line" id="L514"><a class="line-number" href="#L514">514</a><code>    ag._spine = spine                            # 释放占位需回写装配束</code></div>
+<div class="code-line" id="L515"><a class="line-number" href="#L515">515</a><code>    aa[session_id] = ag                          # 占位登记(enter 失败回滚释放)</code></div>
+<div class="code-line" id="L516"><a class="line-number" href="#L516">516</a><code>    return ag</code></div>
+<div class="code-line" id="L517"><a class="line-number" href="#L517">517</a><code></code></div>
+<div class="code-line" id="L518"><a class="line-number" href="#L518">518</a><code></code></div>
+<div class="code-line" id="L519"><a class="line-number" href="#L519">519</a><code>__all__ = [&quot;Agent&quot;, &quot;Ctx&quot;, &quot;create_agent&quot;, &quot;CHANNEL_UNDECLARED&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

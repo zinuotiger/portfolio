@@ -1,0 +1,389 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/repair_scan.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/repair_scan.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 389 行</span></nav><main class="wrap source-page"><h1>pyharness/repair_scan.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：8202f28c0a5ce35fd12fab8ea74528efeb5a047b<br>SHA-256（内容校验）：8bc71b19fead944488f44cbea32f0e71be19aef2e92ebb6266e82602827d3d47</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 22 个类、函数与方法</summary><ul><li><a href="#L22">now_ts（函数） · L22–L24</a></li><li><a href="#L26">_rotated_segments（函数） · L26–L37</a></li><li><a href="#L39">_segment_damage（函数） · L39–L54</a></li><li><a href="#L56">_segment_scan（函数） · L56–L83</a></li><li><a href="#L85">_seg_label（函数） · L85–L88</a></li><li><a href="#L90">_session_content_last（函数） · L90–L107</a></li><li><a href="#L109">_is_aux_file（函数） · L109–L115</a></li><li><a href="#L117">SessionHealth（类） · L117–L129</a></li><li><a href="#L131">QuarantineEntry（类） · L131–L138</a></li><li><a href="#L140">RepairReport（类） · L140–L157</a></li><li><a href="#L159">RepairPolicy（类） · L159–L165</a></li><li><a href="#L167">_parse_or_none（函数） · L167–L181</a></li><li><a href="#L183">_indexable（函数） · L183–L195</a></li><li><a href="#L197">_declared_ranges（函数） · L197–L204</a></li><li><a href="#L206">_iter_text（函数） · L206–L220</a></li><li><a href="#L222">_iter_bytes（函数） · L222–L230</a></li><li><a href="#L232">_sessions_dir（函数） · L232–L236</a></li><li><a href="#L238">_fts_last_seq_provider（函数） · L238–L258</a></li><li><a href="#L260">_db_path_of（函数） · L260–L268</a></li><li><a href="#L270">_log_last_seq（函数） · L270–L279</a></li><li><a href="#L282">scan_session（异步函数） · L282–L348</a></li><li><a href="#L350">auto_scan（异步函数） · L350–L383</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Repair scan: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import logging</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import os</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import re</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from typing import Any, Callable, Iterator, Optional</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.events import DECLARE_TYPES, Envelope, check_seq_gap, declared_ranges</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.persistence import default_sessions_dir, detect_truncation, is_aux_session_file, rotated_segment_paths</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>log = logging.getLogger(&quot;pyharness.repair&quot;)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>_QUARANTINE_RAW_CAP: int = 8192        # 隔离档单条 raw 截断上限(防爆,spec 结构表)</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>_TAIL_SEQ_PROBE: int = 2048            # 半行内 seq 探测窗口(信封序列化 seq 最先落)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>_DECLARE_TYPES: frozenset = DECLARE_TYPES</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>def now_ts() -&gt; str:</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    &quot;&quot;&quot;修复/隔离文件时间戳:UTC 毫秒(文件系统安全,PRD F060 命名)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    return datetime.now(timezone.utc).strftime(&quot;%Y%m%dT%H%M%S%f&quot;)[:-3]</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>def _rotated_segments(path: Path) -&gt; list[Path]:</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    &quot;&quot;&quot;本会话的轮转段 ``{sid}.{n}.jsonl``(n 升序)。</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    2026-09-21 R13-5:轮转段是**真源的一部分**(replay 会合并读,见 persistence</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    ``replay``),与备份/隔离档(**aux**)不同类 —— 但此前健康扫描与 repair 都按</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    &quot;aux 跳过&quot;处理它们 ⇒ 段内整行损坏会**静默丢事件且零告警**(实测:重放少一条、</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    `repair`/`auto_scan` 都不报)。故本函数把它们纳入**修复面**(不改扫描面,见 L-25)。</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    2026-09-21 R14-3:段枚举判据移交 ``persistence.rotated_segment_paths``(唯一来源,</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    与 ``session_data_paths`` / ``replay`` 同序;此前本模块自持一份 glob 判据)。</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    return rotated_segment_paths(path)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code></code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>def _segment_damage(path: Path) -&gt; list[tuple[Path, Optional[int], list[int]]]:</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    &quot;&quot;&quot;各轮转段的损坏面:**只读**扫描 → [(段路径, 尾部半行偏移|None, 中部坏行行号[])]。</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    尾部半行与中部坏行分开交付:前者按&quot;未完成即未发生&quot;截断,后者按&quot;隔离不删&quot;处理</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    (与主文件同口径)。尾部有半行时不再把它算作坏行(避免同一条被处理两次)。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    out: list[tuple[Path, Optional[int], list[int]]] = []</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    for seg in _rotated_segments(path):</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        torn = detect_truncation(seg)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        bad: list[int] = []</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        if torn is None:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            bad = [no for no, text in _iter_text(seg)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                   if _parse_or_none(text) is None]</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        if torn is not None or bad:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>            out.append((seg, torn, bad))</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    return out</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>def _segment_scan(path: Path) -&gt; tuple[list[int], int, list[tuple[int, int]]]:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    &quot;&quot;&quot;轮转段的 (全部 seq, 可索引内容末 seq, 声明区间) —— 供**会话级**seq 连续性判定。</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    只读;段文件缺失/不可读时**跳过**(不影响主文件判定)。坏行记跳(与主文件同口径)。</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    seqs: list[int] = []</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    last = 0</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    declared: list[tuple[int, int]] = []</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    for seg in _rotated_segments(path):</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        try:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            for _no, text in _iter_text(seg):</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                if text is None:</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>                    continue</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                env = _parse_or_none(text)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                if env is None:</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>                    continue</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                seqs.append(env.seq)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                if env.type == &quot;session.recovered&quot;:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                    declared.extend(_declared_ranges(env))</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                    continue</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                if _indexable(env):</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                    last = max(last, env.seq)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                if env.type in _DECLARE_TYPES:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                    declared.extend(_declared_ranges(env))</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        except OSError as e:                         # noqa: BLE001 段不可读不放大</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            log.warning(&quot;repair: 轮转段不可读,跳过其 seq 连续性判定 file=%s why=%s&quot;,</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                        seg, e)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    return seqs, last, declared</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>def _seg_label(seg: Path) -&gt; str:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    &quot;&quot;&quot;段标签(报告/审计用):``seg{n}``。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    m = re.search(r&quot;\.(\d+)\.jsonl$&quot;, seg.name)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    return f&quot;seg{m.group(1)}&quot; if m else f&quot;seg:{seg.name}&quot;</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>def _session_content_last(path: Path) -&gt; int:</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    &quot;&quot;&quot;**会话级**可索引内容末 seq = max(主文件, 轮转段)。</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    与 ``scan_session`` 的 ``last`` **同口径**(两者都按 ``_indexable`` 判据 + 轮转段</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    合并读)。2026-09-21 R14-1 二阶修:重建源 ``open_store(...).replay`` **合并读轮转段**</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    (persistence),故对账水位也必须跨段取 max —— 此前只算主文件 ⇒ 主文件被截空(整文件</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    半行)或其尾部全为非内容事件时,段内容使 ``view_last&gt;0`` 而单文件 ``log_last=0``</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    ⇒ **假 PERS-201**(repair 已成功却被判失败:CND-06/08 判据多源必然漂移)。</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    best = 0</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    for _no, text in _iter_text(path):</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        if text is None:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            continue</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        env = _parse_or_none(text)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        if env is not None and _indexable(env) and env.seq &gt; best:</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>            best = env.seq</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    _seqs, seg_last, _declared = _segment_scan(path)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    return max(best, seg_last)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>def _is_aux_file(path: Path) -&gt; bool:</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    &quot;&quot;&quot;辅助文件判定:轮转/备份/隔离(以及旧 .bak)不参与全会话健康扫描。</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code></code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    2026-09-21 R14-3:判据**唯一来源**移至 ``persistence.is_aux_session_file`` ——</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    此前本模块自持一份、其余五处漏判据(见该函数 docstring)。</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    return is_aux_session_file(path)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code></code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>class SessionHealth:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    &quot;&quot;&quot;单会话只读健康报告(扫描产物,不修改文件)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    sid: str</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    path: Path</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    tail_truncated: bool = False</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    tail_offset: Optional[int] = None</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    bad_lines: list[int] = field(default_factory=list)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    holes: list[int] = field(default_factory=list)          # 未被声明覆盖的缺失 seq</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    holes_declared: list[tuple[int, int]] = field(default_factory=list)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    index_stale: bool = False                               # 视图末 seq ≠ 日志末(落后或幽灵行)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    healthy: bool = True</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code></code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>class QuarantineEntry:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>    &quot;&quot;&quot;隔离记录(行号 = 主文件原行号;raw 截断 ≤8KB 防爆)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code></code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    line_no: int</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    raw: str</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    reason: str = &quot;parse-fail&quot;</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    archived: bool = True</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code></code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>class RepairReport:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    &quot;&quot;&quot;修复产出(F060):fixed/quarantined/lost/backup/holes/recovered_seq。</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code></code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>    fixed 词条 ∈ {tail-truncated, quarantine-N, seq-holes:[...], views-rebuilt};</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    quarantined: 本次处理的隔离条目(archived=True = 已移隔离档,False = 保留原地);</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    lost: 尾部半行含未完成事件数(0/1);</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    recovered_seq: session.recovered 声明事件的 seq(无动作/声明跳过 → None)。</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    幂等:已修复文件重复 repair → 无动作空报告(不追加事件)。</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code></code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    sid: str</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    fixed: list[str] = field(default_factory=list)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    quarantined: list[QuarantineEntry] = field(default_factory=list)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    lost: int = 0</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    backup_path: Optional[Path] = None</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    holes_alert: list[int] = field(default_factory=list)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>    recovered_seq: Optional[int] = None</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code></code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>class RepairPolicy:</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    &quot;&quot;&quot;修复决策入参:auto = headless 安全默认(截断+隔离);interactive = 问询产物。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code></code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    mode: str = &quot;auto&quot;                  # &quot;auto&quot; | &quot;interactive&quot;</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    drop_tail: bool = True              # 截断续跑(尾部半行未完成不假装发生)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    keep_quarantine: bool = True        # True=隔离;False=用户选择保留原地(不删)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code></code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>def _parse_or_none(text: str) -&gt; Optional[Envelope]:</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    &quot;&quot;&quot;单行信封解析(容错):任何解析/校验失败 → None(坏行语义,PERS-201)。</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code></code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    含 payload 按 type 强校验(P1-4,读侧与写侧同口径)——缺字段/错类型的行</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    视为坏行隔离,不再漏进 reducer(此前只验信封、payload 坏数据延迟崩溃)。</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    try:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        from pyharness.events.vocab import validate_payload</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        env = Envelope.model_validate_json(text)</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        canonical = validate_payload(env.type, env.payload)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        if canonical is not env.payload:</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            env = env.model_copy(update={&quot;payload&quot;: canonical})</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        return env</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    except Exception:                    # noqa: BLE001 — 坏行记跳不中断</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        return None</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code></code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>def _indexable(env: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>    &quot;&quot;&quot;信封是否在 FTS 索引**新增行**(repair 水位对账用;口径单源于 session_query)。</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code></code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>    懒导入避免 repair 顶层耦合 sqlite 模块;未装配/异常 → 保守按&quot;可索引&quot;计</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    (退化旧口径,不改变安全方向)。CND-06/08:使日志水位与索引 max_seq 同口径</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>    ——非内容事件(session.created/finished、llm.request、guard.* 等)不产索引行,</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    不应计入水位,否则尾部非内容即误判 stale / 误抛 PERS-201。</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    try:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        from pyharness.core.session_query import is_indexable</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        return bool(is_indexable(getattr(env, &quot;type&quot;, &quot;&quot;), env))</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>    except Exception:                               # noqa: BLE001 未装配:保守</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>        return True</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code></code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>def _declared_ranges(env: Envelope) -&gt; list[tuple[int, int]]:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>    &quot;&quot;&quot;声明事件 → 合法空洞闭区间列表(§3.4 空洞合法化口径)。</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code></code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    2026-09-21 R14-9:判据**唯一来源**移至 ``events.declared_ranges`` —— 此前</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>    ``repair`` / ``persistence`` / ``session`` / ``governance.audit`` 各写一份,其中</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>    ``session`` 那份**只认 compacted** ⇒ 已声明的修复空洞在回放时被重报为&quot;未声明空洞&quot;。</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>    return declared_ranges(env)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code></code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>def _iter_text(path: Path) -&gt; Iterator[tuple[int, Optional[str]]]:</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    &quot;&quot;&quot;逐物理行读(行号从 1 起;PERS-201 语义):非 UTF-8 段 → (no, None) 记跳。</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code></code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>    \r\n 遗留容忍(rstrip 行尾);空行以 &quot;&quot; 交付(JSON 解析必败 = 坏行,与坏块同路)。</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    with open(path, &quot;rb&quot;) as fh:</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        for no, raw in enumerate(fh, 1):</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            line = raw.rstrip(b&quot;\r\n&quot;)</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            if not line:</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>                yield no, &quot;&quot;</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                continue</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            try:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>                yield no, line.decode(&quot;utf-8&quot;)</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>            except UnicodeDecodeError:</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>                yield no, None</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code></code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>def _iter_bytes(path: Path) -&gt; Iterator[tuple[int, bytes]]:</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>    &quot;&quot;&quot;逐物理行原始字节(行号 1 起,行尾**原样保留**;quarantine 原子重写用)。</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code></code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>    行尾不剥:遗留 `\\r\\n` 须随好行原样回写,否则重写把 CRLF 归一为 LF(丢 \\r,</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    P3)。隔离条目展示时单独 rstrip。</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>    with open(path, &quot;rb&quot;) as fh:</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        for no, raw in enumerate(fh, 1):</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>            yield no, raw</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code></code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>def _sessions_dir(ctx: Any) -&gt; Path:</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>    &quot;&quot;&quot;ctx.storage.sessions_dir 解析(缺省回落 L1 锚点,便于脱离装配的离线调用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>    storage = getattr(ctx, &quot;storage&quot;, None)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>    sd = getattr(storage, &quot;sessions_dir&quot;, None) if storage is not None else None</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    return Path(sd).expanduser() if sd else default_sessions_dir()</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code></code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>def _fts_last_seq_provider(ctx: Any) -&gt; Optional[Callable[[str], int]]:</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>    &quot;&quot;&quot;派生视图末 seq 提供者(对账用,偏离 4):ctx.session_query.max_seq / ctx.fts_last_seq。</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code></code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>    2026-09-21 R11-2 修:此前只认前两者,而**没有任何生产调用方注入它们**(CLI 的</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>    ``auto_scan`` 连 ctx 都不收)⇒ 索引落后对账**从未真正启用**。现补**第三兜底**:</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>    由 ``cfg.storage.db_path`` 构造只读读数口(``session_query.read_max_seq``)——</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>    repair 只需要&quot;db 在哪&quot;,不需要 live 索引句柄。</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>    sq = getattr(ctx, &quot;session_query&quot;, None)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>    if sq is not None:</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        mx = getattr(sq, &quot;max_seq&quot;, None)</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        if callable(mx):</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>            return mx                      # type: ignore[return-value]</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>    fl = getattr(ctx, &quot;fts_last_seq&quot;, None)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    if callable(fl):</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        return fl</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>    db_path = _db_path_of(ctx)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>    if db_path:</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        from pyharness.core.session_query import read_max_seq</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        return lambda sid: read_max_seq(db_path, sid)</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>    return None</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code></code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>def _db_path_of(ctx: Any) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>    &quot;&quot;&quot;FTS 库路径读取(鸭子类型:ctx.settings/ctx.config → storage.db_path)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>    cfg = (getattr(ctx, &quot;settings&quot;, None) or getattr(ctx, &quot;config&quot;, None)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>           or ctx)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>    for holder in (cfg, getattr(cfg, &quot;storage&quot;, None)):</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        p = getattr(holder, &quot;db_path&quot;, None)</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        if p:</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>            return str(p)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>    return None</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code></code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>def _log_last_seq(path: Path) -&gt; int:</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>    &quot;&quot;&quot;日志末完整事件 seq(坏行记跳,只数可解析信封;0 = 无完整事件)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>    best = 0</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>    for _no, text in _iter_text(path):</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        if text is None:</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>            continue</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        env = _parse_or_none(text)</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        if env is not None and env.seq &gt; best:</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>            best = env.seq</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>    return best</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code></code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code></code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>async def scan_session(path: Path, *,</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>                       fts_last_seq: Optional[Callable[[str], int]] = None</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>                       ) -&gt; SessionHealth:</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>    &quot;&quot;&quot;单会话健康扫描(截断/坏行/空洞/索引对账),只读零修改。</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code></code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>    - 尾部 4KB 判半行(detect_truncation 偏移,复用 persistence 原语);</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>    - 严格行迭代:解码失败/JSON 信封解析失败记 bad_lines(不中断,PERS-201 语义);</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>    - 收集 seq 序列与声明区间(compacted/recovered),check_seq_gap 求未声明空洞;</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>    - 索引对账:注入 fts_last_seq(sid) 提供者时,视图末 seq ≠ 日志末 seq = stale</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>      (落后=索引漏事件;超前=幽灵行,见 index_stale 注释);无提供者不算 stale</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>      (偏离 4,避免未装配 FTS 时全会话误报)。</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>    损坏全部落报告字段,不抛(打开失败 OSError 上抛,由 auto_scan/repair_session</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>    各自按 PERS-202 语义处置)。</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>    sid = path.stem</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>    if not path.exists():</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        return SessionHealth(sid=sid, path=path, healthy=True)</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>    tail = detect_truncation(path)         # 非空且末字节 ≠ \\n → 半行起始偏移;None=完整</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>    bad: list[int] = []</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>    seqs: list[int] = []</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>    declared: list[tuple[int, int]] = []</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>    last = 0</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>    for no, text in _iter_text(path):</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>        if text is None:                   # 编码级坏块:按行记跳(PERS-201 语义)</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>            bad.append(no)</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>            continue</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        env = _parse_or_none(text)</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>        if env is None:                    # JSON/信封非法:坏行</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>            bad.append(no)</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>            continue</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        seqs.append(env.seq)</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        if env.type == &quot;session.recovered&quot;:   # 声明不产生 FTS 内容:不计入对账末 seq</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>            declared.extend(_declared_ranges(env))  # 但其 lost 声明仍合法化空洞</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>            continue</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        if _indexable(env):                   # 水位与索引 max_seq 同口径(CND-06/08)</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>            last = max(last, env.seq)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        if env.type in _DECLARE_TYPES:</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>            declared.extend(_declared_ranges(env))</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>    # 空洞是**会话级**属性(R13-6):轮转段与主文件同属一个会话(replay 合并读),</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>    # 故 seq 连续性必须**跨段**判定 —— 否则主文件从 seq N+1 起会被误判为&quot;空洞 1..N&quot;</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>    # (实测:凡轮转过一次的会话恒判不健康;每次 repair 都报假空洞并追加一条</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>    # session.recovered ⇒ 稳定态噪声 + 重复写入)。段级坏行/半行仍按**各文件**口径</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>    # 分别处置(见 `_segment_damage`)。</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>    seg_seqs, seg_last, seg_declared = _segment_scan(path)</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>    if seg_seqs:</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        seqs = sorted(set(seqs) | set(seg_seqs))</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        declared = declared + seg_declared</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>        last = max(last, seg_last)</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>    holes = check_seq_gap(seqs, declared) if seqs else []</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>    index_stale = False</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>    if fts_last_seq is not None:</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        try:</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>            view_last = fts_last_seq(sid)</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>            # 对账口径 = 视图末 seq 与日志末 seq **必须一致**(!=,非仅落后 &lt;):</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>            # 落后(视图&lt;日志)= 索引漏事件;超前(视图&gt;日志)= 幽灵行——dispatch 先于</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>            # flush,session.append 落盘失败时事件已入总线被 FTS 订阅者索引,日志却</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>            # 没有该 seq。两者都判 stale → 触发 rebuild 整体对账(幽灵行随之清除)。</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>            index_stale = view_last is not None and view_last != last</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>        except Exception as e:             # noqa: BLE001 — 对账提供者故障不误报</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>            log.warning(&quot;repair: fts_last_seq(%s) 提供者异常,索引对账不判定: %s&quot;,</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>                        sid, e)</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>    return SessionHealth(</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>        sid=sid, path=path,</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>        tail_truncated=tail is not None, tail_offset=tail,</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>        bad_lines=bad, holes=holes, holes_declared=declared,</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>        index_stale=index_stale,</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>        healthy=not (tail is not None or bad or holes or index_stale))</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code></code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>async def auto_scan(sessions_dir: Path, *,</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>                    fts_last_seq: Optional[Callable[[str], int]] = None,</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>                    db_path: Optional[str] = None</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>                    ) -&gt; list[SessionHealth]:</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>    &quot;&quot;&quot;全会话自检(启动 bootstrap 与 repair 子命令无 sid 共用):只返回需修会话。</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code></code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>    目录不存在(首次运行)→ 零报告;轮转/备份/隔离辅助文件跳过;单文件打开失败</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>    (权限/竞态)→ 本地异常日志跳过,不崩启动。只读零修改。</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code></code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>    ``db_path``(2026-09-21 R11-2):ctx-less 调用方(如 CLI 启动自检)只给库路径,</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>    即可启用**索引落后对账**;``fts_last_seq`` 优先(显式注入时胜出)。</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>    if fts_last_seq is None and db_path:</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        from pyharness.core.session_query import read_max_seq</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        fts_last_seq = lambda sid: read_max_seq(db_path, sid)   # noqa: E731</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>    d = Path(sessions_dir) if sessions_dir is not None else default_sessions_dir()</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>    if not d.exists():</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>        return []</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>    out: list[SessionHealth] = []</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>    for path in sorted(d.glob(&quot;*.jsonl&quot;)):</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>        if _is_aux_file(path):</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>            continue</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>        try:</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>            h = await scan_session(path, fts_last_seq=fts_last_seq)</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>        except PermissionError as e:</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>            log.warning(&quot;repair: 会话不可读跳过(目录不可读/被占用) file=%s why=%s&quot;,</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>                        path, e)</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>            continue</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        except OSError as e:               # glob/读竞态:跳过单文件</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>            log.warning(&quot;repair: 会话扫描失败跳过 file=%s why=%s&quot;, path, e)</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>            continue</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>        if not h.healthy:</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>            out.append(h)</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>    return out</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code></code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>SessionHealth.__module__ = &#x27;pyharness.repair&#x27;</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>QuarantineEntry.__module__ = &#x27;pyharness.repair&#x27;</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>RepairReport.__module__ = &#x27;pyharness.repair&#x27;</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>RepairPolicy.__module__ = &#x27;pyharness.repair&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

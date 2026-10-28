@@ -1,0 +1,168 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/user_ask.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/user_ask.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 168 行</span></nav><main class="wrap source-page"><h1>pyharness/core/user_ask.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：d216d56b185539223e965b991f1a19a62a28e4f6<br>SHA-256（内容校验）：a674532b23e03f4e1cd65f07211a422244dcce9abfc24bfa83bcbcc740effacd</p><p><a href="../../../architecture-detailed.html?node=ask">User Question Provider（用户反问与答复）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 8 个类、函数与方法</summary><ul><li><a href="#L24">AskProvider（类） · L24–L166</a><ul><li><a href="#L27">AskProvider.__init__（方法） · L27–L32</a></li><li><a href="#L35">AskProvider.request（异步方法） · L35–L65</a></li><li><a href="#L68">AskProvider.answer（方法） · L68–L96</a></li><li><a href="#L98">AskProvider.answer_async（异步方法） · L98–L122</a></li><li><a href="#L124">AskProvider._write_answer_and_settle（异步方法） · L124–L138</a></li><li><a href="#L140">AskProvider._finish_answer（方法） · L140–L144</a></li><li><a href="#L147">AskProvider.pending_list（方法） · L147–L166</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/user_ask.py — agent 反问用户(带选项,#38 Provider 面)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>一句话职责:工具轮内 agent 抛问题 → 事件落盘(user.question,ask_id=seq)→</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>外壳(桌面/CLI)轮询 pending → 人答复(user.answer)→ 本 Provider settle 并</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>把答复文本回喂 LLM。语义与 approval 同构(请求事件即事实,答复事件强同步),</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>但无权限语义(反问不拦执行,只是要信息)——所以独立成面,不并入 guard。</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>阻塞口径:request() 等待答复至多 ttl_s(默认 120s,事件载荷可下调);超时返回</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>占位提示(不抛错——对话继续,LLM 据&quot;用户未答复&quot;改口或换路径)。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>import asyncio</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>import logging</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>log = logging.getLogger(&quot;pyharness.user_ask&quot;)</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>DEFAULT_TTL_S = 120</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>class AskProvider:</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    &quot;&quot;&quot;会话级反问宿主:request(挂 pending+落事件+等待)/answer(裁决落事件)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    def __init__(self, *, session: Any = None, bus: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        self._session = session</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        self._bus = bus</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        self._pending: dict[int, asyncio.Event] = {}</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        self._answers: dict[int, dict] = {}</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        self._bg_tasks: set[asyncio.Task] = set()   # 持有后台答复任务引用(防 GC 丢)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    # ------------------------------------------------------------ 请求面</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    async def request(self, question: str, options: Optional[list] = None,</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>                      *, ttl_s: int = DEFAULT_TTL_S) -&gt; str:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        &quot;&quot;&quot;抛问题给用户:落 user.question → 等待答复 → 返回答复文本。</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code></code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        options 为拍板候选(≤10 项);答复可能不在候选中(自由文本)。</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        会话未接线(EVT-100)或等待超时(占位文本,不抛)两种收敛。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        sess = self._session</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        if sess is None:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;AskProvider 未注入 session(user.ask 不可用)&quot;)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        env = await sess.append(</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            &quot;user.question&quot;,</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>            {&quot;question&quot;: str(question)[:1000],</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>             &quot;options&quot;: [str(o)[:200] for o in (options or [])][:10],</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>             &quot;ttl_s&quot;: max(5, min(3600, int(ttl_s)))},</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            actor=&quot;agent&quot;, sync=True)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        ask_id = env.seq</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        waiter = asyncio.Event()</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        self._pending[ask_id] = waiter</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        try:</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            try:</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                await asyncio.wait_for(waiter.wait(), timeout=max(5, int(ttl_s)))</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>            except asyncio.TimeoutError:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                log.info(&quot;user.ask timeout ask_id=%s&quot;, ask_id)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                return &quot;(用户未在时限内答复,如需继续请说明或自行决策)&quot;</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            ans = self._answers.pop(ask_id, {})</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            choice = ans.get(&quot;choice&quot;)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            if choice is not None and choice:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                return f&quot;用户选择: {choice}&quot;</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            return f&quot;用户答复: {ans.get(&#x27;text&#x27;) or &#x27;(空)&#x27;}&quot;</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        finally:</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            self._pending.pop(ask_id, None)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    # ------------------------------------------------------------ 答复面</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    def answer(self, ask_id: int, *, choice: Optional[str] = None,</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>               text: Optional[str] = None, by: str = &quot;user&quot;) -&gt; bool:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        &quot;&quot;&quot;桌面/CLI 裁决桥:答复落盘(user.answer 强同步)+ settle 等待者。</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        未知 ask_id(已答/超时/过期)→ 返回 False(幂等忽略,防重放)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        aid = int(ask_id)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        waiter = self._pending.get(aid)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        if waiter is None:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            return False</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        choice_v = (str(choice or &quot;&quot;).strip())[:500] or None</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        text_v = (str(text or &quot;&quot;).strip())[:2000] or None</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        if not choice_v and not text_v:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;answer&quot;,</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                       hint=&quot;答复须给 choice 或 text 至少其一&quot;)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        self._pending.pop(aid)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        if self._session is not None:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            coro = self._write_answer_and_settle(</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                aid, waiter, choice_v, text_v, by)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            try:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                task = asyncio.get_running_loop().create_task(coro)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                self._bg_tasks.add(task)                 # 持引用:防 GC 中途回收</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                task.add_done_callback(self._bg_tasks.discard)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            except RuntimeError:</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                coro.close()</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                self._pending[aid] = waiter</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                return False</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        else:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            self._finish_answer(aid, waiter, choice_v, text_v)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        return True</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    async def answer_async(self, ask_id: int, *, choice: Optional[str] = None,</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                           text: Optional[str] = None, by: str = &quot;user&quot;) -&gt; bool:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        &quot;&quot;&quot;异步答复:先强同步落 user.answer,再唤醒等待者并返回成功。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        aid = int(ask_id)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        waiter = self._pending.get(aid)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        if waiter is None:</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            return False</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        choice_v = (str(choice or &quot;&quot;).strip())[:500] or None</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        text_v = (str(text or &quot;&quot;).strip())[:2000] or None</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        if not choice_v and not text_v:</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;answer&quot;,</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                       hint=&quot;答复须给 choice 或 text 至少其一&quot;)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        self._pending.pop(aid)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        if self._session is not None:</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>            try:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                await self._session.append(</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                    &quot;user.answer&quot;,</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                    {&quot;ask_id&quot;: aid, &quot;choice&quot;: choice_v, &quot;text&quot;: text_v,</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                     &quot;by&quot;: str(by or &quot;user&quot;)[:64]},</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                    actor=&quot;user&quot;, sync=True)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            except Exception:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                self._pending[aid] = waiter       # 落盘失败:恢复可重试状态</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                raise</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        self._finish_answer(aid, waiter, choice_v, text_v)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        return True</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code></code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    async def _write_answer_and_settle(self, aid: int, waiter: asyncio.Event,</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                                       choice: Optional[str], text: Optional[str],</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                                       by: str) -&gt; None:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        &quot;&quot;&quot;同步 answer 的后台强同步路径:失败时恢复 waiter 供再次答复。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        try:</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            await self._session.append(</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                &quot;user.answer&quot;,</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                {&quot;ask_id&quot;: aid, &quot;choice&quot;: choice, &quot;text&quot;: text,</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                 &quot;by&quot;: str(by or &quot;user&quot;)[:64]},</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                actor=&quot;user&quot;, sync=True)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        except Exception as exc:                 # noqa: BLE001 异步后台入口</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            self._pending[aid] = waiter</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            log.warning(&quot;user.answer 留痕失败: %s&quot;, exc)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            return</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        self._finish_answer(aid, waiter, choice, text)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code></code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    def _finish_answer(self, aid: int, waiter: asyncio.Event,</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                       choice: Optional[str], text: Optional[str]) -&gt; None:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        self._answers[aid] = {&quot;choice&quot;: choice, &quot;text&quot;: text}</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        if not waiter.is_set():</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            waiter.set()</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code></code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    # ------------------------------------------------------------ 只读</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    def pending_list(self) -&gt; list[dict]:</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        &quot;&quot;&quot;未决反问清单(桌面/CLI 轮询源;排序稳定按 ask_id)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        out = []</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        sess = self._session</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        if sess is None:</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            return out</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        try:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>            evs = list(sess.events_after(0))</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        except Exception:                            # noqa: BLE001</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            return out</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        for ev in evs:</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            if ev.type != &quot;user.question&quot;:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                continue</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            p = ev.payload or {}</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            if int(ev.seq) in self._pending:</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                out.append({&quot;ask_id&quot;: ev.seq,</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                            &quot;question&quot;: p.get(&quot;question&quot;, &quot;&quot;),</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                            &quot;options&quot;: list(p.get(&quot;options&quot;) or []),</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                            &quot;ttl_s&quot;: p.get(&quot;ttl_s&quot;, DEFAULT_TTL_S)})</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        return out</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code></code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>__all__ = [&quot;AskProvider&quot;, &quot;DEFAULT_TTL_S&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

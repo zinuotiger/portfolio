@@ -1,0 +1,158 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/writeback_io.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/writeback_io.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 158 行</span></nav><main class="wrap source-page"><h1>pyharness/application/writeback_io.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：cff3ebf056b85bd937e31f350710beaff3ff09d4<br>SHA-256（内容校验）：b7ce5003e9bd56a946a3d24a77f8e2bba377fbf594a82955cb4bf2a6fe6002f2</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 13 个类、函数与方法</summary><ul><li><a href="#L12">observe_target（函数） · L12–L21</a></li><li><a href="#L24">target_metadata（函数） · L24–L26</a></li><li><a href="#L29">_api（函数） · L29–L44</a><ul><li><a href="#L39">_api.Information（类） · L39–L41</a></li></ul></li><li><a href="#L47">_open_handle（函数） · L47–L61</a></li><li><a href="#L64">_open_stream（函数） · L64–L72</a></li><li><a href="#L75">_metadata（函数） · L75–L80</a></li><li><a href="#L83">LockedTargets（类） · L83–L130</a><ul><li><a href="#L85">LockedTargets.__init__（方法） · L85–L86</a></li><li><a href="#L88">LockedTargets.__enter__（方法） · L88–L113</a></li><li><a href="#L115">LockedTargets.__exit__（方法） · L115–L115</a></li><li><a href="#L117">LockedTargets.read（方法） · L117–L130</a></li></ul></li><li><a href="#L133">apply_one（函数） · L133–L158</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Exclusive Windows file handles; no unsafe application backend fallback.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import os</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import stat</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from contextlib import ExitStack</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from functools import lru_cache</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.source_snapshot import LIMIT,SnapshotFile,identity,read_selected</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.core.sandbox import safe_path</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.errors import PyHError,raise_code</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>def observe_target(root,name,gate):</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    path=safe_path(root,name)</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    if not path.parent.is_dir():raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_parent_unavailable&#x27;)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    try:path.lstat()</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    except FileNotFoundError:</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        gate()</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        try:safe_path(root,name).lstat()</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        except FileNotFoundError:return None,None</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        raise_code(&#x27;EVT-101&#x27;,reason=&#x27;writeback_target_changed&#x27;)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    return read_selected(root,name,before_read=gate)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>def target_metadata(value):</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    item=value.model_dump() if hasattr(value,&#x27;model_dump&#x27;) else dict(value)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    return dict(item,device=str(item[&#x27;device&#x27;]),inode=str(item[&#x27;inode&#x27;]))</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>@lru_cache(maxsize=1)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>def _api():</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    import ctypes</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    from ctypes import wintypes as t</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    kernel=ctypes.WinDLL(&#x27;kernel32&#x27;,use_last_error=True)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    kernel.CreateFileW.argtypes=[t.LPCWSTR,t.DWORD,t.DWORD,t.LPVOID,t.DWORD,t.DWORD,t.HANDLE]</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    kernel.CreateFileW.restype=t.HANDLE</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    kernel.CloseHandle.argtypes=[t.HANDLE];kernel.CloseHandle.restype=t.BOOL</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    kernel.SetFileInformationByHandle.argtypes=[t.HANDLE,ctypes.c_int,t.LPVOID,t.DWORD]</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    kernel.SetFileInformationByHandle.restype=t.BOOL</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    class Information(ctypes.Structure):</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        _fields_=[(&#x27;attributes&#x27;,t.DWORD),(&#x27;created&#x27;,t.FILETIME),(&#x27;accessed&#x27;,t.FILETIME),(&#x27;written&#x27;,t.FILETIME),</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            (&#x27;volume&#x27;,t.DWORD),(&#x27;size_hi&#x27;,t.DWORD),(&#x27;size_lo&#x27;,t.DWORD),(&#x27;links&#x27;,t.DWORD),(&#x27;index_hi&#x27;,t.DWORD),(&#x27;index_lo&#x27;,t.DWORD)]</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    kernel.GetFileInformationByHandle.argtypes=[t.HANDLE,ctypes.POINTER(Information)]</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    kernel.GetFileInformationByHandle.restype=t.BOOL</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    return kernel,Information</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>def _open_handle(path,*,directory=False,create=False):</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    import ctypes</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    kernel,Info=_api()</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    access=0x80 if directory else 0x80000000|0x40000000|0x10000</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    flags=0x00200000|(0x02000000 if directory else 0x80)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    handle=kernel.CreateFileW(str(path),access,3 if directory else 0,None,1 if create else 3,flags,None)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    if handle==ctypes.c_void_p(-1).value:raise ctypes.WinError(ctypes.get_last_error())</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    try:</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        info=Info()</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        if not kernel.GetFileInformationByHandle(handle,ctypes.byref(info)):</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            raise ctypes.WinError(ctypes.get_last_error())</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        if info.attributes&amp;0x400 or not directory and (info.attributes&amp;0x10 or info.links!=1):</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_link_or_nonregular_target&#x27;)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    except BaseException:kernel.CloseHandle(handle);raise</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    return handle</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>def _open_stream(path,*,create=False):</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    import msvcrt</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    handle=_open_handle(path,create=create)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    try:fd=msvcrt.open_osfhandle(handle,os.O_RDWR|os.O_BINARY)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    except BaseException:_api()[0].CloseHandle(handle);raise</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    try:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        os.set_inheritable(fd,False)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        return os.fdopen(fd,&#x27;r+b&#x27;,buffering=0)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    except BaseException:os.close(fd);raise</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>def _metadata(name,info,raw):</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or not info.st_ino or len(raw)&gt;LIMIT:</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_nonregular_target&#x27;)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    import hashlib</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    return SnapshotFile(path=name,size_bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        mtime_ns=str(info.st_mtime_ns),mode=stat.S_IMODE(info.st_mode),device=info.st_dev,inode=info.st_ino)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code></code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>class LockedTargets:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    &quot;&quot;&quot;All existing targets checked before intent; fresh names use CREATE_NEW only.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    def __init__(self,root,files,gate):</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        self.root=Path(root);self.files=files;self.gate=gate;self.streams={};self.deleted=set();self.stack=ExitStack()</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    def __enter__(self):</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        if os.name!=&#x27;nt&#x27;:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_application_backend_unavailable&#x27;)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        try:</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            parents={self.root}</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            for item in self.files:</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                path=safe_path(self.root,item[&#x27;target_path&#x27;])</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                if not path.parent.is_dir():raise_code(&#x27;GRD-403&#x27;,reason=&#x27;writeback_parent_unavailable&#x27;)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                parent=path.parent</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                while parent!=self.root:parents.add(parent);parent=parent.parent</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            for parent in sorted(parents,key=lambda p:str(p).casefold()):</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                self.gate();handle=_open_handle(parent,directory=True)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                self.stack.callback(_api()[0].CloseHandle,handle)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            for item in self.files:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                name=item[&#x27;target_path&#x27;];self.gate();path=safe_path(self.root,name)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                if item[&#x27;target&#x27;] is None:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                    try:path.lstat()</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                    except FileNotFoundError:continue</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                    raise_code(&#x27;EVT-101&#x27;,reason=&#x27;writeback_target_changed&#x27;)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                try:stream=self.stack.enter_context(_open_stream(path))</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                except OSError:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;writeback_target_changed_or_busy&#x27;)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                self.streams[name]=stream</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                observed=self.read(name,metadata=True)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                if target_metadata(observed)!=target_metadata(item[&#x27;target&#x27;]):</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                    raise_code(&#x27;EVT-101&#x27;,reason=&#x27;writeback_target_changed&#x27;)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>            self.gate();return self</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        except BaseException:self.stack.close();raise</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code></code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    def __exit__(self,*args):return self.stack.__exit__(*args)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code></code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    def read(self,name,*,metadata=False):</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        stream=self.streams.get(name);path=safe_path(self.root,name)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        if stream is None or stream.closed:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            if name not in self.deleted:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;writeback_handle_unavailable&#x27;)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            try:path.lstat()</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            except FileNotFoundError:return None</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            raise_code(&#x27;EVT-101&#x27;,reason=&#x27;writeback_deleted_target_reappeared&#x27;)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        before=os.fstat(stream.fileno());current=path.lstat()</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        if identity(before)!=identity(current):raise_code(&#x27;EVT-101&#x27;,reason=&#x27;writeback_target_identity_changed&#x27;)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        stream.seek(0);raw=stream.read(LIMIT+1);after=os.fstat(stream.fileno())</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        if identity(before)!=identity(after) or len(raw)!=after.st_size:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            raise_code(&#x27;EVT-101&#x27;,reason=&#x27;writeback_target_changed&#x27;)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        info=_metadata(name,after,raw)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        return info if metadata else raw</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code></code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code></code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>def apply_one(locked,item,raw):</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    &quot;&quot;&quot;Called only after a strongly confirmed application intent.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    import ctypes,msvcrt</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    name=item[&#x27;target_path&#x27;];action=item[&#x27;action&#x27;];locked.gate()</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    if action==&#x27;none&#x27;:return locked.read(name) if item[&#x27;target&#x27;] is not None else None</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    path=safe_path(locked.root,name)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    if action==&#x27;create&#x27;:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        try:stream=locked.stack.enter_context(_open_stream(path,create=True))</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        except OSError:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;writeback_create_target_changed_or_busy&#x27;)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        locked.streams[name]=stream</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    else:stream=locked.streams[name]</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>    locked.gate()</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    if action==&#x27;delete&#x27;:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        flag=ctypes.c_int(1)</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        if not _api()[0].SetFileInformationByHandle(msvcrt.get_osfhandle(stream.fileno()),4,ctypes.byref(flag),ctypes.sizeof(flag)):</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            raise ctypes.WinError(ctypes.get_last_error())</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        stream.close();locked.deleted.add(name)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        return locked.read(name)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    if raw is None:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;writeback_result_bytes_missing&#x27;)</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    stream.seek(0);view=memoryview(raw)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    while view:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        count=stream.write(view)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        if not count:raise OSError(&#x27;writeback short write&#x27;)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        view=view[count:]</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>    stream.truncate(len(raw));stream.flush();os.fsync(stream.fileno());locked.gate()</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    return locked.read(name)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

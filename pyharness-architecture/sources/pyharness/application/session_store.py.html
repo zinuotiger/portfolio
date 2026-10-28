@@ -1,0 +1,491 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/session_store.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/session_store.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 491 行</span></nav><main class="wrap source-page"><h1>pyharness/application/session_store.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：7e1e791bfc4ede09060e2a1d5b7e791e36565abc<br>SHA-256（内容校验）：02dffc4693152ad662630a0ff34ff6d10ed8b50651747533909c574b94bbced8</p><p><a href="../../../architecture-detailed.html?node=session_access">SessionOwnership（会话访问与持久化装配）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 32 个类、函数与方法</summary><ul><li><a href="#L26">validate_session_id（函数） · L26–L32</a></li><li><a href="#L34">_await（异步函数） · L34–L38</a></li><li><a href="#L41">_cfg_of（函数） · L41–L43</a></li><li><a href="#L46">_resolve_secret_value（函数） · L46–L61</a></li><li><a href="#L64">_plugin_within（函数） · L64–L70</a></li><li><a href="#L73">_sessions_dir_of（函数） · L73–L81</a></li><li><a href="#L84">_SingleLogSurface（类） · L84–L102</a><ul><li><a href="#L87">_SingleLogSurface.__init__（方法） · L87–L89</a></li><li><a href="#L91">_SingleLogSurface.create（异步方法） · L91–L93</a></li><li><a href="#L95">_SingleLogSurface.open_session（异步方法） · L95–L99</a></li><li><a href="#L101">_SingleLogSurface.list（方法） · L101–L102</a></li></ul></li><li><a href="#L105">DesktopSessionManager（类） · L105–L457</a><ul><li><a href="#L115">DesktopSessionManager.__init__（方法） · L115–L128</a></li><li><a href="#L131">DesktopSessionManager._path（方法） · L131–L140</a></li><li><a href="#L142">DesktopSessionManager._lock_for（方法） · L142–L143</a></li><li><a href="#L145">DesktopSessionManager._attach_persistence（方法） · L145–L173</a></li><li><a href="#L176">DesktopSessionManager.create（异步方法） · L176–L190</a></li><li><a href="#L192">DesktopSessionManager.create_product_session（异步方法） · L192–L215</a></li><li><a href="#L217">DesktopSessionManager._default_model（方法） · L217–L221</a></li><li><a href="#L223">DesktopSessionManager._rollback_open（方法） · L223–L232</a></li><li><a href="#L234">DesktopSessionManager.open_session（异步方法） · L234–L253</a></li><li><a href="#L256">DesktopSessionManager.archive_root（方法） · L256–L263</a></li><li><a href="#L265">DesktopSessionManager._archive_days（方法） · L265–L274</a></li><li><a href="#L276">DesktopSessionManager._prune_archives（方法） · L276–L292</a></li><li><a href="#L294">DesktopSessionManager.delete_session（异步方法） · L294–L353</a></li><li><a href="#L355">DesktopSessionManager._open_store（异步方法） · L355–L359</a></li><li><a href="#L361">DesktopSessionManager._ensure_repaired（异步方法） · L361–L368</a></li><li><a href="#L370">DesktopSessionManager.list（方法） · L370–L436</a></li><li><a href="#L438">DesktopSessionManager.logs（方法） · L438–L440</a></li><li><a href="#L442">DesktopSessionManager.shutdown_all（异步方法） · L442–L457</a></li></ul></li><li><a href="#L461">_summarize_log（函数） · L461–L467</a></li><li><a href="#L470">_surface_of（函数） · L470–L491</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Application session persistence surface shared by every host.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code></code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import asyncio</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import inspect</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import json</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import logging</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>import os</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import re</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import time</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>import uuid</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>from pyharness.core.session import SessionLog, open_session</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>from pyharness.events import EVENT_TYPES</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from pyharness.persistence import (now_ts, session_log_paths,</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>                                   session_recorder)</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>log = logging.getLogger(&quot;pyharness.desktop.sessions&quot;)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>_SID_RE = re.compile(r&quot;^s-[A-Za-z0-9._-]{6,64}$&quot;)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>def validate_session_id(sid: Any) -&gt; str:</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    &quot;&quot;&quot;会话 ID 安全校验:只允许内部生成的安全字符,阻断路径穿越。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    value = str(sid or &quot;&quot;)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    if not _SID_RE.fullmatch(value):</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        raise_code(&quot;EVT-100&quot;, field=&quot;sid&quot;, sid=value,</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>                   advice=&quot;sid 必须匹配 s-[A-Za-z0-9._-]{6,64}&quot;)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    return value</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>async def _await(res: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    &quot;&quot;&quot;同步/异步兼容调用(引擎各面注入形状不一,cli/acp 同款先例)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    if inspect.isawaitable(res):</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        return await res</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    return res</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code></code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>def _cfg_of(ctx: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    &quot;&quot;&quot;配置读取:cli 门面存 settings,测试门面存 config,两键兼容。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    return getattr(ctx, &quot;settings&quot;, None) or getattr(ctx, &quot;config&quot;, None)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>def _resolve_secret_value(ref: Any) -&gt; str:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    &quot;&quot;&quot;shell.web.token 秘密引用解析(env:/file:;明文回落原值)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    s = str(ref or &quot;&quot;)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    if s.startswith(&quot;env:&quot;):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        return os.environ.get(s[4:], &quot;&quot;)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    if s.startswith(&quot;file:&quot;):</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        p = Path(s[5:]).expanduser()</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        try:</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            if p.exists():</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                lines = p.read_text(encoding=&quot;utf-8&quot;).splitlines()</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                if lines:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                    return lines[0].strip()</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        except OSError:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            pass</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        return &quot;&quot;</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    return s</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>def _plugin_within(child: Path, root: Path) -&gt; bool:</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    &quot;&quot;&quot;目录包含判定(child 必须在 root 内,防 HTTP 加载任意本地路径)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    try:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        child.resolve().relative_to(root.resolve())</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        return True</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    except ValueError:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        return False</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>def _sessions_dir_of(ctx: Any) -&gt; Optional[Path]:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    &quot;&quot;&quot;会话日志目录(ctx.storage.sessions_dir 或 settings.storage.sessions_dir)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    storage = getattr(ctx, &quot;storage&quot;, None)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    d = getattr(storage, &quot;sessions_dir&quot;, None)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    if d is None:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        cfg = _cfg_of(ctx)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        st = getattr(cfg, &quot;storage&quot;, None)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        d = getattr(st, &quot;sessions_dir&quot;, None)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    return Path(d).expanduser() if d else None</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code></code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>class _SingleLogSurface:</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    &quot;&quot;&quot;形状 (b):ctx.session 即已绑定会话日志 → 单会话投影(其余 sid → EVT-106)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code></code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    def __init__(self, log: Any) -&gt; None:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        self._log = log</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        self.sid = getattr(log, &quot;sid&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    async def create(self) -&gt; str:</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        raise_code(&quot;EVT-106&quot;, hint=&quot;ctx.session 为已绑定日志,桌面无法新建会话;&quot;</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                   &quot;注入会话门面(create/open_session)后支持多会话&quot;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    async def open_session(self, sid: str) -&gt; Any:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        if sid == self.sid:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            return self._log</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        raise_code(&quot;EVT-106&quot;, session_id=sid,</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                   hint=f&quot;ctx.session 仅绑定会话 {self.sid};注入会话门面后支持切换&quot;)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code></code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    def list(self) -&gt; list[dict]:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        return [_summarize_log(self._log)]</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>class DesktopSessionManager:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    &quot;&quot;&quot;形状 (c):真 persistence 会话门面(desktop 自装配)——多会话磁盘真源管理。</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    create:新建 sid → open_store + open_session(session.created seq=1,EVT-106 引导);</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    open_session:文件不存在 → EVT-106;存在 → repair 鸭子前置(F060 未装配跳过) →</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    重放重建 + 总线落盘订阅(owner=f&quot;persistence:{sid}&quot;,cli._attach_log_persistence 同款);</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    list:扫描目录 *.jsonl,头行(session.created)取标题,尾行取终态(不整文件重放)。</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    shutdown_all:全量 flush + 关句柄 + 摘订阅(优雅停服兜底)。</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code></code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    def __init__(self, *, dir: Path, bus: Any, config: Any = None,</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                 settings: Any = None, tenant_id: Optional[str] = None) -&gt; None:</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        self.dir = Path(dir)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        self.bus = bus</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        self.config = config or settings</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        # GAP-10:本管理器所服务的租户;经 open_session 盖到**每条事件**的信封上</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        # (而不是只体现在目录布局里)。恢复时以日志已落值为准(见 core/session.py)。</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        self.tenant_id = tenant_id</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        self._logs: dict[str, SessionLog] = {}</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        self._owners: dict[str, str] = {}</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        self._stores: dict[str, Any] = {}</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        self._locks: dict[str, asyncio.Lock] = {}</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        self._summaries: dict[str, tuple[tuple, dict]] = {}</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        self.list_scanned_sessions = 0</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code></code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    # ------------------------------------------------ 内部</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    def _path(self, sid: str) -&gt; Path:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        sid = validate_session_id(sid)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        root = self.dir.resolve()</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        path = (root / f&quot;{sid}.jsonl&quot;).resolve()</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        try:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            path.relative_to(root)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        except ValueError:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            raise_code(&quot;EVT-100&quot;, field=&quot;sid&quot;, sid=sid,</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                       advice=&quot;会话路径越界:拒绝访问 sessions_dir 之外&quot;)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        return path</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code></code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    def _lock_for(self, sid: str) -&gt; asyncio.Lock:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        return self._locks.setdefault(sid, asyncio.Lock())</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    def _attach_persistence(self, log_: SessionLog, store: Any, sid: str) -&gt; None:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        &quot;&quot;&quot;总线 → 存储订阅(事件一入内存即入真源队列;强同步即写即刷 F011)。</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code></code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        sid 过滤:桌面总线全局共享(多会话同 bus),订阅者必须只落本会话事件</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        ——否则后开会话的事件会串写进先开会话文件(实测:两个 session.created</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        同文件、回放错乱)。store.append 侧无 sid 校验,过滤责任在订阅者。</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        2026-09-21 R8:该订阅**改为委托唯一实现** ``persistence.session_recorder``</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        (engine 侧长期缺同一过滤 ⇒ 同一关注点两处实现、漏一处;现单点)。</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        if self.bus is None:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>            return</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        # 属主**含租户**(2026-09-21 R12):会话目录按租户分目录 ⇒ 同名 sid 跨租户合法,</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        # 若属主只含 sid,则两租户同属主 → 关闭/删除其一即摘掉**另一租户**的落盘订阅</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        # (其会话从此静默不落盘)。同 R8-4(原生壳固定属主)的同类:属主必须含**全部**</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        # 隔离维度。</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        owner = f&quot;persistence:{getattr(self, &#x27;tenant_id&#x27;, None) or &#x27;&#x27;}:{sid}:{id(self)}&quot;</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        record = session_recorder(store, sid)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code></code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        try:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>            for t in EVENT_TYPES:</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                self.bus.subscribe(t, record, owner=owner)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        except BaseException as primary:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            try:</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                self.bus.unsubscribe_all(owner)</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            except BaseException as secondary:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                primary.add_note(f&#x27;subscription rollback failed: {type(secondary).__name__}&#x27;)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>            raise</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        log_._bus = self.bus                # append → 分发 → 落盘闭环</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        self._owners[sid] = owner</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code></code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    # ------------------------------------------------ 门面方法</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>    async def create(self) -&gt; str:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        &quot;&quot;&quot;新建会话:sid → store → open_session → 总线落盘订阅 → session.created 首事件。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        sid = f&quot;s-{uuid.uuid4().hex[:12]}&quot;  # Envelope.session_id min_length=8</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        store = await self._open_store(sid)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        try:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>            log_ = await open_session(sid, store, tenant_id=self.tenant_id)</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>            self._attach_persistence(log_, store, sid)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>            await log_.append(&quot;session.created&quot;, {&quot;title&quot;: &quot;&quot;, &quot;model&quot;: self._default_model()},</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                              actor=&quot;system&quot;, sync=True)</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        except BaseException as primary:</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>            self._rollback_open(sid, store, primary)</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>            raise</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        self._logs[sid] = log_</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        self._stores[sid] = store</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        return sid</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code></code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    async def create_product_session(self, sid, binding, *, task_id):</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        &quot;&quot;&quot;Trusted product seam: bind the durable owner before publishing a handle.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        from pydantic import TypeAdapter</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>        from pyharness.application.execution_contracts import ExecutionSessionId</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        from pyharness.application.execution_effects import confirmed_events</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        from pyharness.events.payload_product_execution import ExecutionLifecyclePayload</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        sid = TypeAdapter(ExecutionSessionId).validate_python(sid, strict=True)</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        binding = ExecutionLifecyclePayload.model_validate(binding).model_dump()</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        if binding[&#x27;phase&#x27;] != &#x27;bound&#x27;:raise_code(&#x27;EVT-100&#x27;, reason=&#x27;product_execution_binding_required&#x27;)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        async with self._lock_for(sid):</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            if sid in self._logs or self._path(sid).exists():</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>                raise_code(&#x27;EVT-101&#x27;, reason=&#x27;product_execution_session_reserved&#x27;)</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>            store = await self._open_store(sid)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            try:</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>                log_ = await open_session(sid, store, tenant_id=self.tenant_id)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                self._attach_persistence(log_, store, sid)</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                await log_.append(&#x27;session.created&#x27;, {&#x27;title&#x27;: &#x27;任务执行&#x27;, &#x27;model&#x27;: self._default_model()}, actor=&#x27;system&#x27;, sync=True)</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                event = await log_.append(&#x27;execution.lifecycle&#x27;, binding, actor=&#x27;system&#x27;, task_id=task_id, sync=True)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                if confirmed_events(log_)[-1] != event:raise_code(&#x27;PERS-202&#x27;, reason=&#x27;product_execution_binding_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>            except BaseException as primary:</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                self._rollback_open(sid, store, primary)</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>                raise</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            self._logs[sid] = log_; self._stores[sid] = store</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            return log_</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code></code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>    def _default_model(self) -&gt; str:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        cfg = self.config</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        llm = getattr(cfg, &quot;llm&quot;, None)</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        model = getattr(llm, &quot;model&quot;, None)</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        return str(model) if model else &quot;unknown&quot;</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code></code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>    def _rollback_open(self, sid, store, primary):</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        owner = self._owners.pop(sid, None)</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        cleanups = [store.close]</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        if owner is not None and self.bus is not None:</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>            cleanups.insert(0, lambda: self.bus.unsubscribe_all(owner))</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        for cleanup in cleanups:</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>            try:</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                cleanup()</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>            except BaseException as secondary:</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                primary.add_note(f&#x27;session initialization cleanup failed: {type(secondary).__name__}&#x27;)</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code></code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>    async def open_session(self, sid: str) -&gt; SessionLog:</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        &quot;&quot;&quot;打开既有会话(重放重建 + 落盘订阅);文件不存在 → EVT-106。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        sid = validate_session_id(sid)</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        async with self._lock_for(sid):</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>            if sid in self._logs:           # 同柄复用(INV-03 缓存一致防双实例漂移)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                return self._logs[sid]</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>            if not self._path(sid).exists():</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                raise_code(&quot;EVT-106&quot;, session_id=sid,</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>                           hint=&quot;会话不存在(日志缺失);先 `session list` 确认 sid 或新建会话&quot;)</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            await self._ensure_repaired(sid)    # 损坏先修再 open(F060;未装配跳过)</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            store = await self._open_store(sid)</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            try:</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                log_ = await open_session(sid, store, tenant_id=self.tenant_id)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                self._attach_persistence(log_, store, sid)</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>            except BaseException as primary:</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                self._rollback_open(sid, store, primary)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>                raise</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>            self._logs[sid] = log_</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>            self._stores[sid] = store</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>            return log_</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code></code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>    # ------------------------------------------------------------ 归档(F055)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>    def archive_root(self) -&gt; Path:</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        &quot;&quot;&quot;归档根 = **会话目录的兄弟**下的 ``archive/sessions``。</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code></code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        由会话目录推导(而非另配路径)⇒ 归档与会话**同域**:默认租户落在</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        ``~/.pyharness/archive/sessions``,租户 T 落在 ``…/tenants/T/archive/sessions``</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        —— 不会把某租户的会话归档进别的租户区(R14-8 同款&quot;派生视图与真源同域&quot;)。</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        return self.dir.parent / &quot;archive&quot; / &quot;sessions&quot;</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code></code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>    def _archive_days(self) -&gt; int:</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        &quot;&quot;&quot;保留期(天):`storage.archive_days`(默认 30;**0 = 不归档,立即删**)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        from pyharness.config import DEFAULTS</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code></code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        default = int(DEFAULTS[&quot;storage&quot;][&quot;archive_days&quot;])</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        v = getattr(getattr(self.config, &quot;storage&quot;, None), &quot;archive_days&quot;, None)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        try:</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>            return int(v) if v is not None else default</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>            return default</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code></code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>    def _prune_archives(self, days: int) -&gt; list[str]:</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        &quot;&quot;&quot;清理超过保留期的归档目录(只读判定 + 递归删除;失败只告警)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        import shutil as _sh</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code></code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        root = self.archive_root()</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        if not root.is_dir():</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>            return []</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        cutoff = time.time() - days * 86400</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        gone: list[str] = []</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        for entry in sorted(root.iterdir()):</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>            try:</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>                if entry.is_dir() and entry.stat().st_mtime &lt; cutoff:</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>                    _sh.rmtree(entry, ignore_errors=True)</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                    gone.append(entry.name)</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>            except OSError:                            # noqa: BLE001 清理尽力而为</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                log.warning(&quot;archive prune 跳过 %s&quot;, entry, exc_info=True)</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>        return gone</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code></code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>    async def delete_session(self, sid: str) -&gt; dict:</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        &quot;&quot;&quot;删除会话及轮转/备份文件;先摘订阅并关闭句柄。</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code></code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        ``storage.archive_days``(R24 接线,默认 30 天;``0`` = 不归档立即删)——</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        此前该键**零读取者**且删除**直接 unlink**(L-21:误删不可恢复,而文档承诺</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>        30 天窗口)。现:&gt;0 时把该会话的**全部相关文件**移入同域归档区</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        (``{sid}-{ts}/``),再按保留期清理过期归档。</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        sid = validate_session_id(sid)</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        async with self._lock_for(sid):</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>            root = self.dir.resolve()</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>            candidates = {root / f&quot;{sid}.jsonl&quot;}</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>            candidates.update(root.glob(f&quot;{sid}.*.jsonl&quot;))</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>            candidates.update(root.glob(f&quot;{sid}.jsonl.*&quot;))</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>            if sid not in self._logs and not any(p.is_file() for p in candidates):</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>                raise_code(&quot;EVT-106&quot;, session_id=sid, hint=&quot;会话不存在,无法删除&quot;)</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>            owner = self._owners.pop(sid, None)</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>            if owner and self.bus is not None:</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>                try:</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>                    self.bus.unsubscribe_all(owner)</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>                except Exception:                      # noqa: BLE001</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>                    log.warning(&quot;desktop delete unsubscribe %s failed&quot;, sid,</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>                                exc_info=True)</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>            store = self._stores.pop(sid, None)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>            if store is not None:</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>                await _await(store.flush())</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>                store.close()</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>            self._logs.pop(sid, None)</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>            days = self._archive_days()</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>            moved: list[str] = []</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>            removed: list[str] = []</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>            dest: Optional[Path] = None</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>            if days &gt; 0:</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>                dest = self.archive_root() / f&quot;{sid}-{now_ts()}&quot;</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>                try:</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>                    dest.mkdir(parents=True, exist_ok=True, mode=0o700)</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>                except OSError as e:                   # noqa: BLE001 归档不可用 → 拒绝删</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>                    raise_code(&quot;PERS-202&quot;, op=&quot;archive&quot;, path=str(dest), why=str(e),</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>                               advice=&quot;归档目录不可创建;删除**已中止**(不静默永久删)&quot;)</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>            for path in sorted(candidates):</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>                try:</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>                    resolved = path.resolve()</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>                    resolved.relative_to(root)</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>                    if not resolved.is_file():</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>                        continue</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>                    if dest is not None:</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>                        resolved.replace(dest / resolved.name)   # 移动(可恢复)</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>                        moved.append(resolved.name)</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>                    else:</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>                        resolved.unlink()                # archive_days=0:立即删</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>                        removed.append(resolved.name)</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>                except FileNotFoundError:</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>                    continue</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>            pruned = self._prune_archives(days) if days &gt; 0 else []</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>            # 每会话串行锁随会话释放(2026-09-21 R8:此前 _locks 只增不减 ⇒</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>            # 见过的每个 sid 都留一个 asyncio.Lock;此处补 create→…→release 的最后一环)</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>            self._locks.pop(sid, None)</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>            return {&quot;sid&quot;: sid, &quot;removed&quot;: removed + moved, &quot;count&quot;: len(removed) + len(moved),</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>                    &quot;archived&quot;: str(dest) if dest is not None else None,</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>                    &quot;archive_days&quot;: days, &quot;pruned&quot;: pruned}</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code></code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>    async def _open_store(self, sid: str) -&gt; Any:</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        &quot;&quot;&quot;open_store 工厂(异步外壳保持调用面统一;PERS-202 上抛)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        from pyharness.persistence import flush_kwargs_of, open_store</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>        # N1:flush 标量由装配层解析后注入(工厂不读 config)</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>        return open_store(sid, dir=self.dir, **flush_kwargs_of(self.config))</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code></code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>    async def _ensure_repaired(self, sid: str) -&gt; None:</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>        &quot;&quot;&quot;repair 前置(F060;ctx.repair.ensure_repaired 未装配 → 跳过,见偏离 8)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        repair = getattr(self, &quot;_ctx_repair&quot;, None)</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        fn = getattr(repair, &quot;ensure_repaired&quot;, None)</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>        if callable(fn):</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>            res = fn(sid)</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>            if hasattr(res, &quot;__await__&quot;):</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>                await res</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code></code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>    def list(self) -&gt; list[dict]:</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>        &quot;&quot;&quot;会话摘要清单:只读头部若干行 + 尾行 + 行数,不整文件重放。</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code></code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>        排序:按最后活动时间(st_mtime)倒序——最新使用的会话排最上(桌面</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>        会话列表时间序)。preview = 首条 user.message 内容前 10 字(列表显示</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>        用;title 为空时它就是会话的&quot;名字&quot;)。</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>        out: list[dict] = []</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        self.list_scanned_sessions = 0</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>        if not self.dir.exists():</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>            return out</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>        # 唯一枚举点(R14-3):此前用 ``stem.startswith(&quot;s-&quot;)`` 声称&quot;跳过轮转段/备份&quot;,</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        # 但 ``{sid}.1.jsonl`` / ``{sid}.corrupt-*`` 的 stem **同样**以 ``s-`` 开头</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>        # ⇒ 该守卫从未生效,列表混入&quot;备份伪装成的会话&quot;(实测:1 会话 → 列出 3 条)。</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>        for path in session_log_paths(self.dir):</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>            sid = path.stem</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>            summary: dict[str, Any] = {&quot;sid&quot;: sid, &quot;title&quot;: &quot;&quot;, &quot;preview&quot;: &quot;&quot;,</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>                                       &quot;finished&quot;: False}</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>            try:</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>                stat = path.stat()</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>                stamp = (stat.st_mtime_ns, stat.st_size, stat.st_ino)</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>                cached = self._summaries.get(sid)</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>                if cached and cached[0] == stamp:</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>                    out.append(dict(cached[1]))</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>                    continue</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>                self.list_scanned_sessions += 1</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>                summary[&quot;updated&quot;] = stat.st_mtime          # 使用时间(最后写入)</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>                summary[&quot;size_bytes&quot;] = stat.st_size</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>                lines: list[bytes] = []</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>                count = 0</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>                last: bytes | None = None</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>                with open(path, &quot;rb&quot;) as f:</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>                    for raw in f:</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>                        count += 1</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>                        if len(lines) &lt; 60:</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>                            lines.append(raw)</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>                        last = raw</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>                summary[&quot;lines&quot;] = count</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>                if lines:</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>                    head = json.loads(lines[0])</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>                    if head.get(&quot;type&quot;) == &quot;session.created&quot;:</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>                        summary[&quot;title&quot;] = (head.get(&quot;payload&quot;) or {}).get(&quot;title&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>                    tail = json.loads(last or lines[-1])</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>                    summary[&#x27;seq&#x27;] = tail.get(&#x27;seq&#x27;, 0)</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>                    summary[&quot;finished&quot;] = tail.get(&quot;type&quot;) == &quot;session.finished&quot;</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>                    # 首条 user.message 内容前 10 字(会话&quot;名字&quot;;只扫头部防 O(n))</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>                    for ln in lines[:60]:</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>                        try:</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>                            e = json.loads(ln)</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>                        except Exception:                 # noqa: BLE001 坏行跳过</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>                            continue</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>                        if e.get(&quot;type&quot;) == &quot;user.message&quot;:</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>                            c = (e.get(&quot;payload&quot;) or {}).get(&quot;content&quot;) or &quot;&quot;</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>                            summary[&quot;preview&quot;] = c.strip()[:10]</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>                            break</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>                self._summaries[sid] = (stamp, dict(summary))</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>            except Exception as e:          # noqa: BLE001 文件坏/竞态 → 摘要留最小</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>                # 一行告警(不打整段 traceback):UI 每次轮询会话列表都读此路径,</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>                # 单个不可读文件若打 traceback 会持续刷屏;只报类型名即可定位。</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>                log.warning(&quot;desktop list 读 %s 失败(摘要降级):%s&quot;,</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>                            path.name, type(e).__name__)</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>            out.append(summary)</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>        out.sort(key=lambda s: s.get(&quot;updated&quot;, 0), reverse=True)  # 时间倒序</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>        present = {row[&#x27;sid&#x27;] for row in out}</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>        for sid in set(self._summaries)-present:</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>            self._summaries.pop(sid,None)</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>        return out</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code></code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>    def logs(self) -&gt; list[SessionLog]:</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>        &quot;&quot;&quot;已打开会话日志清单(优雅停服 flush 用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>        return list(self._logs.values())</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code></code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>    async def shutdown_all(self) -&gt; None:</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>        &quot;&quot;&quot;收尾:全量 flush + 关句柄 + 摘落盘订阅(幂等;正常路径强同步事件已落盘)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>        errors = []</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>        for sid, store in list(self._stores.items()):</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>            try: await _await(store.flush())</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>            except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>            try: store.close()</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>            except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>        if self.bus is not None:</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code>            for owner in set(self._owners.values()):</code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>                try: self.bus.unsubscribe_all(owner)</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>                except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>        self._stores.clear()</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>        self._owners.clear()</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>        self._logs.clear()</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>        if errors: raise BaseExceptionGroup(&#x27;session manager cleanup failed&#x27;, errors)</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code></code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code></code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code></code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>def _summarize_log(log_: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>    &quot;&quot;&quot;单会话日志摘要(形状 b 投影;stats 鸭子读取)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>    stats_fn = getattr(log_, &quot;stats&quot;, None)</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>    stats = stats_fn() if callable(stats_fn) else {}</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>    return {&quot;sid&quot;: getattr(log_, &quot;sid&quot;, &quot;&quot;),</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>            &quot;title&quot;: &quot;&quot;, &quot;finished&quot;: bool(stats.get(&quot;closed&quot;, False)),</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>            &quot;seq&quot;: stats.get(&quot;seq&quot;, 0), &quot;event_count&quot;: stats.get(&quot;event_count&quot;, 0)}</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code></code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code></code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>def _surface_of(ctx: Any, *, bus: Any, config: Any = None,</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>                sessions_dir: Optional[Path] = None,</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>                tenant_id: Optional[str] = None) -&gt; Any:</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>    &quot;&quot;&quot;会话面解析(偏离 1):门面 → 委托;绑定日志 → 单会话;None → 自装配管理器。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>    surface = getattr(ctx, &quot;session&quot;, None)</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code>    if surface is None:</code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>        if sessions_dir is None:</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>            raise_code(&quot;EVT-106&quot;, hint=&quot;会话未装配(ctx.session=None)且无持久化目录;&quot;</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code>                       &quot;注入会话门面或先配置 storage.sessions_dir&quot;)</code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code>        mgr = DesktopSessionManager(dir=sessions_dir, bus=bus, config=config,</code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code>                                    tenant_id=tenant_id)</code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>        try:</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>            ctx.session = mgr               # 惰性回写:引擎门面后续可复用(acp 同款)</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>        except Exception:                   # noqa: BLE001 只读 ctx:仅本地持有</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>            log.debug(&quot;desktop surface write-back skipped&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code>        return mgr</code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>    if callable(getattr(surface, &quot;open_session&quot;, None)):</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code>        return surface                      # (a) 门面(create/open_session/list)</code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code>    if getattr(surface, &quot;sid&quot;, None):</code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>        return _SingleLogSurface(surface)   # (b) 已绑定会话日志</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>    raise_code(&quot;EVT-106&quot;, hint=&quot;会话门面形状非法(无 open_session 亦无 sid);&quot;</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code>               &quot;注入 create/open_session 门面&quot;)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

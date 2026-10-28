@@ -1,0 +1,76 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/writeback_merge.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/writeback_merge.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 76 行</span></nav><main class="wrap source-page"><h1>pyharness/application/writeback_merge.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：29601eb20bd1ab5bfb4c36fff2444d841e2935e5<br>SHA-256（内容校验）：0de79cd76c93a4947bf3f27424c294b7b3ca6bba31dd6c09d590047fea960bd9</p><p><a href="../../../architecture-detailed.html?node=writeback">ControlledWriteback（受控合并与回写）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 5 个类、函数与方法</summary><ul><li><a href="#L13">_conflict（函数） · L13–L14</a></li><li><a href="#L17">_edits（函数） · L17–L19</a></li><li><a href="#L22">_overlap（函数） · L22–L26</a></li><li><a href="#L29">merge_bytes（函数） · L29–L57</a></li><li><a href="#L60">validate_result（函数） · L60–L76</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Bounded byte-preserving three-way merge; fixed validators never execute code.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import ast</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import difflib</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import json</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pathlib import PurePosixPath</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.source_snapshot import LIMIT,check_content</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>MERGE_VERSION=&#x27;exact-lines-three-way-v1&#x27;</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>VALIDATOR_VERSION=&#x27;text-policy-syntax-v1&#x27;</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>def _conflict(reason,regions=None):</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    return dict(status=&#x27;conflict&#x27;,merged=None,conflicts=regions or [dict(reason=reason)])</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>def _edits(base,changed):</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    return [(i,j,tuple(changed[a:b])) for tag,i,j,a,b in</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        difflib.SequenceMatcher(a=base,b=changed,autojunk=False).get_opcodes() if tag!=&#x27;equal&#x27;]</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>def _overlap(a,b):</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    i,j,_=a;k,l,_=b</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    if i==j:return k&lt;=i&lt;=l</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    if k==l:return i&lt;=k&lt;=j</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    return max(i,k)&lt;min(j,l)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>def merge_bytes(base,current,delivery):</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    &quot;&quot;&quot;None denotes absence; conflict results deliberately contain no merged bytes.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    if any(v is not None and not isinstance(v,bytes) for v in (base,current,delivery)):</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        raise TypeError(&#x27;merge inputs must be exact bytes or absence&#x27;)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    if any(v is not None and len(v)&gt;LIMIT for v in (base,current,delivery)):</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        return _conflict(&#x27;merge_size_limit&#x27;)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    if current==delivery:return dict(status=&#x27;mergeable&#x27;,merged=current,conflicts=[])</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    if current==base:return dict(status=&#x27;mergeable&#x27;,merged=delivery,conflicts=[])</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    if delivery==base:return dict(status=&#x27;mergeable&#x27;,merged=current,conflicts=[])</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    if any(v is None for v in (base,current,delivery)):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        return _conflict(&#x27;creation_or_deletion_conflict&#x27;)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    try:versions=[v.decode(&#x27;utf-8&#x27;).splitlines(keepends=True) for v in (base,current,delivery)]</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    except UnicodeDecodeError:return _conflict(&#x27;binary_concurrent_change&#x27;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    if any(len(v)&gt;4096 for v in versions) or any(len(v)&gt;1024*1024 for v in (base,current,delivery)):</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        return _conflict(&#x27;concurrent_text_comparison_limit&#x27;)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    original,left,right=versions;mine=_edits(original,left);theirs=_edits(original,right)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    conflicts=[]</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    for a in mine:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        for b in theirs:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            if a!=b and _overlap(a,b):</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>                conflicts.append(dict(reason=&#x27;overlapping_changes&#x27;,base_start_line=min(a[0],b[0])+1,</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>                    base_end_line=max(a[1],b[1])+1))</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    if conflicts:return _conflict(&#x27;overlapping_changes&#x27;,conflicts[:100])</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    edits=sorted(set(mine+theirs),key=lambda e:(e[0],e[1]));out=[];cursor=0</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    for start,end,replacement in edits:</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        out.extend(original[cursor:start]);out.extend(replacement);cursor=end</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    out.extend(original[cursor:]);raw=&#x27;&#x27;.join(out).encode(&#x27;utf-8&#x27;)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    if len(raw)&gt;LIMIT:return _conflict(&#x27;merged_size_limit&#x27;)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    return dict(status=&#x27;mergeable&#x27;,merged=raw,conflicts=[])</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>def validate_result(path,raw):</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    &quot;&quot;&quot;Only versioned builtin checks: no imports, shell commands or user predicates.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    result=dict(version=VALIDATOR_VERSION,status=&#x27;passed&#x27;,checks=[&#x27;absence&#x27; if raw is None else &#x27;bounded-text-policy&#x27;])</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    if raw is None:return result</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    try:</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        if len(raw)&gt;LIMIT:raise ValueError(&#x27;size&#x27;)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        suffix=PurePosixPath(path).suffix.lower()</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        if suffix in (&#x27;.py&#x27;,&#x27;.json&#x27;) and len(raw)&gt;128*1024:raise ValueError(&#x27;syntax byte limit&#x27;)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        check_content(raw)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        text=raw.decode(&#x27;utf-8-sig&#x27;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        if suffix==&#x27;.py&#x27;:ast.parse(text);result[&#x27;checks&#x27;].append(&#x27;python-syntax&#x27;)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        if suffix==&#x27;.json&#x27;:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            def reject_constant(value):raise ValueError(&#x27;nonfinite JSON&#x27;)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            json.loads(text,parse_constant=reject_constant);result[&#x27;checks&#x27;].append(&#x27;json-syntax&#x27;)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    except (ValueError,SyntaxError,PyHError,RecursionError):</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        result.update(status=&#x27;failed&#x27;,reason=&#x27;fixed_content_or_syntax_validation_failed&#x27;)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    return result</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

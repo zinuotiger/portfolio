@@ -1,0 +1,238 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/events/envelope.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/events/envelope.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 238 行</span></nav><main class="wrap source-page"><h1>pyharness/events/envelope.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：118b88fffb47378c6342aed9c66d6fcc27cb801a<br>SHA-256（内容校验）：fb0ab0123b1d345a2a21a9113bcc96bdc8b1ee877f736e482c5515b690239235</p><p><a href="../../../architecture-detailed.html?node=event_contract">Event Contract（事件信封与词表契约）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 13 个类、函数与方法</summary><ul><li><a href="#L27">_utc_now_ts（函数） · L27–L30</a></li><li><a href="#L33">Envelope（类） · L33–L69</a><ul><li><a href="#L63">Envelope._ts_utc（方法） · L63–L69</a></li></ul></li><li><a href="#L72">validate_envelope（函数） · L72–L99</a></li><li><a href="#L102">make_envelope（函数） · L102–L130</a></li><li><a href="#L133">SeqState（类） · L133–L155</a><ul><li><a href="#L140">SeqState.__init__（方法） · L140–L142</a></li><li><a href="#L144">SeqState.rebuild（方法） · L144–L147</a></li><li><a href="#L149">SeqState.next_seq（方法） · L149–L151</a></li><li><a href="#L153">SeqState.commit（方法） · L153–L155</a></li></ul></li><li><a href="#L158">check_seq_gap（函数） · L158–L169</a></li><li><a href="#L176">call_id_of（函数） · L176–L190</a></li><li><a href="#L193">declared_ranges（函数） · L193–L231</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/events/envelope.py — 事件信封模型与五步校验链 (specs/events.py.md)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Envelope 十字段强校验(model_validate 失败 → EVT-100)+ validate_envelope/</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>make_envelope(五步校验链唯一实现)+ SeqState(per-session seq 分配器)+</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>check_seq_gap(回放空洞自检,供 F031 warn_hole)。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>纪律:seq/ts 只由框架统一分配(make_envelope),LLM/工具/插件无权自报;</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>任何校验失败拒写(不进内存/总线/日志);抛错一律 raise_code(EVT-1xx)。</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>import re</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from typing import Any, Literal, Optional</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from pyharness.events.vocab import (ACTORS, SYNC_TYPES, TRANSIENT_TYPES,</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>                                    is_registered, summarize_validation,</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>                                    validate_payload)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code># ts 正则(ISO8601 UTC,微秒,末尾 Z)——EVENT-SCHEMA §2.1</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>_TS_PATTERN = r&quot;^\d{4}-\d{2}-\d{2}T.*Z$&quot;</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>def _utc_now_ts() -&gt; str:</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    &quot;&quot;&quot;框架统一打点:UTC 微秒 ISO8601,以 Z 结尾(禁外部自报)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    return datetime.now(timezone.utc).isoformat(timespec=&quot;microseconds&quot;).replace(</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        &quot;+00:00&quot;, &quot;Z&quot;)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code></code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>class Envelope(BaseModel):</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    &quot;&quot;&quot;事件信封:十字段强校验(PRD §3.2 / EVENT-SCHEMA §2.1)。</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    冻结信封(extra=&quot;forbid&quot; + frozen=True):拒多余字段、禁事后改字段;</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    payload 按 type 二次强校验在校验链第 3 步完成。</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code></code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    model_config = ConfigDict(extra=&quot;forbid&quot;, frozen=True)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    seq: int = Field(ge=1)                    # 会话内单调 +1,框架分配</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    ts: str = Field(pattern=_TS_PATTERN)      # ISO8601 UTC 微秒,框架打</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    type: str                                 # 词表枚举;未注册 → EVT-102</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    session_id: str = Field(min_length=8)     # 形如 s-abc12345;fork 新 id</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    actor: Literal[&quot;user&quot;, &quot;agent&quot;, &quot;llm&quot;, &quot;tool&quot;, &quot;system&quot;, &quot;plugin&quot;]</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    origin: Optional[str] = None              # 插件/能力 id(如 plugin:echo)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    task_id: Optional[str] = None             # 所属任务段;无任务上下文为空</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    payload: dict = Field(default_factory=dict)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    trace: Optional[dict] = None              # 语义父关联,建议 {&quot;parent_seq&quot;: int}</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    # 租户归属(GAP-10;可选字段,默认 None = 单租户/未声明)。</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    #</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    # 为什么落在**信封**而不是各 payload 模型:租户是**所有**事件共有的横切归属,</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    # 不是某一类事件特有的业务字段。放进 77 个 payload 模型需要改 77 处 schema</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    # (H-3 级改动且必然漂移),放进信封只需一处,且与 session_id/actor 同级——</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    # 它们同样是&quot;每条事件都有的元信息&quot;。旧日志缺该字段 ⇒ 反序列化为 None,</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    # 向后兼容、可 replay(INV-02 不变)。</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    #</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    # 纪律:租户由**框架侧**注入(SessionLog 携带,见 core/session.py),</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    # 不由 LLM/工具/插件自报——与 seq/ts 同款单点分配纪律。</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    tenant_id: Optional[str] = None           # 租户归属;None = 未声明(单租户)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    @field_validator(&quot;ts&quot;)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    @classmethod</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    def _ts_utc(cls, v: str) -&gt; str:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        &quot;&quot;&quot;框架统一打(禁外部自报):ts 必须 UTC 且以 Z 结尾。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        if not v.endswith(&quot;Z&quot;):</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            raise ValueError(&quot;ts 必须 UTC 且以 Z 结尾&quot;)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        return v</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>def validate_envelope(raw: dict, seq_state: &quot;SeqState&quot;,</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                      session_open: bool = True) -&gt; Envelope:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    &quot;&quot;&quot;五步校验链唯一实现,顺序不可交换;任一失败拒写(EVENT-SCHEMA §2.2)。</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    1 信封字段(类型/枚举/正则)→ EVT-100;2 类型注册 → EVT-102;</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    3 payload 强校验 → EVT-100;4 seq 连续性 → EVT-101;</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    5 会话状态:未 created 即写(且非 session.created)→ EVT-106。</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    (终态写违规 EVT-104 由 session.append 状态机侧把关,INV-01)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    try:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        env = Envelope.model_validate(raw)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    except ValidationError as e:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        raise_code(&quot;EVT-100&quot;, detail=summarize_validation(e))</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    # 2 类型必须已注册(EVT-102)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    if not is_registered(env.type):</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        raise_code(&quot;EVT-102&quot;, type_=env.type)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    # 3 payload 二次强校验 → 规范化(冻结信封:model_copy 换 payload,不原地改)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    canonical = validate_payload(env.type, env.payload)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    env = env.model_copy(update={&quot;payload&quot;: canonical})</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    # 4 seq 必须 = _next_seq + 1(EVT-101)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    expected = seq_state.next_seq(env.session_id)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    if env.seq != expected:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        raise_code(&quot;EVT-101&quot;, session_id=env.session_id,</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                   expected=expected, got=env.seq)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    # 5 会话状态:未 created 且本事件不是 opening 的 session.created → EVT-106</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    if not session_open and env.type != &quot;session.created&quot;:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        raise_code(&quot;EVT-106&quot;, type_=env.type, hint=&quot;首事件必须是 session.created(seq=1)&quot;)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    return env</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code></code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code></code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>def make_envelope(session_id: str, type_: str, actor: str, payload: dict, *,</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                  origin: Optional[str] = None, task_id: Optional[str] = None,</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                  trace: Optional[dict] = None,</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                  tenant_id: Optional[str] = None,</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                  seq_state: Optional[&quot;SeqState&quot;] = None) -&gt; Envelope:</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    &quot;&quot;&quot;框架打点构造器:seq/ts 由框架统一分配(§3.1-5),再走 validate_envelope 全链。</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    调用方(会话层)在 append 成功落盘后调用 seq_state.commit(env) 记账;</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    seq_state.open 指示会话&quot;已 created 且未 finished&quot;。</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code></code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    ``tenant_id``(GAP-10):由**会话层**注入(``SessionLog.tenant_id``),不由调用</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    点逐个传——保证同一会话的每条事件归属一致,且新增调用点无需记得带上它。</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    if seq_state is None:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        raise_code(&quot;EVT-100&quot;, detail=&quot;make_envelope 缺 seq_state:seq 只能由框架分配&quot;)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    raw: dict[str, Any] = {</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        &quot;seq&quot;: seq_state.next_seq(session_id),   # 框架唯一打点(防伪造乱序)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        &quot;ts&quot;: _utc_now_ts(),</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        &quot;type&quot;: type_,</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        &quot;session_id&quot;: session_id,</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        &quot;actor&quot;: actor,</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        &quot;origin&quot;: origin,</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        &quot;task_id&quot;: task_id,</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        &quot;payload&quot;: payload,</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        &quot;trace&quot;: trace,</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        &quot;tenant_id&quot;: tenant_id,</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    }</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    return validate_envelope(raw, seq_state,</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                             session_open=session_id in seq_state.open)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code></code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code></code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>class SeqState:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    &quot;&quot;&quot;per-session seq 分配器与空洞口径(§3.4)。</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code></code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    内存 _next 从日志 max 重建(rebuild);append 恒 max+1;compaction/fork/repair</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    空洞只解释不回填。open = 已 created 且未 finished(由会话层经 rebuild 开闸)。</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code></code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    def __init__(self) -&gt; None:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        self._next: dict[str, int] = {}     # session_id → 下个可用 seq</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        self.open: set[str] = set()         # 已 created 且未 finished</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code></code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>    def rebuild(self, session_id: str, max_seq: int) -&gt; None:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        &quot;&quot;&quot;启动/repair 后从日志重建:max_seq 为已落盘最大 seq,并开闸会话。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        self._next[session_id] = max_seq + 1</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        self.open.add(session_id)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code></code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    def next_seq(self, session_id: str) -&gt; int:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        &quot;&quot;&quot;期望的下一个 seq;无记录 → 1(session.created 首事件)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        return self._next.get(session_id, 1)</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code></code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    def commit(self, env: Envelope) -&gt; None:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        &quot;&quot;&quot;validate 通过并落盘成功后记账:_next = env.seq + 1。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        self._next[env.session_id] = env.seq + 1</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code></code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code></code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>def check_seq_gap(events: list[int], declared: list[tuple[int, int]]) -&gt; list[int]:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    &quot;&quot;&quot;回放空洞自检:无 compacted/recovered 声明覆盖的 seq 空洞列表(供 warn_hole)。</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code></code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    declared = 合法空洞闭区间声明(如 context.compacted.ranges);返回未声明空洞,</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    升序;不中断回放。</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    declared_holes: set[int] = set()</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    for lo, hi in declared:</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        declared_holes.update(range(lo, hi + 1))</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    actual = set(events)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    expected = set(range(1, max(events) + 1)) if events else set()</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    return sorted(expected - actual - declared_holes)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code></code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code></code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code># 空洞合法化声明事件类型(§3.4):折叠与修复都把&quot;seq 缺失&quot;变成**已声明事实**。</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>DECLARE_TYPES: frozenset = frozenset({&quot;context.compacted&quot;, &quot;session.recovered&quot;})</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code></code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code></code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>def call_id_of(env: Any) -&gt; str:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    &quot;&quot;&quot;事件的 ``call_id`` —— **唯一读取点**:payload 优先,回落 ``trace``。</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code></code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    存放位置按事件族不同(历史成因,见 LIMITATIONS **L-17**):``tool.call`` /</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    ``tool.result`` 在 **payload**;``guard.*`` / ``decision.issued`` /</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    ``receipt.emitted`` / ``approval.requested`` 在 **trace**。读取方**不得只认</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>    一处**(R24 收口:全库读取点统一走本函数,避免未来新增读取方漏判一侧)。</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>    取不到 → ``&quot;&quot;``(不抛:审计读取面永不因缺字段中断)。</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    payload = getattr(env, &quot;payload&quot;, None) or {}</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>    cid = payload.get(&quot;call_id&quot;) if isinstance(payload, dict) else None</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    if not cid:</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        trace = getattr(env, &quot;trace&quot;, None) or {}</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        cid = trace.get(&quot;call_id&quot;) if isinstance(trace, dict) else None</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    return str(cid or &quot;&quot;)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code></code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code></code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>def declared_ranges(env: Any) -&gt; list[tuple[int, int]]:</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>    &quot;&quot;&quot;声明事件 → **合法空洞闭区间**列表(空洞合法化的**唯一判据**)。</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code></code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>    - ``context.compacted.ranges`` —— 折叠闭区间 ``[[lo, hi], …]``;</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    - ``session.recovered`` —— ``lost`` 的逐号单点区间,外加 ``fixed`` 中</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>      ``&quot;seq-holes:[…]&quot;`` 词条(repair 对&quot;未声明空洞&quot;的声明;重复 repair 不重复告警)。</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code></code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    非声明事件 → ``[]``。**所有**空洞合法性判定都必须走本函数:</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>    ``SessionLog`` 回放告警 / ``SessionStore`` 合法性 / ``repair`` 扫描 / 治理对账。</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code></code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    2026-09-21 R14-9:此前四处各自实现,其中 ``SessionLog._absorb`` **只认 compacted**</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>    ⇒ repair 已用 ``seq-holes:[…]`` 声明的空洞,在下次 ``open_session`` 回放时又被报成</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>    &quot;未声明空洞(疑丢事件)&quot;(实测:同一次合法修复被告警两次,属**假 F031 线索** + 日志</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>    噪声)。判据多源必漂移。</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>    t = getattr(env, &quot;type&quot;, None)</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>    payload = getattr(env, &quot;payload&quot;, None) or {}</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>    out: list[tuple[int, int]] = []</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    if t == &quot;context.compacted&quot;:</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        for pair in (payload.get(&quot;ranges&quot;) or []):</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            try:</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>                lo, hi = int(pair[0]), int(pair[1])</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            except (TypeError, ValueError, IndexError, KeyError):</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                continue</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            if lo &lt;= hi:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>                out.append((lo, hi))</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>    elif t == &quot;session.recovered&quot;:</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        for s in (payload.get(&quot;lost&quot;) or []):</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>            try:</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>                out.append((int(s), int(s)))</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>                continue</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        for item in (payload.get(&quot;fixed&quot;) or []):</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>            m = re.match(r&quot;^seq-holes:\[(.*)\]$&quot;, str(item))</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>            if m and m.group(1).strip():</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                for x in m.group(1).split(&quot;,&quot;):</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                    if x.strip().isdigit():</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                        out.append((int(x), int(x)))</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    return out</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code></code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code></code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>__all__ = [</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>    &quot;ACTORS&quot;, &quot;SYNC_TYPES&quot;, &quot;TRANSIENT_TYPES&quot;, &quot;Envelope&quot;,</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    &quot;validate_envelope&quot;, &quot;make_envelope&quot;, &quot;SeqState&quot;, &quot;check_seq_gap&quot;,</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>    &quot;DECLARE_TYPES&quot;, &quot;declared_ranges&quot;, &quot;call_id_of&quot;,</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

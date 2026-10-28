@@ -1,0 +1,110 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/persistence_recovery.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/persistence_recovery.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 110 行</span></nav><main class="wrap source-page"><h1>pyharness/persistence_recovery.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：2891997155213d3aff659f2d0eef5c0eb61fc2cc<br>SHA-256（内容校验）：80806170f63d7f96e7194bb0bdd5145ab5e21916e546d898d1b49deca89d7165</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 8 个类、函数与方法</summary><ul><li><a href="#L13">PersistenceRecovery（类） · L13–L109</a><ul><li><a href="#L16">PersistenceRecovery.detect_truncation（方法） · L16–L19</a></li><li><a href="#L23">PersistenceRecovery._rotated_paths（方法） · L23–L35</a></li><li><a href="#L37">PersistenceRecovery._maybe_rotate（方法） · L37–L52</a></li><li><a href="#L55">PersistenceRecovery.seq_holes（方法） · L55–L70</a></li><li><a href="#L72">PersistenceRecovery._declared_by_compaction（方法） · L72–L86</a></li><li><a href="#L88">PersistenceRecovery.quarantine_info（方法） · L88–L91</a></li><li><a href="#L93">PersistenceRecovery._on_system_event（异步方法） · L93–L109</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;PersistenceRecovery operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import os</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import re</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from typing import Optional</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.events import declared_ranges</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.persistence_policy import log</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.persistence_reader import detect_truncation, RepairReport</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>class PersistenceRecovery:</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    &quot;&quot;&quot;PersistenceRecovery responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    def detect_truncation(path: Path) -&gt; Optional[int]:</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        &quot;&quot;&quot;同模块函数(静态门面,兼容既有调用形态)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        return detect_truncation(path)</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    def _rotated_paths(self) -&gt; list[Path]:</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        &quot;&quot;&quot;主目录下 {sid}.{n}.jsonl(n 从 1)按序号升序(重放合并顺序)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        pat = re.compile(r&quot;^&quot; + re.escape(self.session_id) + r&quot;\.(\d+)\.jsonl$&quot;)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        found: list[tuple[int, Path]] = []</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        try:</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>            children = list(self.path.parent.iterdir())</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        except OSError:</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>            return []</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        for child in children:</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>            m = pat.match(child.name)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            if m:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                found.append((int(m.group(1)), child))</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        return [p for _n, p in sorted(found)]</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    def _maybe_rotate(self) -&gt; None:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        &quot;&quot;&quot;轮转检查(append 写入后调用):&gt;rotate_bytes → _rotate。</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code></code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        大小取 OS 文件字节数(fstat),不用 `_fh.tell()`——文本模式 tell() 返回的是</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        不透明游标(cookie)而非字节偏移,与 rotate_bytes(字节)不可比(P3:_rotate 判定)。</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        轮转失败只记日志不抛(数据无损:事件已先落主文件;rename 原子性保证主文件</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        仍在),下次 append 再触发——避免在 append 成功路径上叠加二次异常。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        if self._retry_q or self._pending:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>            return</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        try:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            size = os.fstat(self._fh.fileno()).st_size</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            if size &gt; self.rotate_bytes:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>                self._rotate()</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        except (OSError, ValueError) as e:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            log.error(&quot;PERS-202 域:轮转失败(数据无损,下次重试) why=%s&quot;, e)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    def seq_holes(self, path: Path) -&gt; list[int]:</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        &quot;&quot;&quot;对照连续序列找缺失号(含轮转合并回放;path 参数保留 spec 形态)。</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        只找相邻差 &gt;1 的缺口;seq 只前进,空洞只解释不回填(§3.4)。重复/倒退</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        (range 空)不入洞——append 保证单调,此处只定位缺失,声明判定在 repair 内。</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        seqs = [env.seq for env in self.replay()]     # 复用坏行隔离读取</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        holes: list[int] = []</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        if seqs and seqs[0] &gt; 1:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            # 前缀段连续缺失(轮转文件丢失/坏文件):seq 1..(seqs[0]-1) 整体缺失,</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            # 旧实现只查相邻差、对首段失明(P1-5,与 repair.check_seq_gap 口径对齐)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            holes.extend(range(1, seqs[0]))</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        for expect, got in zip(seqs, seqs[1:]):</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            if got != expect + 1:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                holes.extend(range(expect + 1, got))  # 相邻差 &gt;1 = 空洞</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        return holes</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    def _declared_by_compaction(self, holes: list[int]) -&gt; bool:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        &quot;&quot;&quot;空洞合法性判定:对照 context.compacted.ranges / session.recovered 声明。</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        覆盖来源:compacted.ranges 闭区间、recovered.lost 截断 seq 清单、既往</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        recovered.fixed 中 &quot;seq-holes:[…]&quot; 声明(重复 repair 不重复告警)。</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        全部被声明覆盖 → 合法空洞(压缩/截断/修复事实),不告警不回填。</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code></code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        2026-09-21 R14-9:判据**唯一来源** ``events.declared_ranges``(此前本处、</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        ``repair``、``session``、``governance.audit`` 各写一份 ⇒ 漂移)。</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        covered: set[int] = set()</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        for env in self.replay():</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            for lo, hi in declared_ranges(env):</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                covered.update(range(lo, hi + 1))</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        return all(h in covered for h in holes)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    def quarantine_info(self) -&gt; dict:</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        &quot;&quot;&quot;坏行隔离区只读暴露(repair 决策/用户查看):{path, line_nos, count}。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        nos = sorted(self._quarantine)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        return {&quot;path&quot;: str(self.path), &quot;line_nos&quot;: nos, &quot;count&quot;: len(nos)}</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    async def _on_system_event(self, type_: str, payload: dict) -&gt; None:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        &quot;&quot;&quot;向上写 system.error / session.recovered(INV-08 无回边)。</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code></code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        回调签名:async cb(type_: str, payload: dict) -&gt; None,由装配层/bus 日志</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        订阅者注入;装配层负责打 seq/ts 成信封并 append(sync=True)——本模块不自造</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        信封(seq/ts 只能框架分配,EVENT-SCHEMA §1.1-4)。未注入 → 降级日志</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        (阶段 2 装配后必有);回调失败不掩盖主路径错误。</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        cb = self.on_system_event</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        if cb is None:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            log.warning(&quot;on_system_event 未注入,type=%s 仅日志留痕(装配层阶段注入)&quot;,</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                        type_)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>            return</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        try:</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            await cb(type_, payload)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        except Exception as exc:                 # noqa: BLE001 — 不掩盖主错误</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            log.error(&quot;on_system_event(type=%s) 失败:%s&quot;, type_, exc)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

@@ -1,0 +1,105 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/execution_state_restore.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/execution_state_restore.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 105 行</span></nav><main class="wrap source-page"><h1>pyharness/application/execution_state_restore.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：9d36859ef7cdf5bb9c2de6f71309bc1e944f4a30<br>SHA-256（内容校验）：e28f0b3ce642fe8ec0ae3cefc98d8e880a42d6781a208344dbc6111bac516c43</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 8 个类、函数与方法</summary><ul><li><a href="#L12">root_identity（函数） · L12–L15</a></li><li><a href="#L18">write_new_state_file（函数） · L18–L42</a></li><li><a href="#L45">apply_directory_mode（函数） · L45–L59</a></li><li><a href="#L62">verify_restored_workspace（函数） · L62–L70</a></li><li><a href="#L73">restore_state_workspace（函数） · L73–L90</a><ul><li><a href="#L77">restore_state_workspace.checked（方法） · L77–L79</a></li></ul></li><li><a href="#L93">restore_state_kv（函数） · L93–L105</a><ul><li><a href="#L97">restore_state_kv.checked（方法） · L97–L99</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Internal fresh private-state preparation; never old journal or host writeback.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import base64,os,stat</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pydantic import TypeAdapter</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.execution_contracts import ExecutionSessionId</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.execution_state_capture import workspace_state,state_regular,StateUnavailable</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.workspace_store import digest_of</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.core.sandbox import safe_path</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>def root_identity(root):</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    safe_path(root,&#x27;owned-state-check&#x27;);info=root.lstat()</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    if not stat.S_ISDIR(info.st_mode):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_destination_not_directory&#x27;)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    return info.st_dev,info.st_ino</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>def write_new_state_file(root,name,raw,mode,gate):</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    gate()</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    if os.name==&#x27;nt&#x27;:</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        descriptor_mode=hasattr(os,&#x27;fchmod&#x27;) or os.chmod in os.supports_fd</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        if mode not in (0o444,0o666) or (mode==0o444 and not descriptor_mode):</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_file_mode_unsupported&#x27;)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    target=safe_path(root,name)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,&#x27;O_NOFOLLOW&#x27;,0)|getattr(os,&#x27;O_BINARY&#x27;,0),0o600)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    with os.fdopen(fd,&#x27;wb&#x27;) as stream:</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        opened=os.fstat(stream.fileno());current=safe_path(root,name).lstat()</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1 or</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>                (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)):</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>            raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_destination_changed&#x27;)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        gate()</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        if hasattr(os,&#x27;fchmod&#x27;):os.fchmod(stream.fileno(),mode)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        elif os.chmod in os.supports_fd:os.chmod(stream.fileno(),mode)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        if stat.S_IMODE(os.fstat(stream.fileno()).st_mode)!=mode:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_file_mode_unsupported&#x27;)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        if stream.write(raw)!=len(raw):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_short_write&#x27;)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        stream.flush();os.fsync(stream.fileno())</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    # A path can now name a different inode or an outside hardlink. Never use</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    # it for chmod after closing the exclusively created, bound descriptor.</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    gate()</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    actual,_=state_regular(safe_path(root,name),len(raw))</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    if actual!=raw:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_state_write_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>def apply_directory_mode(root,name,mode,gate):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    gate();path=safe_path(root,name);before=path.lstat()</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    if not stat.S_ISDIR(before.st_mode):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_directory_changed&#x27;)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    if stat.S_IMODE(before.st_mode)==mode:return</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    fd=os.open(path,os.O_RDONLY|getattr(os,&#x27;O_DIRECTORY&#x27;,0)|getattr(os,&#x27;O_NOFOLLOW&#x27;,0))</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    try:</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        opened=os.fstat(fd);current=safe_path(root,name).lstat()</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        if not stat.S_ISDIR(opened.st_mode) or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino):</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>            raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_directory_changed&#x27;)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        gate()</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        if hasattr(os,&#x27;fchmod&#x27;):os.fchmod(fd,mode)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        elif os.chmod in os.supports_fd:os.chmod(fd,mode)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        else:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_directory_mode_unsupported&#x27;)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    finally:os.close(fd)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    gate()</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code></code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>def verify_restored_workspace(root,body,gate):</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    gate();root=Path(root);identity=root_identity(root)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    if body.filesystem_capture!=&#x27;files_and_directories&#x27;:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_complete_filesystem_required&#x27;)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    try:files,dirs=workspace_state(root)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    except (StateUnavailable,OSError):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_workspace_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    expected={f.path:f.model_dump() for f in body.files};expected_dirs={d.path:d.model_dump() for d in body.directories}</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    if ({f[&#x27;path&#x27;]:f for f in files}!=expected or {d[&#x27;path&#x27;]:d for d in dirs}!=expected_dirs or root_identity(root)!=identity):</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_workspace_changed&#x27;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    gate()</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>def restore_state_workspace(root,body,gate):</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    gate();root=Path(root);identity=root_identity(root)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    if body.filesystem_capture!=&#x27;files_and_directories&#x27;:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_complete_filesystem_required&#x27;)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    if any(root.iterdir()):raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_destination_not_empty&#x27;)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    def checked():</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        gate()</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        if root_identity(root)!=identity:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_workspace_root_changed&#x27;)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    try:</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        for directory in sorted(body.directories,key=lambda d:(len(d.path.split(&#x27;/&#x27;)),d.path)):</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            checked();safe_path(root,directory.path).mkdir(mode=0o700)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        for file in body.files:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            checked();raw=base64.b64decode(file.data_b64,validate=True)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            if digest_of(raw)!=file.sha256 or len(raw)!=file.size:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_state_bytes_changed&#x27;)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            write_new_state_file(root,file.path,raw,file.mode,checked)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        for directory in sorted(body.directories,key=lambda d:(-len(d.path.split(&#x27;/&#x27;)),d.path)):</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            apply_directory_mode(root,directory.path,directory.mode,checked)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        checked();verify_restored_workspace(root,body,checked)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    except (StateUnavailable,OSError):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_workspace_restore_failed&#x27;)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>def restore_state_kv(directory,sid,body,gate):</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    gate();TypeAdapter(ExecutionSessionId).validate_python(sid,strict=True)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    if sid==body.session_id:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_requires_new_session&#x27;)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    directory=Path(directory);safe_path(directory,sid+&#x27;.kv.json&#x27;);identity=root_identity(directory)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    def checked():</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        gate()</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        if root_identity(directory)!=identity:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_kv_root_changed&#x27;)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    path=safe_path(directory,sid+&#x27;.kv.json&#x27;)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    if path.exists():raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_kv_namespace_exists&#x27;)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    if body.kv_present:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        try:write_new_state_file(directory,path.name,base64.b64decode(body.kv_data_b64,validate=True),0o600,checked)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        except (StateUnavailable,OSError):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_kv_restore_failed&#x27;)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    checked()</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

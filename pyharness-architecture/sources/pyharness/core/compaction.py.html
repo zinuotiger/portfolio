@@ -1,0 +1,506 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/compaction.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/compaction.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 506 行</span></nav><main class="wrap source-page"><h1>pyharness/core/compaction.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：5080aedcf6f54b9743a8a9fa44d5574d0c673a93<br>SHA-256（内容校验）：9be0027798129e25fbe07b0e237936ec67fe24f8718620c1f260e7e33fb8063d</p><p><a href="../../../architecture-detailed.html?node=compaction">Context Compaction（上下文任务段压缩）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 24 个类、函数与方法</summary><ul><li><a href="#L81">Compactor（类） · L81–L497</a><ul><li><a href="#L105">Compactor.__init__（方法） · L105–L119</a></li><li><a href="#L121">Compactor._apply_config（方法） · L121–L132</a></li><li><a href="#L134">Compactor.from_config（方法） · L134–L137</a></li><li><a href="#L140">Compactor._events（方法） · L140–L143</a></li><li><a href="#L145">Compactor._declared_ranges（方法） · L145–L149</a></li><li><a href="#L151">Compactor._ranges_overlap（方法） · L151–L154</a></li><li><a href="#L156">Compactor._window（方法） · L156–L169</a></li><li><a href="#L171">Compactor._busy_state（方法） · L171–L187</a></li><li><a href="#L189">Compactor._assert_boundary（方法） · L189–L195</a></li><li><a href="#L198">Compactor._turns_since_last_compact（方法） · L198–L205</a></li><li><a href="#L207">Compactor.should_compact（方法） · L207–L218</a></li><li><a href="#L221">Compactor._recent_anchor_seq（方法） · L221–L227</a></li><li><a href="#L229">Compactor._segments_before（方法） · L229–L249</a></li><li><a href="#L251">Compactor._protected（方法） · L251–L305</a></li><li><a href="#L307">Compactor.candidates（方法） · L307–L323</a></li><li><a href="#L326">Compactor._degrade_summary（方法） · L326–L338</a></li><li><a href="#L340">Compactor._call_summarize（异步方法） · L340–L350</a></li><li><a href="#L352">Compactor._summarize_segment（异步方法） · L352–L370</a></li><li><a href="#L372">Compactor._apply（异步方法） · L372–L400</a></li><li><a href="#L402">Compactor.compact（异步方法） · L402–L443</a></li><li><a href="#L446">Compactor.kv_prefix_plan（方法） · L446–L460</a></li><li><a href="#L463">Compactor.run_if_needed（异步方法） · L463–L476</a></li><li><a href="#L478">Compactor._signal（方法） · L478–L497</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/compaction.py — 上下文压缩 (specs/compaction.py.md 契约;F058 核心)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>接近窗口上限时把**早期完整任务段**折叠为摘要。物理日志仍只追加(INV-01 铁律):</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>折叠区间原事件一行不删不改,只追加一条强同步 `context.compacted`</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>(ranges/summary/tokens_before/tokens_after) 声明,折叠标记由 session 在吸收</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>声明事件时同步入 `_folded` 索引——&quot;遮蔽&quot;与&quot;声明&quot;是同一动作,任何时刻可按</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>ranges 展开日志核对原文(压缩但不撒谎)。</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>模块职责(对应 spec §模块职责):</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>  1. 触发判定 should_compact:派生历史 ≥75% 窗口 **且** 距上次压缩新增 ≥10 轮</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>     (双条件缺一不触发,防窗口抖动频繁压缩;参数锁死见 PARAMETER-ANCHOR)。</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>  2. 候选选择 candidates:最近 12 轮(保留锚)以前的**完整任务段**(segment.start/</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>     segment.end 配对齐全、end_seq ≤ 保留锚),整段不切半(F044);含未完成</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>     plan/goal/todo、待审批 approval、guard.rejected、已折叠区间的段整体剔除。</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>  3. 压缩执行 compact/_apply:逐段独立 LLM 摘要(预算 400 token,失败重试 1 次</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>     仍败 → _degrade_summary 规则降级,不阻塞对话)→ 强同步追加 context.compacted</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>     (声明不落盘则回放误报空洞,EVENT-SCHEMA §8.1)。</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>  4. run_if_needed:请求前门面(agent-loop 消费;非空闲边界不压不炸)。</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>  5. kv_prefix_plan:两次压缩之间派生历史头部前缀稳定,供 llm 层标注 cache 命中区。</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>依赖(单向只读):errors.raise_code(EVT-100/PERS-202 透传/LLM-399);core.session</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>SessionLog(仅公开只读 API);core.system_prompt.est_tokens 为窗口截断估算器(本</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>模块自带 estimate_tokens,中文 1 token/字口径,仅供相对比较与声明留痕)。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>偏离说明(契约=spec,以下为落地取舍,均列理由):</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>  1. session 缺失方法面:spec 伪码消费 session.mark_folded/segments_before/</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>     folded_overlaps/last_event_of/events_until/all_events,但阶段 1 锁定的</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>     SessionLog 未提供这些公开方法,且 test_session 以 `public &lt;= allowed`</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>     钉死方法面(追加方法会破坏既有 989 测试)→ 本模块以公开只读 API</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>     (events_after/events_between/stats/derive_history)本地实现等价逻辑:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>     - &quot;mark_folded&quot; = session.append(context.compacted) 时 _absorb 自动注册</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>       _folded 索引(遮蔽标记与声明事件同源、可由日志重建,符合 INV-01/03),</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>       故无需也不应先行写内存;</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>     - 任务段切片(segments_before)由本模块扫描 segment.start/end 配对重建;</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>     - 折叠区间索引(folded_overlaps)读取 session.stats()[&quot;folded_ranges&quot;]。</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>  2. tokens_after 口径:本仓库 reducer(session._fold_history)对折叠区间原文仍</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>     投影(测试断言&quot;折叠前原文仍可派生——压缩但不撒谎&quot;),spec 伪码</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>     &quot;mark_folded 后 estimate_tokens(derive_history())&quot; 无法减量 → tokens_after</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>     以**掩码投影口径**计算:before − Σ(折叠区间原文投影 token) + Σ(摘要消息</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>     token),即&quot;区间以摘要代&quot;后的派生规模;纯会计函数,不建第二份历史。</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>  3. BUSY 未登记码:raise_code 会把未登记码改写为 CYC-999(语义不符),按</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>     agent_loop/scope 同款先例直接构造 PyHError(&quot;BUSY&quot;)(busy 判定:agent.state/</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>     loop.state 非空闲即忙)。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>  4. 摘要 LLM 出口:ctx.llm.summarize(prompt, budget=...) 为注入点(spec F012 出口);</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>     未装配 → 抛 LLM-399(走降级,不裸退)。摘要失败 = PyHError(含 LLM-3xx</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>     透传);重试 1 次仍败由 compact() 捕获转规则降级。</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>  5. 空降级文本兜底:ContextCompactedPayload.summary 要求 min_length=1,整段无可</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>     保留决策文本时以诚实占位串入摘要(明确声明&quot;无内容保留&quot;,degraded=True),</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>     不伪造内容(压缩但不撒谎)。</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code></code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>import logging</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>import re</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>from typing import Any, Optional, Union</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>from pyharness.events import Envelope</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code></code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code># ------------------------------------------------------------------ 常量</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code># F058 数字约束(PARAMETER-ANCHOR 锁死;读 config loop.compact 可调)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code># 降级摘要保留的决策类事件类型(其余类型——tool.* 原文/guard.*/approval.* 等</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code># 审计细节——一律丢弃;SECURITY.md §3.1:guard 拒绝与不可折叠内容不进摘要)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code># ASCII 词切分(token 估算用;与 session._estimate_tokens 同口径,保证差值可减)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code># ================================================================= 数据结构</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code># (spec 数据结构表:字段与默认值逐项对齐)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code># ================================================================= 工具函数</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code># ================================================================= Compactor</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>from pyharness.core.compaction_projection import (log, DEFAULT_KEEP_RECENT_ROUNDS, DEFAULT_WINDOW_RATIO, DEFAULT_MIN_NEW_ROUNDS, DEFAULT_SUMMARY_BUDGET, DEFAULT_WINDOW_TOKENS, _DEGRADE_KEEP, _DEGRADE_MAX_CHARS, _ASCII_WORD, _CJK_RANGE, _MSG_OVERHEAD, FoldCandidate, SegmentSummary, CompactReport, PrefixPlan, _count_text_tokens, estimate_tokens, _payload_text, _projection, render_segment, render_compacted_message)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>class Compactor:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    &quot;&quot;&quot;上下文压缩引擎(F058)。</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code></code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    参数(锁死值来自 PARAMETER-ANCHOR,读 config loop.compact 可调):</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        keep_recent_rounds = 12   保留最近 N 轮原文(保留锚)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        window_ratio       = 0.75 触发①阈值(派生 ≥75% 窗口)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        min_new_rounds     = 10   触发②阈值(距上次压缩新增 ≥10 轮)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        summary_budget     = 400  每段 LLM 摘要 token 预算</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        window_tokens      = None 窗口兜底(scope.window_tokens 数据源优先)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        config             = None Settings 快照(读 loop.compact.* 回落)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    ctx 所需成员(鸭子注入,均按需 getattr):</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        session: SessionLog 事件日志(events_after/events_between/stats/</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                 derive_history/append 只读+声明写)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        scope:   window_tokens 数据源(可缺 → config/构造兜底)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        llm:     summarize(prompt, budget=...) 摘要出口(可缺 → LLM-399 降级)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        agent/loop: 状态源(BUSY 判定;可缺 = 视为空闲边界)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        bus:     sysprompt.compacted 信号出口(可缺 = 日志降级)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code></code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    错误(全走 raise_code/构造 PyHError):EVT-100(区间与既有折叠重叠 = 内部</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    bug 拒写)、PERS-202(强同步声明落盘失败,由 session.append 上抛透传)、</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    BUSY(会话 running 中直接调 compact)、LLM-399(摘要出口未装配/空摘要)。</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    def __init__(self, *,</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                 keep_recent_rounds: int = DEFAULT_KEEP_RECENT_ROUNDS,</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                 window_ratio: float = DEFAULT_WINDOW_RATIO,</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                 min_new_rounds: int = DEFAULT_MIN_NEW_ROUNDS,</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                 summary_budget: int = DEFAULT_SUMMARY_BUDGET,</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                 window_tokens: Optional[int] = None,</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                 config: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        self._keep_recent_rounds = int(keep_recent_rounds)</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        self._window_ratio = float(window_ratio)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        self._min_new_rounds = int(min_new_rounds)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        self._summary_budget = int(summary_budget)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        self._window_tokens = window_tokens</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        self.config = config</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        if config is not None:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            self._apply_config(config)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    def _apply_config(self, cfg: Any) -&gt; None:</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        &quot;&quot;&quot;config 回落:loop.compact.* 覆盖锁死默认(仅当显式配置存在)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        compact = getattr(getattr(cfg, &quot;loop&quot;, None), &quot;compact&quot;, None)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        if compact is None:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            return</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        for key, attr in ((&quot;trigger_ratio&quot;, &quot;_window_ratio&quot;),</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                          (&quot;min_new_rounds&quot;, &quot;_min_new_rounds&quot;),</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>                          (&quot;keep_recent_rounds&quot;, &quot;_keep_recent_rounds&quot;),</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>                          (&quot;summarize_budget_tokens&quot;, &quot;_summary_budget&quot;)):</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            val = getattr(compact, key, None)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            if isinstance(val, (int, float)) and val &gt; 0:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                setattr(self, attr, val)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    @classmethod</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    def from_config(cls, cfg: Any) -&gt; &quot;Compactor&quot;:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        &quot;&quot;&quot;装配便利:从 Settings 快照构建(含 loop.compact 与窗口回落)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        return cls(config=cfg)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code></code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    # ==================================================== 内部只读辅助</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    def _events(self, ctx: Any) -&gt; list[Envelope]:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        &quot;&quot;&quot;全量事件快照(seq 升序;经 session 公开只读 API)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        session = ctx.session</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        return list(session.events_after(0))</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    def _declared_ranges(self, ctx: Any) -&gt; list[list[int]]:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        &quot;&quot;&quot;已折叠区间索引(来自 session._folded 只读出口 stats(),compacted</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        声明吸收时同步登记——与日志可重建一致,INV-01)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        session = ctx.session</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        return [list(r) for r in session.stats()[&quot;folded_ranges&quot;]]</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code></code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    def _ranges_overlap(a: tuple, b: tuple) -&gt; bool:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        &quot;&quot;&quot;两闭区间是否重叠。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        return a[0] &lt;= b[1] and b[0] &lt;= a[1]</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code></code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    def _window(self, ctx: Any) -&gt; int:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        &quot;&quot;&quot;窗口 token 数据源链:scope.window_tokens → config loop.max_context_tokens</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        → 构造兜底 → 内置默认 64k。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        scope = getattr(ctx, &quot;scope&quot;, None)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        win = getattr(scope, &quot;window_tokens&quot;, None)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        if isinstance(win, int) and win &gt; 0:</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>            return win</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        if isinstance(self._window_tokens, int) and self._window_tokens &gt; 0:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>            return self._window_tokens</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        cfg_win = getattr(getattr(self.config, &quot;loop&quot;, None),</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                          &quot;max_context_tokens&quot;, None)</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        if isinstance(cfg_win, int) and cfg_win &gt; 0:</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>            return cfg_win</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        return DEFAULT_WINDOW_TOKENS</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code></code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    def _busy_state(self, ctx: Any) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        &quot;&quot;&quot;BUSY 判定:agent.state/loop.state 任一非空闲即忙;缺省 = 空闲边界。</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code></code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        agent 状态字面量(agent.py):init/ready/busy/stopping/closed;</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        loop 状态字面量(agent_loop.py):idle/running/…。空闲 = agent ready/</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        idle 且 loop idle(或两者缺省)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        agent = getattr(ctx, &quot;agent&quot;, None)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        if agent is not None:</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>            st = getattr(agent, &quot;state&quot;, None)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>            if st and st not in (&quot;ready&quot;, &quot;idle&quot;):</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                return f&quot;agent:{st}&quot;</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        loop = getattr(ctx, &quot;loop&quot;, None)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        if loop is not None:</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>            st = getattr(loop, &quot;state&quot;, None)</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>            if st and st != &quot;idle&quot;:</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                return f&quot;loop:{st}&quot;</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        return None</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code></code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    def _assert_boundary(self, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        &quot;&quot;&quot;非请求边界直调 compact → BUSY(压缩只允许在会话空闲时,防竞争)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        busy = self._busy_state(ctx)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        if busy:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                &quot;advice&quot;: &quot;压缩仅允许在请求边界(会话空闲)执行;等 running 结束&quot;,</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                &quot;state&quot;: busy, &quot;module&quot;: &quot;compaction&quot;})</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code></code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    # ==================================================== ① 触发判定</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>    def _turns_since_last_compact(self, ctx: Any) -&gt; int:</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        &quot;&quot;&quot;自上次 context.compacted 以来新增的人机轮数(user.message 计数)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        last_seq = 0</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        for ev in self._events(ctx):</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            if ev.type == &quot;context.compacted&quot;:</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>                last_seq = ev.seq</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        return sum(1 for ev in self._events(ctx)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                   if ev.seq &gt; last_seq and ev.type == &quot;user.message&quot;)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code></code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    def should_compact(self, ctx: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        &quot;&quot;&quot;触发判定(F058 双条件;纯判定,不抛):</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        ① 派生历史 ≥75% 窗口;② 距上次压缩新增 ≥10 轮。缺一不触发。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        window = self._window(ctx)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        if window &lt;= 0:</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>            return False</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        hist_tokens = estimate_tokens(ctx.session.derive_history())</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        if hist_tokens &lt; self._window_ratio * window:    # ① 未到 75%</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            return False</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        if self._turns_since_last_compact(ctx) &lt; self._min_new_rounds:  # ② &lt;10</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            return False</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        return True</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code></code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>    # ==================================================== ② 候选选择</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>    def _recent_anchor_seq(self, ctx: Any) -&gt; int:</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        &quot;&quot;&quot;保留锚 = 从日志尾部倒数第 12 个 user.message 的 seq(锚之后的事件</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        一律不折叠);总轮 ≤12 → 0(无折叠空间)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        um = [ev.seq for ev in self._events(ctx) if ev.type == &quot;user.message&quot;]</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        if len(um) &lt;= self._keep_recent_rounds:</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>            return 0</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        return um[-self._keep_recent_rounds]</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code></code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>    def _segments_before(self, ctx: Any, anchor: int) -&gt; list[dict]:</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        &quot;&quot;&quot;重建完整任务段(F044):扫描 seq ≤ anchor 的事件,segment.start/end</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        按 task_id + start_seq 配对;仅收 start/end 均 ≤ anchor 的完整段。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        if anchor &lt;= 0:</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            return []</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        starts: dict[str, Envelope] = {}</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        segs: list[dict] = []</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        for ev in self._events(ctx):</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>            if ev.seq &gt; anchor:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>                break</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>            if ev.type == &quot;segment.start&quot;:</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                starts[ev.payload[&quot;task_id&quot;]] = ev</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>            elif ev.type == &quot;segment.end&quot;:</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>                start = starts.get(ev.payload[&quot;task_id&quot;])</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>                if start is not None and ev.seq &lt;= anchor and \</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>                        start.seq == ev.payload.get(&quot;start_seq&quot;):</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>                    segs.append({&quot;task_id&quot;: start.payload[&quot;task_id&quot;],</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                                 &quot;start&quot;: start.seq, &quot;end&quot;: ev.seq,</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                                 &quot;start_ts&quot;: start.ts})</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>                    del starts[ev.payload[&quot;task_id&quot;]]</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        return sorted(segs, key=lambda s: s[&quot;start&quot;])     # seq 升序</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code></code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>    def _protected(self, events: list[Envelope]) -&gt; bool:</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        &quot;&quot;&quot;不可折叠集命中判定(SECURITY.md §3.1 + F058):段内含以下任一内容</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        → 整段保护、不折叠(整段不切半):</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>          ① 未完成 plan(proposed/exec.step 无终态 rejected/done/aborted)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>             / goal(未 done/abandoned)/ todo(末次更新仍有未 done 项)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>          ② 待审批 approval.requested 段内无裁决</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>          ③ guard.rejected 拒绝记录(单调审计链,永不进摘要)</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        段边界假设:完整任务段内自启自结;跨段引用(他段 plan 在本段 exec)一律</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        保守保护(引用外部在跑计划 = 不可折叠)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        plan_closed: set[int] = set()     # 已终结 plan_id(proposed 的 seq)</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        plans_open: set[int] = set()      # 未终结 plan_id</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        goals_open: dict[str, str] = {}   # goal_id → 状态(created/active/paused)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        approvals_pending: set[int] = set()</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        todos_unfinished: bool = False</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        for ev in events:</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>            t = ev.type</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>            if t == &quot;guard.rejected&quot;:</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>                return True                                  # ③ 单调审计链</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>            if t == &quot;approval.requested&quot;:</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>                approvals_pending.add(ev.seq)                # ② 待审批</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            elif t in (&quot;approval.granted&quot;, &quot;approval.denied&quot;,</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>                       &quot;approval.timeout&quot;):</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>                approvals_pending.discard(ev.payload[&quot;approval_id&quot;])</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>            elif t == &quot;plan.proposed&quot;:</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>                plans_open.add(ev.seq)                       # ① plan 开启</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>            elif t == &quot;plan.exec.step&quot;:</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>                pid = ev.payload[&quot;plan_id&quot;]                  # 执行中(段内未见</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>                if pid not in plan_closed:                   # 终态即未完成)</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>                    plans_open.add(pid)</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>            elif t in (&quot;plan.rejected&quot;, &quot;plan.done&quot;, &quot;plan.aborted&quot;):</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                pid = ev.payload[&quot;plan_id&quot;]                  # 终态:closed</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>                plan_closed.add(pid)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>                plans_open.discard(pid)</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>            elif t == &quot;plan.approved&quot;:</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>                plans_open.add(ev.payload[&quot;plan_id&quot;])        # 批准 ≠ 完成</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>            elif t == &quot;goal.created&quot;:</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>                goals_open[ev.payload[&quot;goal_id&quot;]] = &quot;created&quot;</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            elif t == &quot;goal.updated&quot;:</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                gid = ev.payload[&quot;goal_id&quot;]</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                if ev.payload[&quot;status&quot;] in (&quot;done&quot;, &quot;abandoned&quot;):</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                    goals_open.pop(gid, None)                # 终态</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>                else:</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>                    goals_open[gid] = ev.payload[&quot;status&quot;]   # 仍 active/paused</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>            elif t == &quot;goal.completed&quot;:</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>                goals_open.pop(ev.payload[&quot;goal_id&quot;], None)</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>            elif t == &quot;todo.updated&quot;:</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>                todos = ev.payload.get(&quot;todos&quot;) or []</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                # payload 经 model_dump 归一:todo 项为 dict(兼容对象形态)</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                todos_unfinished = any(</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                    not (it.get(&quot;done&quot;) if isinstance(it, dict)</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>                         else getattr(it, &quot;done&quot;, False))</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                    for it in todos)                          # 末次更新口径</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        if approvals_pending or plans_open or goals_open or todos_unfinished:</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>            return True</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>        return False</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code></code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>    def candidates(self, ctx: Any) -&gt; list[FoldCandidate]:</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        &quot;&quot;&quot;折叠候选选择:最近 12 轮以前的完整任务段,命中不可折叠集/已折叠区间</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>        的段整体剔除;按 seq 升序返回(纯读,不抛)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        anchor = self._recent_anchor_seq(ctx)</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        declared = self._declared_ranges(ctx)</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        out: list[FoldCandidate] = []</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        for seg in self._segments_before(ctx, anchor):</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>            rng = (seg[&quot;start&quot;], seg[&quot;end&quot;])</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>            events = list(ctx.session.events_between(*rng))</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>            if self._protected(events):            # 不可折叠集 → 整段排除</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>                continue</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>            if any(self._ranges_overlap(rng, d) for d in declared):</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>                continue                            # 已折叠区间 → 防重复</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>            out.append(FoldCandidate(task_id=seg[&quot;task_id&quot;], range=rng,</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>                                     start_ts=seg[&quot;start_ts&quot;],</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>                                     n_events=len(events)))</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        return out                                  # 升序,不切半</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code></code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>    # ==================================================== ③ 压缩执行</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>    def _degrade_summary(self, events: list[Envelope]) -&gt; tuple[str, bool]:</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        &quot;&quot;&quot;规则降级摘要(摘要失败分支):只保留决策类事件文本(user/agent 消息、</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        plan/goal/todo 状态、会话更名、历史折叠声明),丢弃全部 tool.* 原始结果</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>        与 guard/approval 细节;截断 ≤600 字;返回 (文本, degraded=True)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        parts: list[str] = []</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>        for ev in events:</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>            if ev.type not in _DEGRADE_KEEP:</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>                continue</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>            text = _payload_text(ev)</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>            if text:</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>                parts.append(text.strip())</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>        merged = &quot;；&quot;.join(parts)</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>        return merged[:_DEGRADE_MAX_CHARS], True</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code></code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>    async def _call_summarize(self, ctx: Any, prompt: str) -&gt; str:</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>        &quot;&quot;&quot;摘要出口单次调用(ctx.llm.summarize;未装配 → LLM-399 走降级)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        llm = getattr(ctx, &quot;llm&quot;, None)</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>        fn = getattr(llm, &quot;summarize&quot;, None)</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>        if not callable(fn):</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>            raise_code(&quot;LLM-399&quot;, reason=&quot;summarize-unavailable&quot;,</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>                       hint=&quot;ctx.llm.summarize 未装配;压缩摘要走规则降级&quot;)</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>        result = fn(prompt, budget=self._summary_budget)</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>        if hasattr(result, &quot;__await__&quot;):</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>            result = await result</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>        return str(result or &quot;&quot;)</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code></code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>    async def _summarize_segment(self, ctx: Any,</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>                                 cand: FoldCandidate) -&gt; SegmentSummary:</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        &quot;&quot;&quot;段摘要(独立 LLM 调用):渲染决策文本 → summarize(budget=400);</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>        PyHError 重试 1 次仍败 → 上抛交 compact() 降级;空摘要视为失败。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        events = list(ctx.session.events_between(*cand.range))</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        text = render_segment(events)</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>        prompt = (&quot;请将以下任务段压缩为不超过 400 token 的中文摘要:保留用户意图、&quot;</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>                  &quot;最终结论、关键事实与目标/待办结果;省略工具原始输出与安全审计&quot;</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>                  &quot;细节(guard/审批记录一律不写)。\n&quot; + text)</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>        try:</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>            summ = await self._call_summarize(ctx, prompt)</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        except PyHError:</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>            summ = await self._call_summarize(ctx, prompt)   # 重试 1 次</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>        summary = (summ or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>        if not summary:</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>            raise_code(&quot;LLM-399&quot;, reason=&quot;empty-summary&quot;,</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>                       hint=&quot;摘要模型返回空文本;该段转规则降级&quot;)</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>        return SegmentSummary(range=cand.range, summary=summary,</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>                              degraded=False, tokens=estimate_tokens(summary))</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code></code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>    async def _apply(self, ctx: Any,</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>                     folds: list[SegmentSummary]) -&gt; Optional[Envelope]:</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>        &quot;&quot;&quot;遮蔽 + 声明(幂等:空 folds → None):tokens 会计 → 强同步 append</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>        context.compacted;遮蔽标记随声明事件被 session 吸收(入 _folded)。</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code></code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>        异常:EVT-100(区间与既有折叠重叠 = 内部 bug,拒写防双摘要,调用前由</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        compact 预检);PERS-202(session.append 强同步落盘失败上抛,压缩视为</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>        未发生,repair 后重试)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>        if not folds:</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>            return None</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>        session = ctx.session</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>        before = estimate_tokens(session.derive_history())     # 全量投影</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>        raw_total = 0</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>        for f in folds:                          # 区间原文投影 token(掩码口径)</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>            evs = list(session.events_between(*f.range))</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>            raw_total += estimate_tokens(_projection(evs))</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>        ranges = [list(f.range) for f in folds]</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>        summary = &quot;\n&quot;.join(f.summary for f in folds)</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>        # 摘要消息 = reducer 实际插桩形态(含 ranges 包装);after 为其净效果</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>        added = estimate_tokens(f&quot;[已压缩 {ranges}] {summary}&quot;) + _MSG_OVERHEAD</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>        after = max(0, before - raw_total) + added</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>        env = await session.append(</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>            &quot;context.compacted&quot;,</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>            {&quot;ranges&quot;: ranges, &quot;summary&quot;: summary,</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>             &quot;tokens_before&quot;: before, &quot;tokens_after&quot;: after},</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>            actor=&quot;system&quot;, sync=True)           # 强同步:声明不丢(§8.1)</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>        log.info(&quot;session=%s compaction applied ranges=%s before=%d after=%d&quot;,</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>                 getattr(session, &quot;sid&quot;, &quot;?&quot;), ranges, before, after)</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>        return env</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code></code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>    async def compact(self, ctx: Any) -&gt; CompactReport:</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>        &quot;&quot;&quot;压缩主流程:候选逐段摘要(失败降级)→ 防重叠预检 → 强同步声明 →</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>        报告;无可折叠候选 → noop 不写事件;全程不碰 JSONL 原文。</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code></code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>        异常表:EVT-100(折叠区间与既有声明重叠 = candidates 应已过滤的内部</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>        bug)、BUSY(会话 running 中直调)、PERS-202(强同步失败,压缩视为未发生)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>        self._assert_boundary(ctx)               # 仅请求边界可压(BUSY 防竞争)</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>        cands = self.candidates(ctx)</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>        if not cands:</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>            return CompactReport(folds=[], tokens_before=0, tokens_after=0,</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>                                 kept_recent_rounds=self._keep_recent_rounds,</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>                                 reason=&quot;no-candidates&quot;, noop=True)</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>        session = ctx.session</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>        folds: list[SegmentSummary] = []</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>        failures = 0</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>        for cand in cands:                       # 逐段独立摘要(失败→降级不阻塞)</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>            try:</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>                folds.append(await self._summarize_segment(ctx, cand))</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>            except PyHError:</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>                failures += 1</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>                evs = list(session.events_between(*cand.range))</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>                txt, _ = self._degrade_summary(evs)</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>                if not txt:                      # 空降级兜底:诚实占位,不伪造</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>                    txt = f&quot;[任务段 {cand.range} 无可保留的决策类文本]&quot;</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>                folds.append(SegmentSummary(range=cand.range, summary=txt,</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>                                            degraded=True,</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>                                            tokens=estimate_tokens(txt)))</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>        declared = self._declared_ranges(ctx)    # 防双摘要预检(内部 bug 拒写)</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>        for f in folds:</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>            if any(self._ranges_overlap(f.range, d) for d in declared):</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>                raise_code(&quot;EVT-100&quot;, type_=&quot;context.compacted&quot;,</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>                           reason=&quot;range-overlap&quot;,</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>                           detail=f&quot;折叠区间 {f.range} 与既有声明重叠&quot;</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>                                  f&quot;(candidates 应已过滤;内部 bug,拒写)&quot;)</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>        env = await self._apply(ctx, folds)      # 遮蔽+强同步声明</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>        p = env.payload</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>        return CompactReport(folds=folds,</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>                             tokens_before=p[&quot;tokens_before&quot;],</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>                             tokens_after=p[&quot;tokens_after&quot;],</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>                             kept_recent_rounds=self._keep_recent_rounds,</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>                             reason=f&quot;window:{failures} degraded&quot;,</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>                             noop=False)</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code></code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>    # ==================================================== ④ 前缀规划</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>    def kv_prefix_plan(self, ctx: Any) -&gt; PrefixPlan:</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code>        &quot;&quot;&quot;KV 缓存前缀规划:稳定前缀终点 = 最新 compacted 之后(其后只有尾部</code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>        追加,前缀零变动 → LLM 服务端前缀缓存可整段复用)。只读派生计算。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>        events = self._events(ctx)</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>        comps = [ev for ev in events if ev.type == &quot;context.compacted&quot;]</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code>        if not comps:</code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>            return PrefixPlan(stable_upto_seq=0, prefix_tokens=0,</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>                              cacheable=False, blocks=[])</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>        comp = comps[-1]                         # 最新压缩声明</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>        head = [ev for ev in events if ev.seq &lt;= comp.seq]</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>        blocks = [list(r) for r in comp.payload[&quot;ranges&quot;]]</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code>        msgs = _projection(head)                 # 稳定前缀的派生消息形态</code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>        return PrefixPlan(stable_upto_seq=comp.seq,</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>                          prefix_tokens=estimate_tokens(msgs),</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>                          cacheable=True, blocks=blocks)</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code></code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>    # ==================================================== 请求前门面</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>    async def run_if_needed(self, ctx: Any) -&gt; Optional[CompactReport]:</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>        &quot;&quot;&quot;请求前门面(DIS-CORE §5 消费点):agent-loop 每次 LLM 请求前调用——</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code>        非空闲边界/双条件未齐 → None(不压不炸);压缩成功且非 noop → 经 ctx.bus</code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>        广播 sysprompt.compacted(通知装配层重试,缓存已失效)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>        if self._busy_state(ctx):                # 仅请求边界可压(BUSY 防竞争)</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code>            return None</code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code>        if not self.should_compact(ctx):         # 双条件未齐 → 不压</code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>            return None</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>        report = await self.compact(ctx)         # 强同步声明后返回</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>        if not report.noop:</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>            self._signal(ctx, &quot;sysprompt.compacted&quot;,</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>                         {&quot;tokens_before&quot;: report.tokens_before,</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code>                          &quot;tokens_after&quot;: report.tokens_after})</code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>        return report</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code></code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code>    def _signal(ctx: Any, type_: str, payload: dict) -&gt; None:</code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code>        &quot;&quot;&quot;系统声明信号出口:ctx.bus(emit_sync 优先;异步则排程;失败日志降级)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>        bus = getattr(ctx, &quot;bus&quot;, None)</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>        if bus is None:</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>            log.debug(&quot;compaction 信号 %s 未投递:ctx.bus 未装配&quot;, type_)</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>            return</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code>        sink = getattr(bus, &quot;emit_sync&quot;, None) or getattr(bus, &quot;emit&quot;, None)</code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>        if not callable(sink):</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code>            return</code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code>        try:</code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>            result = sink(type_, payload)</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>            if hasattr(result, &quot;__await__&quot;):</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code>                import asyncio</code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code>                try:</code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code>                    asyncio.get_running_loop().create_task(result)</code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code>                except RuntimeError:             # 无运行中事件循环:日志降级</code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code>                    log.debug(&quot;compaction 信号 %s 未排程(无事件循环)&quot;, type_)</code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code>        except Exception as exc:                 # noqa: BLE001 信号失败不阻断</code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code>            log.warning(&quot;compaction 信号 %s 投递失败:%s&quot;, type_, exc)</code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code></code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code></code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>__all__ = [</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code>    &quot;Compactor&quot;, &quot;CompactReport&quot;, &quot;FoldCandidate&quot;, &quot;PrefixPlan&quot;,</code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code>    &quot;SegmentSummary&quot;, &quot;estimate_tokens&quot;, &quot;render_compacted_message&quot;,</code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>    &quot;render_segment&quot;,</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>    &quot;DEFAULT_KEEP_RECENT_ROUNDS&quot;, &quot;DEFAULT_MIN_NEW_ROUNDS&quot;,</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code>    &quot;DEFAULT_SUMMARY_BUDGET&quot;, &quot;DEFAULT_WINDOW_RATIO&quot;, &quot;DEFAULT_WINDOW_TOKENS&quot;,</code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

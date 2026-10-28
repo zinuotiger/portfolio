@@ -1,0 +1,133 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/subagent_context.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/subagent_context.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 133 行</span></nav><main class="wrap source-page"><h1>pyharness/core/subagent_context.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：47f41c802e87709efdab468704ddb08618657393<br>SHA-256（内容校验）：9cfe2a1d2c7dde1832355f8104a4c5f9c33bb295d3ba0127c7ce8037653aec2a</p><p><a href="../../../architecture-detailed.html?node=subagent">Subagent Orchestration（子代理委派与回收）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 10 个类、函数与方法</summary><ul><li><a href="#L8">SubagentContext（类） · L8–L132</a><ul><li><a href="#L11">SubagentContext._resolve_budget_ratio（方法） · L11–L23</a></li><li><a href="#L25">SubagentContext._ensure_session（方法） · L25–L30</a></li><li><a href="#L32">SubagentContext._default_sub_id（方法） · L32–L35</a></li><li><a href="#L37">SubagentContext._default_session（方法） · L37–L39</a></li><li><a href="#L41">SubagentContext._bootstrap_child（异步方法） · L41–L49</a></li><li><a href="#L51">SubagentContext._parent_model（方法） · L51–L60</a></li><li><a href="#L63">SubagentContext._default_child_scope（方法） · L63–L102</a></li><li><a href="#L104">SubagentContext._child_counters（方法） · L104–L111</a></li><li><a href="#L113">SubagentContext._write_event（异步方法） · L113–L132</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;SubagentContext operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.core.session import SessionLog</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.core.subagent_models import log, DEFAULT_BUDGET_RATIO, SUBA_OWNER, CHILD_PREFIX</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>class SubagentContext:</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    &quot;&quot;&quot;SubagentContext responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    def _resolve_budget_ratio(budget_ratio: Optional[float],</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>                              cfg: Any) -&gt; float:</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>        &quot;&quot;&quot;比例上限解析:cfg.budget.subagent_ratio → 常量 0.25(cfg 缺席容错)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        if cfg is not None:</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>            try:</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>                v = getattr(getattr(cfg, &quot;budget&quot;, None), &quot;subagent_ratio&quot;, None)</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>                if isinstance(v, (int, float)) and float(v) &gt; 0:</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>                    return float(v)</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>            except Exception:  # noqa: BLE001 第三方配置对象 getattr 钩子异常</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>                log.debug(&quot;subagent budget ratio config unavailable&quot;,</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>                          exc_info=True)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        return DEFAULT_BUDGET_RATIO</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    def _ensure_session(self) -&gt; Any:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        &quot;&quot;&quot;父会话前置:未绑定 → EVT-100(spawn/join/status 的事件写口依赖)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        if self._session is None:</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;SubagentManager 未绑定父会话&quot;,</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>                       advice=&quot;构造时注入父会话 SessionLog(ctx.agent.subagent 挂载点)&quot;)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        return self._session</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code></code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    def _default_sub_id(self) -&gt; str:</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        &quot;&quot;&quot;子会话 ID 跨父会话和重启唯一；不复用旧子日志。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        import uuid</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        return f&quot;{CHILD_PREFIX}{uuid.uuid4().hex}&quot;</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    def _default_session(self, sub_id: str) -&gt; SessionLog:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        &quot;&quot;&quot;默认子会话工厂:独立内存 SessionLog(自带 JSONL 由装配注 persistence)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        return SessionLog(sid=sub_id)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    async def _bootstrap_child(self, child: Any, sub_id: str) -&gt; None:</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        &quot;&quot;&quot;子会话引导:写 session.created(seq=1,首事件 EVT-106 守卫)。</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        SessionLog 无 Session.spawn 工厂(偏离 1):created 引导后子会话才 open,</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        子循环/执行器的后续 append 才能过校验链第 5 步。model 沿父会话主模型。</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        await child.append(&quot;session.created&quot;,</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>                           {&quot;title&quot;: f&quot;subagent {sub_id}&quot;,</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>                            &quot;model&quot;: self._parent_model()}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    def _parent_model(self) -&gt; str:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        &quot;&quot;&quot;父会话主模型(created payload model;缺失回落默认名)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        sess = self._session</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        if sess is not None and hasattr(sess, &quot;events_after&quot;):</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>            for ev in sess.events_after(0):</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                if ev.type == &quot;session.created&quot;:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                    m = (ev.payload or {}).get(&quot;model&quot;)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                    if m:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                        return m</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        return &quot;deepseek-chat&quot;</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    def _default_child_scope(self, parent_scope: Any, sub_id: str,</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                             child_session: Any, limits: Any,</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                             deny_extra: Optional[list[str]] = None) -&gt; Any:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        &quot;&quot;&quot;默认子 scope 工厂:父策略快照值拷贝 + deny_extra 只收窄 + 独立根。</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        workspace 根 = storage.workspaces_dir/{sub_id}(F055 每会话独立根,派生见</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        `_child_workspace_root`)且**立即建目录**(否则子代理 fs.* 必然 TLB-802);</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        预算 limits 用缩放后的子预算(父×ratio,下限 1);spec.deny_extra 并入子策略</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        deny_tools(只紧不松,无父级担保通道)。Scope 直接构造不注册全局表——子 scope</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        生命周期随 handle(偏离 1)。</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        if parent_scope is None:</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            return None</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        snap = getattr(parent_scope, &quot;snapshot&quot;, None)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        if not callable(snap):</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            return None</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        try:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            from pathlib import Path</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            from pyharness.core.scope import Scope, ScopePolicy</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            s = snap()</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            pol = ScopePolicy(**s.policy.model_dump())      # 值拷贝(COW 起点)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            root = self._child_workspace_root(s.policy.workspace_root, sub_id)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            pol.workspace_root = root                        # 独立根(F055)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            try:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                Path(root).mkdir(parents=True, exist_ok=True)   # 根必须存在</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            except OSError as exc:                          # 权限/磁盘:不降级 scope</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                log.warning(&quot;子 workspace 根创建失败 sub=%s path=%s: %s&quot;</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                            &quot;(文件类工具将报 TLB-802)&quot;, sub_id, root, exc)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            pol.deny_tools |= set(deny_extra or ())         # deny 只收窄(单调)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            return Scope(policy=pol, limits=limits,</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                         session_id=sub_id,</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                         window_tokens=getattr(s, &quot;window_tokens&quot;, 64000),</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                         window_ratio=getattr(s, &quot;window_ratio&quot;, 0.75),</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                         session=child_session,</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                         # 继承父预算计数器:子 agent 用量并入同一预算闸(P2 修复,</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                         # 此前 None → 子 scope 预算恒 ok,烧钱无感)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                         counters=self._child_counters(parent_scope, limits),</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                         bus=getattr(self, &quot;_bus&quot;, None))</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        except Exception as exc:                            # noqa: BLE001</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            raise PyHError(&#x27;GRD-403&#x27;, ctx={&#x27;reason&#x27;: &#x27;child_scope_unavailable&#x27;}) from exc</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    def _child_counters(parent_scope, limits):</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        from pyharness.core.llm import UsageCounters</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        parent = getattr(parent_scope, &#x27;_counters&#x27;, None)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        if isinstance(parent, UsageCounters):</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            parent._limits = parent_scope.limits</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            return parent.new_task(limits, parent=parent)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        return parent</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    async def _write_event(self, type_: str, payload: dict, *, actor: str,</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                           trace: Optional[dict] = None,</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                           swallow104: bool = True) -&gt; Any:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        &quot;&quot;&quot;父会话事件写口:actor/origin 统一打点;EVT-104 兜底只记日志(偏离 10)。</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code></code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        子终态回写(joined/failed/cancelled 审计)在父会话已 finished 时被 EVT-104</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        拒——child-first 清理保证结构上先于此;真发生(时序漏洞)只记日志不阻断</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        子回收(spec _run_child 异常表语义)。spawned 落盘不吞(派发闸,调方直用</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        session.append,见 spawn)。</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        sess = self._ensure_session()</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        try:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            return await sess.append(type_, payload, actor=actor,</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                                     trace=trace, origin=SUBA_OWNER)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        except PyHError as e:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            if e.code == &quot;EVT-104&quot; and swallow104:</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>                log.warning(&quot;subagent 终态回写被拒(EVT-104 父已终态),仅本地日志&quot;</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                            &quot; type=%s sub_id=%s&quot;, type_, payload.get(&quot;sub_id&quot;))</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                return None</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            raise</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

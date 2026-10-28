@@ -1,0 +1,137 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/platform_agents.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/platform_agents.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 137 行</span></nav><main class="wrap source-page"><h1>pyharness/application/platform_agents.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：fbff8e373c581df7aa66c2fe970241db86e44c51<br>SHA-256（内容校验）：6a0b9c1f62dea1aad761acfa982aea1487d5a1079afb923973377007240a9dcf</p><p><a href="../../../architecture-detailed.html?node=accounts">Accounts（账户与租户身份）</a> · <a href="../../../architecture-detailed.html?node=platform_agents">PublishedAgent（助手定义与固定版本）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 11 个类、函数与方法</summary><ul><li><a href="#L13">_validated_agent（函数） · L13–L23</a></li><li><a href="#L26">_publish_into（函数） · L26–L38</a></li><li><a href="#L41">_version_in_data（函数） · L41–L48</a></li><li><a href="#L51">PlatformAgents（类） · L51–L136</a><ul><li><a href="#L54">PlatformAgents.agents（方法） · L54–L56</a></li><li><a href="#L58">PlatformAgents.validate_execution_policy（方法） · L58–L70</a></li><li><a href="#L72">PlatformAgents.save_agent（方法） · L72–L84</a></li><li><a href="#L86">PlatformAgents.publish_agent（方法） · L86–L88</a></li><li><a href="#L90">PlatformAgents.agent_action（方法） · L90–L127</a></li><li><a href="#L129">PlatformAgents.version（方法） · L129–L130</a></li><li><a href="#L132">PlatformAgents.new_binding_version（方法） · L132–L136</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;PlatformAgents operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import copy</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import difflib</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import hashlib</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import json</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import uuid</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.platform_models import AgentDefinition, AgentVersion</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.core.sandbox import fail</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.application.platform_templates import TEMPLATES</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>def _validated_agent(body):</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    agent = AgentDefinition.model_validate(body)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    from pyharness.application.order_review import policy</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    if policy(agent.output_schema) is not None and (agent.strict_knowledge or agent.executor!=&#x27;engine&#x27;):</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        fail(&#x27;order_review_requires_engine_and_non_strict_knowledge&#x27;)</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    if agent.output_schema:</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        from pyharness.core.tools_registry import _compile_model</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        _compile_model(&#x27;platform.output&#x27;, agent.output_schema)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    if agent.mcp_connections and agent.sandbox_profile.mode != &#x27;host_approved&#x27;:</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        fail(&#x27;mcp_requires_explicit_host_approval&#x27;)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    return agent</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>def _publish_into(data, ident):</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    &quot;&quot;&quot;Original publication primitive, within an already owned transaction.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    if ident not in data[&#x27;agents&#x27;]:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        fail(&#x27;agent_not_found&#x27;)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    agent = AgentDefinition.model_validate(data[&#x27;agents&#x27;][ident])</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    agent.current_version += 1</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    agent.status = &#x27;published&#x27;</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    snap = agent.model_dump()</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    version = AgentVersion(agent_id=ident, version=agent.current_version, snapshot=agent,</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        sha256=hashlib.sha256(json.dumps(snap, sort_keys=True).encode()).hexdigest()).model_dump()</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    data[&#x27;versions&#x27;].setdefault(ident, []).append(version)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    data[&#x27;agents&#x27;][ident] = snap</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    return version</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code></code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>def _version_in_data(data, ident, number):</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    for version in data[&#x27;versions&#x27;].get(ident, []):</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        if version[&#x27;version&#x27;] == number:</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>            checksum = hashlib.sha256(json.dumps(version[&#x27;snapshot&#x27;], sort_keys=True).encode()).hexdigest()</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            if checksum != version[&#x27;sha256&#x27;]:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                fail(&#x27;agent_version_integrity_failed&#x27;)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            return version</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    fail(&#x27;agent_version_not_found&#x27;)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>class PlatformAgents:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    &quot;&quot;&quot;PlatformAgents responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    def agents(self):</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        data = self.store.read()</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        return {&#x27;agents&#x27;:list(data[&#x27;agents&#x27;].values()), &#x27;templates&#x27;:copy.deepcopy(TEMPLATES)}</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    def validate_execution_policy(self, definition):</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        if definition.executor == &#x27;codex&#x27;:</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            # A locally signed-in CLI is a host capability, never a tenant credential.</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            if definition.sandbox_profile.mode != &#x27;host_approved&#x27;:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                fail(&#x27;codex_requires_explicit_host_approval&#x27;)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            if &#x27;codex.run&#x27; not in definition.allowed_tools or definition.permission_policy != &#x27;standard&#x27;:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                fail(&#x27;codex_requires_governed_tool&#x27;)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            if definition.review_mode != &#x27;manual&#x27; or definition.mcp_connections:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                fail(&#x27;codex_configuration_unsupported&#x27;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        from pyharness.application.accounts import Accounts</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        if Accounts.manages_tenant(self.service._storage_root(), self.service.tenant_id):</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            if definition.sandbox_profile.mode == &#x27;host_approved&#x27; or definition.mcp_connections:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                fail(&#x27;account_host_execution_forbidden&#x27;)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    def save_agent(self, body, ident=None):</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        agent = _validated_agent(body)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        with self.store.transaction() as data:</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            if ident:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                old = data[&#x27;agents&#x27;].get(ident)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                if not old:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                    fail(&#x27;agent_not_found&#x27;)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                agent.agent_id, agent.current_version = ident, old[&#x27;current_version&#x27;]</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            else:</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                agent.agent_id, agent.current_version = &#x27;a-&#x27; + uuid.uuid4().hex, 0</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            agent.status = &#x27;draft&#x27;</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>            data[&#x27;agents&#x27;][agent.agent_id] = agent.model_dump()</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        return agent.model_dump()</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    def publish_agent(self, ident):</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        with self.store.transaction() as data:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            return _publish_into(data, ident)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    def agent_action(self, ident, action, body=None):</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        data = self.store.read()</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        if ident not in data[&#x27;agents&#x27;]:</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            fail(&#x27;agent_not_found&#x27;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        if action == &#x27;versions&#x27;:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            return {&#x27;versions&#x27;:data[&#x27;versions&#x27;].get(ident, [])}</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        if action == &#x27;copy&#x27;:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            version = (body or {}).get(&#x27;version&#x27;)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            source = data[&#x27;agents&#x27;][ident]</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            if version:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                source = self.version(ident, int(version))[&#x27;snapshot&#x27;]</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            source = {**source, &#x27;name&#x27;:source[&#x27;name&#x27;] + &#x27; 副本&#x27;}</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            return self.save_agent(source)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        if action == &#x27;publish&#x27;:</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            return self.publish_agent(ident)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        if action == &#x27;diff&#x27;:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            left = self.version(ident, int((body or {}).get(&#x27;from&#x27;, 1)))[&#x27;snapshot&#x27;]</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            right = self.version(ident, int((body or {}).get(&#x27;to&#x27;, data[&#x27;agents&#x27;][ident][&#x27;current_version&#x27;])))[&#x27;snapshot&#x27;]</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            return {&#x27;diff&#x27;: &#x27;&#x27;.join(difflib.unified_diff(</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                json.dumps(left, ensure_ascii=False, indent=2, sort_keys=True).splitlines(True),</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                json.dumps(right, ensure_ascii=False, indent=2, sort_keys=True).splitlines(True),</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                fromfile=&#x27;previous&#x27;, tofile=&#x27;selected&#x27;))}</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        if action == &#x27;deprecate-version&#x27;:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            number = int((body or {}).get(&#x27;version&#x27;, 0))</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            self.version(ident, number)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>            with self.store.transaction() as current:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                current[&#x27;deprecated_versions&#x27;][f&#x27;{ident}:{number}&#x27;] = True</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            return {&#x27;ok&#x27;: True}</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        with self.store.transaction() as current:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            if action == &#x27;delete&#x27;:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                if current[&#x27;versions&#x27;].get(ident):</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                    fail(&#x27;published_agent_cannot_delete&#x27;)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                del current[&#x27;agents&#x27;][ident]</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            elif action == &#x27;deprecate&#x27;:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                current[&#x27;agents&#x27;][ident][&#x27;status&#x27;] = &#x27;deprecated&#x27;</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            else:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                fail(&#x27;invalid_action&#x27;)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        return {&#x27;ok&#x27;:True}</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code></code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    def version(self, ident, number):</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        return _version_in_data(self.store.read(), ident, number)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code></code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    def new_binding_version(self, ident, number):</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        data=self.store.read()</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        if data[&#x27;agents&#x27;].get(ident,{}).get(&#x27;status&#x27;)==&#x27;deprecated&#x27; or data[&#x27;deprecated_versions&#x27;].get(f&#x27;{ident}:{number}&#x27;):</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            fail(&#x27;agent_version_deprecated&#x27;)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        return self.version(ident,number)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

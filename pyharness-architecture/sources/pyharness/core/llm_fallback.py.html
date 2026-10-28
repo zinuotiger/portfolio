@@ -1,0 +1,439 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/llm_fallback.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/llm_fallback.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 439 行</span></nav><main class="wrap source-page"><h1>pyharness/core/llm_fallback.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：75af50f148ddd740369a4f88a912e001707f1737<br>SHA-256（内容校验）：82290ea5e16fb9cabf3b718c0ffc6815297005453a71d4d39006514bd0d9ca3e</p><p><a href="../../../architecture-detailed.html?node=llm_fallback">Model Retry and Recovery（模型重试与恢复）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 24 个类、函数与方法</summary><ul><li><a href="#L72">TaskUsage（类） · L72–L87</a><ul><li><a href="#L84">TaskUsage.model_dump（方法） · L84–L87</a></li></ul></li><li><a href="#L91">LLMAdapter（类） · L91–L102</a><ul><li><a href="#L98">LLMAdapter.chat（异步方法） · L98–L99</a></li><li><a href="#L101">LLMAdapter.ping（异步方法） · L101–L102</a></li></ul></li><li><a href="#L105">UsageCounters（类） · L105–L119</a><ul><li><a href="#L112">UsageCounters.task_total（方法） · L112–L113</a></li><li><a href="#L115">UsageCounters.rate_limit_streak（方法） · L115–L116</a></li><li><a href="#L118">UsageCounters.degrade_add（方法） · L118–L119</a></li></ul></li><li><a href="#L123">AdapterHealth（类） · L123–L156</a><ul><li><a href="#L136">AdapterHealth.mark（方法） · L136–L152</a></li><li><a href="#L154">AdapterHealth.is_down（方法） · L154–L156</a></li></ul></li><li><a href="#L160">_fire_emit（函数） · L160–L171</a></li><li><a href="#L175">FallbackChain（类） · L175–L390</a><ul><li><a href="#L195">FallbackChain.__post_init__（方法） · L195–L204</a></li><li><a href="#L207">FallbackChain.chat_with_fallback（异步方法） · L207–L247</a></li><li><a href="#L250">FallbackChain._retry_adapter（异步方法） · L250–L301</a></li><li><a href="#L304">FallbackChain._may_degrade（方法） · L304–L315</a></li><li><a href="#L318">FallbackChain._record_degradation（方法） · L318–L335</a></li><li><a href="#L338">FallbackChain.probe_loop（异步方法） · L338–L381</a></li><li><a href="#L384">FallbackChain.pick（方法） · L384–L390</a></li></ul></li><li><a href="#L394">BudgetGuard（类） · L394–L433</a><ul><li><a href="#L406">BudgetGuard.check（异步方法） · L406–L425</a></li><li><a href="#L427">BudgetGuard.report（方法） · L427–L433</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/llm_fallback.py — 降级链 + 指数退避 + 健康探针 + 预算闸 (specs/llm_fallback.py.md)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F013(核心)· F028 · F033 · F032(预算联动前置闸)。</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>权威口径:specs/llm_fallback.py.md(编码契约)、DIS-CORE §4.3/§4.4(降级/退避/状态机</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>伪代码)、ADI §3(触发判据/切换粒度/回切)、ERR.md §2.4/§5.2(LLM 错误码)、</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>CFG.md §3.1/§3.5(llm.retry/llm.degrade/llm.probe/budget.task.* 配置键)。</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>职责一句话:主模型失败时按链切备用(qwen-max)——请求级粒度、idx 前移对后续请求生效、</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>降级留痕、探针回切(3 败 down / 2 好回)、BudgetGuard 守住&quot;发请求前/每次重试前&quot;的</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>单任务预算前置检查;LLM-304 业务错不降级直抛;全链败 → LLM-310 终态(不无限降级)。</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>依赖方向:llm_fallback 属 llm 模块族,经 ctx 消费 config/session/counters(注入);</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>经 ctx.session.append 落 llm.retry 事件、尽力而为 bus 通知发告警。llm.py(adapters</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>注册表/LLMResponse)阶段未落地——本模块不 import 之,适配器经构造注入(测试全 mock)。</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>偏离说明(相对 spec 伪码;契约=spec,偏离均列理由):</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>1. 注入式装配:伪码引用 llm.py 全局 adapters 注册表与全局 bus;llm.py 未落地,</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>   FallbackChain 构造注入 adapters(名称→适配器)/config/chain/bus(任务要求主备</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>   Provider 注入式)。chain 缺省由 config.llm.model + fallback_models 拼装。</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>2. BudgetGuard.check 为 async:伪码同步 def 与内部 await ctx.session.append 自相矛盾</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>   (SessionLog.append 为 async,落盘须 await),调用点相应 await。</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>3. BUDGET-EXHAUSTED 为终态信号码(未入 ERR 登记册):raise_code 会把未登记码改写为</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   CYC-999,故直接构造 PyHError——与 agent_loop.BUSY 同款先例(见 agent_loop.py</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   偏离说明 5)。</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>4. 探针回切 idx 归零:DIS-CORE §4.4 状态机要求&quot;恢复自动回切&quot;,但伪码未给 idx 归零点;</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>   本实现由 probe_loop 检测主模型 down→healthy(2 好回切判据)时置 idx=0 并尽力发</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>   llm.recovered 事件。degraded→healthy(单次成功)只更新状态不归零——回切须 F033</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   的 2 好判据,防抖动。</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>5. 链尾降级收敛 LLM-310:伪码在链尾仍执行 _record_degradation(..., chain[i+1])/</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   idx=i+1 会 IndexError 或越过链长;本实现仅当存在下一适配器才降级,链尾 302/303</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>   (含降级关关闭)自然落到 LLM-310(GWT-L4-02 双败→LLM-310 口径,err_hist 携带)。</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>6. AdapterHealth.degraded 单次 ok 回 healthy:伪码 degraded 态永不回 healthy 属缺口</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   (DIS 4.4 线性状态机 healthy→degraded→down→healthy 语义);llm.recovered 通知由</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>   probe_loop 按状态翻转发出(mark 保持纯状态机无副作用、无 bus 句柄依赖)。</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>7. 探针 ping 超时(5s deadline 的 TimeoutError)与非 PyHError 未预期异常同判失败</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>   (伪码异常表只列 PyHError);探针尽力而为,失败不落 llm.retry、不计 F029 用量。</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>8. 降级/预算通知事件(system.error/budget.warn/llm.recovered)为尽力而为出口:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   EventBus.emit 同步返回分发协程,同步决策点 fire-and-forget(create_task 排程,</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>   失败只记日志不阻断主路径);budget.paused 强留痕走 session.append(async 路径)。</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>9. llm.retry.attempts=0 视同 1(CFG 取值范围含 0,但至少应发出一次请求)。</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>import asyncio</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>import logging</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>import random</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>from typing import Any, Literal, Optional, Protocol</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>from pyharness.config import load_settings</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code></code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>log = logging.getLogger(&quot;pyharness.llm_fallback&quot;)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code># ------------------------------------------------------------------ 码集常量</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code># 决策只看码(ERR.md §2.4/§5.2):302 认证直降;303 可重试(429/5xx/断网/超时);</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code># 304 业务错不降级直抛;301 超时只在退避内消化。</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>_DEGRADE_CODES: tuple[str, ...] = (&quot;LLM-302&quot;, &quot;LLM-303&quot;)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>_RETRYABLE_CODES: tuple[str, ...] = (&quot;LLM-301&quot;, &quot;LLM-303&quot;)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>_MAX_CHAIN_BACKOFF_S: float = 60.0     # 链级退避总预算:全链重试 sleep 累计上限(P3)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code># ------------------------------------------------------------------ 类型别名</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>BudgetState = Literal[&quot;ok&quot;, &quot;warn&quot;, &quot;paused&quot;, &quot;exhausted&quot;]</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>&quot;&quot;&quot;预算状态字面量(F032):exhausted → agent-loop 强制终态 reason=budget。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>HealthTable = dict[str, &quot;AdapterHealth&quot;]</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>&quot;&quot;&quot;探针健康表:每 interval_s 更新;pick()/降级跳过判据的数据源。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code># ---------------------------------------------------------------- TaskUsage</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>@dataclass</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>class TaskUsage:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    &quot;&quot;&quot;单任务用量快照(BudgetGuard 只读;真源 = scope.report_usage 事件,可重建)。</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    与 scope.budget_state 同一数据源口径(INV-01):BudgetGuard 不持有第二份累计,</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    每次 check 都现读 counters.task_total()。</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    in_tokens: int = 0</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    out_tokens: int = 0</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    cost_est: float = 0.0</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code></code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    def model_dump(self) -&gt; dict:</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        &quot;&quot;&quot;事件/错误上下文载荷序列化(pydantic 同款方法名,scope 落地可无缝替换)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        return {&quot;in_tokens&quot;: self.in_tokens, &quot;out_tokens&quot;: self.out_tokens,</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                &quot;cost_est&quot;: self.cost_est}</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code># -------------------------------------------------------------- 注入式协议</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>class LLMAdapter(Protocol):</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    &quot;&quot;&quot;适配器最小契约(llm.py F030 注册表条目;本模块按鸭子类型消费,不 import llm.py)。</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    chat: 返回 LLMResponse 型对象(content/tool_calls/model/…,由 llm.py 定义);</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    ping: 探针可达性延迟探测,成功返回秒数(float),失败抛 PyHError/超时。</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    async def chat(self, messages, tools=None, *, ctx) -&gt; Any:  # pragma: no cover</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        ...</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code></code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    async def ping(self) -&gt; float:  # pragma: no cover</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        ...</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>class UsageCounters(Protocol):</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    &quot;&quot;&quot;会话/任务用量计数器最小契约(scope 模块落地前注入;report_usage 唯一写入)。</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    task_total(): 本任务累计用量(读任务级聚合);rate_limit_streak(): 连续限流</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    (429)计数,事件可重建;degrade_add(): 会话级降级计数,返回累计次数(可重建)。</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code></code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    def task_total(self) -&gt; TaskUsage:  # pragma: no cover</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        ...</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code></code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    def rate_limit_streak(self) -&gt; int:  # pragma: no cover</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        ...</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code></code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    def degrade_add(self, failed: str, to: str) -&gt; int:  # pragma: no cover</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        ...</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code># ------------------------------------------------------------ AdapterHealth</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>@dataclass</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>class AdapterHealth:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    &quot;&quot;&quot;单适配器健康状态机(F033):healthy → 1 败 degraded → 连 3 败 down → 连 2 好 healthy。</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    mark(ok) 由探针 ping 结果驱动,纯状态机、无副作用(不计数、不发事件、不落日志)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    ——llm.recovered 等通知由 probe_loop 依据状态翻转发出。防抖动:down 需连 3 败,</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    回切 healthy 需连 2 好(瞬时 1 败仅 degraded;degraded 单次成功即解除,见偏离 6)。</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code></code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    state: str = &quot;healthy&quot;          # healthy / degraded / down</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>    fail_streak: int = 0</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    ok_streak: int = 0</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code></code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    def mark(self, ok: bool) -&gt; None:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        &quot;&quot;&quot;按一次探针结果推进状态机。ok=True=ping 成功,ok=False=ping 失败。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        if ok:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            self.fail_streak = 0</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            self.ok_streak += 1</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            if self.state == &quot;down&quot;:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                if self.ok_streak &gt;= 2:      # 连 2 好 → 回切(防抖动)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                    self.state = &quot;healthy&quot;</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            elif self.state == &quot;degraded&quot;:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                self.state = &quot;healthy&quot;       # 瞬时单败解除(偏离 6)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        else:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            self.ok_streak = 0</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            self.fail_streak += 1</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>            if self.state == &quot;healthy&quot; and self.fail_streak == 1:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                self.state = &quot;degraded&quot;      # 1 败仅 degraded,不 down</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>            if self.fail_streak &gt;= 3:</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                self.state = &quot;down&quot;          # 连 3 败 down</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code></code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    def is_down(self) -&gt; bool:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        &quot;&quot;&quot;down 态判定(down 者被 pick()/降级循环跳过)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        return self.state == &quot;down&quot;</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code></code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code></code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code># ------------------------------------------------------------ 事件尽力出口</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>def _fire_emit(bus: Any, type_: str, payload: dict) -&gt; None:</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    &quot;&quot;&quot;尽力而为总线出口:bus 未接线/emit 抛错只记日志,不阻断调用方主路径。</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code></code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    经 bus.schedule_emit 统一排程(保留 task 引用);告警/通知不阻塞降级主路径。</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    if bus is None:</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        return</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    from pyharness.bus import schedule_emit</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    try:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        schedule_emit(bus, type_, payload)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    except Exception as exc:                 # noqa: BLE001 EVT-102 未注册类型等</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        log.warning(&quot;llm_fallback emit %s 失败: %s&quot;, type_, exc)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code></code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code></code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code># ------------------------------------------------------------- FallbackChain</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>@dataclass</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>class FallbackChain:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    &quot;&quot;&quot;链式降级编排(F013/DIS-CORE §4.3.2):chain[idx:] 逐适配器经 _retry_adapter</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>    尝试;可重试码耗尽且满足降级条件才前移 idx(对后续请求生效);LLM-304 业务错上抛;</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    全链败 → LLM-310 终态。F033 探针/择优/回切与 F028 退避亦在本类内聚。</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code></code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    spec FallbackChain.__init__() 无参;按&quot;主备 Provider 注入式&quot;(偏离 1):</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        adapters = {适配器名: LLMAdapter} 注册表(llm.py F030 落地前由装配层注入)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        config   = Settings 或 None(L1 load_settings;ctx.config 优先于本字段)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        chain    = 显式链或 None(config.llm.model + llm.fallback_models 拼装)</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        bus      = 告警/通知事件尽力出口(可 None)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code></code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>    adapters: Optional[dict[str, Any]] = None</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    config: Any = None</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    chain: Optional[list[str]] = None</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    bus: Any = None</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    idx: int = 0                              # 降级结果前移,对后续请求生效</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>    health: HealthTable = field(init=False, default_factory=dict)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code></code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>    def __post_init__(self) -&gt; None:</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        if self.config is None:</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>            self.config = load_settings()     # L1 默认(键缺省必可加载)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        if self.chain is None:</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            # CFG llm.fallback_models 注入:主模型 + 备用链(默认 [&quot;deepseek-chat&quot;, &quot;qwen-max&quot;])</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            self.chain = [self.config.llm.model] + list(self.config.llm.fallback_models)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        self.chain = list(self.chain)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        if not (0 &lt;= self.idx &lt; len(self.chain)):</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            self.idx = 0                      # 链收缩防御:越界回起点</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        self.health = {n: AdapterHealth() for n in self.chain}</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code></code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>    # ====================================================== 链式降级编排(F013)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    async def chat_with_fallback(self, messages, tools=None, *, ctx,</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                                 method: str = &quot;chat&quot;) -&gt; Any:</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        &quot;&quot;&quot;从 chain[idx:] 起逐适配器经 _retry_adapter 尝试,返回 LLMResponse。</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        每适配器进入前过 BudgetGuard(预算前置闸);302/303 且满足降级条件 → 留痕 +</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        idx 前移,本轮请求继续下一适配器;304 等业务错不降级直接上抛;链尾 302/303</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        (或 degrade.enabled=false 主模型败)→ LLM-310 终态(err_hist 携带排查)。</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        err_hist: list[tuple[str, str]] = []</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        last_diagnostics = None</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        enabled = bool(ctx.config.llm.degrade.enabled)</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        # 降级总开关(CFG llm.degrade.enabled):关 = 只走当前 idx 适配器,败即 LLM-310</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        end = len(self.chain) if enabled else min(self.idx + 1, len(self.chain))</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        start = self.idx</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        sleep_left = [_MAX_CHAIN_BACKOFF_S]   # 全链退避总预算(跨适配器共享,P3)</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        for i in range(start, end):</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            name = self.chain[i]</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            # 探针 down → 跳过(仅跳过循环起始位之后的;起始位不跳:仍尝试以测恢复,</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>            # 与 pick() 全 down 保底一致——主模型 down 不跳,见 spec 注释)</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>            if self.health[name].is_down() and i &gt; start:</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                continue</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>            await BudgetGuard.check(ctx)      # 每请求前置预算闸(F032)</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>            try:</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                return await self._retry_adapter(name, messages, tools, ctx,</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                                                 method=method,</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                                                 sleep_left=sleep_left)</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            except PyHError as e:</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>                err_hist.append((name, e.code))</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                last_diagnostics = e.ctx.get(&quot;diagnostics&quot;)</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>                if (e.code in _DEGRADE_CODES and enabled</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>                        and i + 1 &lt; len(self.chain)</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>                        and self._may_degrade(e, ctx)):</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                    # 降级:留痕 + idx 前移(单调;对后续请求生效),本轮继续下一适配器</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                    self._record_degradation(name, self.chain[i + 1], ctx)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                    self.idx = i + 1</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>                    continue</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>                if e.code in _DEGRADE_CODES:</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>                    break                     # 链尾/降级关:全链耗尽 → LLM-310(偏离 5)</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>                raise                         # LLM-304 业务错等:不降级直接上抛</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        raise_code(&quot;LLM-310&quot;, err_hist=err_hist, diagnostics=last_diagnostics,</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                   advice=&quot;全链失败,任务终止(不无限降级)&quot;)</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code></code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>    # ====================================================== 指数退避(F028)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>    async def _retry_adapter(self, name: str, messages, tools, ctx, *,</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>                             method: str = &quot;chat&quot;, sleep_left=None) -&gt; Any:</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        &quot;&quot;&quot;单适配器内重试循环:只重试 LLM-301/303;基数 1s×2 递增、上限 attempts</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        (默认 4)、±jitter(默认 30%)抖动;每次等待落 llm.retry 事件(sleep 可被取消</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        F025);退避耗尽 → LLM-303(exhausted)交 chat_with_fallback 降级决策。</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        sleep_left = 链级退避总预算 [剩余秒] 可变单元(chat_with_fallback 跨适配器共享),</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        累计 sleep 不得超过;耗尽即视为该层退避失败,交降级(P3:退避 sleep 在总闸外)。</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        cfg = ctx.config.llm.retry</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        n_attempts = max(1, int(cfg.attempts))        # 0 视同 1(偏离 9)</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        delay = float(cfg.base_delay_s)               # 基数 1s ×2(CFG llm.retry)</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        jitter = float(getattr(cfg, &quot;jitter&quot;, 0.3))</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        for attempt in range(n_attempts):</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            await BudgetGuard.check(ctx)              # 每次重试前再查预算(防烧钱)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            try:</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>                fn = getattr(self.adapters[name], method, None)</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>                if not callable(fn):</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>                    raise_code(&quot;CFG-601&quot;, reason=&quot;structural&quot;, adapter=name,</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>                               missing=method,</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>                               detail=&quot;适配器缺降级链请求方法&quot;)</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>                from pyharness.core.llm_diagnostics import call_attempt</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>                token = call_attempt.set(attempt + 1)</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>                try:</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>                    from pyharness.core.llm_requests import ModelRequests</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>                    if not isinstance(self.adapters[name], ModelRequests):</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>                        from pyharness.core.context_observation import observe_adapter_request</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>                        await observe_adapter_request(ctx, name, method, messages, tools)</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>                    from pyharness.core.product_model_gate import check_model_attempt</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>                    await check_model_attempt(ctx, name, method)</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>                    return await fn(messages, tools, ctx=ctx)</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>                finally:</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                    call_attempt.reset(token)</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>            except PyHError as e:</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>                if e.code not in _RETRYABLE_CODES:</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>                    raise                             # LLM-302/304:不重试</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>                if attempt == n_attempts - 1:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                    # 退避预算耗尽:交 chat_with_fallback 降级决策</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>                    raise_code(&quot;LLM-303&quot;, model=name, exhausted=True, diagnostics=e.ctx.get(&quot;diagnostics&quot;))</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>                await ctx.session.append(</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                    &quot;llm.retry&quot;,</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                    {&quot;model&quot;: name, &quot;attempt&quot;: attempt,</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                     &quot;delay_ms&quot;: int(delay * 1000)},</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>                    actor=&quot;llm&quot;)</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>                # sleep 可被取消(F025);总重试时长计入请求预算</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                wait = delay * random.uniform(1 - jitter, 1 + jitter)</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>                if sleep_left is not None:            # 链级退避总预算闸</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>                    if sleep_left[0] &lt;= 0:</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>                        raise_code(&quot;LLM-303&quot;, model=name, exhausted=True, diagnostics=e.ctx.get(&quot;diagnostics&quot;))</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                    wait = min(wait, sleep_left[0])</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                    sleep_left[0] -= wait</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                await asyncio.sleep(wait)</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>                delay *= 2</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code></code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>    # ====================================================== 降级条件判定(ADI §3.3)</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>    def _may_degrade(self, e: PyHError, ctx) -&gt; bool:</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>        &quot;&quot;&quot;按码判定:LLM-302 无条件降;LLM-303 exhausted 或连续限流达阈值(默认 2)</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>        降;304 永不降级(降级只救&quot;上游坏&quot;,不救&quot;我们错&quot;)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        if e.code == &quot;LLM-302&quot;:                       # 认证错:不重试直接降级</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>            return True</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>        if e.code == &quot;LLM-303&quot;:                       # 429/5xx/断网/超时</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>            if e.ctx.get(&quot;exhausted&quot;):</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>                return True                           # 退避耗尽(attempts 次)后降</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>            consec = ctx.counters.rate_limit_streak()  # 连续 429 计数(事件可重建)</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>            return consec &gt;= int(</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>                ctx.config.llm.degrade.rate_limit_consecutive)  # 默认 2</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        return False                                  # LLM-301/304:301 已在退避内消化</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code></code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>    # ====================================================== 降级留痕与告警(ADI §3.4)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>    def _record_degradation(self, failed: str, to: str, ctx) -&gt; None:</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        &quot;&quot;&quot;每次实际降级计数;超过 max_per_session(默认 5)发 system.error 告警事件。</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code></code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>        idx 前移已在 chat_with_fallback 完成;llm.request 的 degraded_from 由下一次</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        chat() 落(见 llm.py 职责)——此处只计数留痕,事件尽力而为(偏离 8)。</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        n = ctx.counters.degrade_add(failed, to)      # 会话级降级计数(可重建)</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        # CND-08 Producer→State:置&quot;承接适配器&quot;的降级来源,使其后续 chat() 的</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        # llm.request 携带 degraded_from(否则该字段恒缺失 = dead trigger)。守卫式</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        # 调用,兼容无该方法的测试替身。</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        ad = (self.adapters or {}).get(to)</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>        mark = getattr(ad, &quot;mark_degraded_from&quot;, None)</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        if callable(mark):</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>            mark(failed)</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>        if n &gt; int(ctx.config.llm.degrade.max_per_session):</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>            _fire_emit(self.bus, &quot;system.error&quot;, {</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>                &quot;code&quot;: &quot;LLM-310&quot;,</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>                &quot;advice&quot;: f&quot;单会话降级 {n} 次,查备用模型配额/上游状态&quot;})</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code></code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>    # ====================================================== 周期健康探针(F033)</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>    async def probe_loop(self, adapters: Optional[dict[str, Any]] = None,</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>                         interval_s: float = 60.0) -&gt; None:</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>        &quot;&quot;&quot;进程生命周期协程:每 interval_s 对**链内**适配器 ping()(5s 超时),结果 mark()。</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code></code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        探针成功不计 F029 用量、失败不落 llm.retry——只判可达性,真实请求仍按错误码</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>        走降级(ADI §3.5);主模型 down→healthy(2 好回切)时 idx 归零自动回切主模型</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>        (偏离 4)。取消即退出(不吞 CancelledError,F025)。</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code></code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>        偏离(相对 spec 伪码&quot;对全部适配器 ping&quot;):探针**只走 ``self.health`` 的键**</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>        (= 本链成员),注册表里存在但不在链内的模型不探。理由:①``health`` 在</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>        ``__post_init__`` 里按 ``chain`` 初始化,按注册表遍历会在&quot;注册了链外模型&quot;时</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>        ``self.health[name]`` 直接 KeyError —— 该异常在 try 之外,会**打死整个探针</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>        任务**(等于静默关掉回切);②回切判据 ``pick()`` 只读链内成员的健康位。</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>        链成员尚未注册时跳过(不判失败),等其注册后自然纳入。</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        reg = self.adapters if adapters is None else adapters</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        if not reg:</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>            log.warning(&quot;probe_loop: 无适配器注册表,探针空转退出&quot;)</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>            return</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        while True:</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>            for name in list(self.health):           # 只探**链内**适配器(见下注)</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>                adp = reg.get(name)</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>                if adp is None:                      # 链成员尚未注册:跳过,不算失败</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>                    continue</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>                prev = self.health[name].state</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>                try:</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>                    # Keep the deadline in the owner task: Python 3.11 wait_for</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>                    # can lose external cancellation when its child finishes</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>                    # concurrently, leaving shutdown waiting for this loop.</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>                    async with asyncio.timeout(5.0):</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>                        await adp.ping()</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>                    self.health[name].mark(True)</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>                except (PyHError, asyncio.TimeoutError):</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>                    self.health[name].mark(False)</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>                except Exception:                     # noqa: BLE001 未预期同判失败</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>                    log.debug(&quot;probe %s 未预期异常&quot;, name, exc_info=True)</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>                    self.health[name].mark(False)</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>                # 2 好回切(down→healthy):通知 + 主模型 idx 归零自动回切</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>                if (prev == &quot;down&quot;</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>                        and self.health[name].state == &quot;healthy&quot;):</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>                    _fire_emit(self.bus, &quot;llm.recovered&quot;, {&quot;model&quot;: name})</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>                    if name == self.chain[0]:</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>                        self.idx = 0</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>            await asyncio.sleep(interval_s)</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code></code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>    # ====================================================== 适配器择优(F033)</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>    def pick(self) -&gt; str:</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>        &quot;&quot;&quot;返回 chain 中从 idx 起第一个非 down 适配器;全部 down → 返回 idx 当前</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>        元素(交由降级流程暴露 LLM-310)。主模型 down 不跳过(保底仍尝试,以测恢复)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>        for m in self.chain[self.idx:]:</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>            if not self.health[m].is_down():</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>                return m</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>        return self.chain[self.idx]</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code></code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code></code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code># -------------------------------------------------------------- BudgetGuard</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>class BudgetGuard:</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>    &quot;&quot;&quot;单任务预算闸(F032 前置;CONSTRAINTS-07 §10):发请求前与每次重试前读</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>    UsageCounters(与 scope.budget_state 同源,report_usage 唯一写入)与 BudgetLimits</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>    (ctx.config.budget.task),返回 ok/warn;超任一硬闸 → budget.paused(exhausted)</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>    事件 + 抛 BUDGET-EXHAUSTED(agent-loop 据此强制终态 reason=budget)。</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code></code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>    偏离说明:check 为 async(spec 伪码同步签名与内部 await session.append 矛盾,</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>    见偏离 2);paused/exhausted 态由 agent-loop 的 scope.budget_state 三闸强制,</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>    本闸只做前置拦截,返回面为 ok/warn + raise。</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code></code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>    # 硬闸:输出/输入 token 或估算成本任一超限 → 终态(判定以 token 为准,F032)</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>    async def check(ctx) -&gt; BudgetState:</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>        &quot;&quot;&quot;前置检查:超限 raise BUDGET-EXHAUSTED;达 warn_ratio(默认 80%)返回</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>        &quot;warn&quot;;否则 &quot;ok&quot;。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>        used = ctx.counters.task_total()      # 与 scope.budget_state 同一数据源</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>        lim = ctx.config.budget.task          # in≤200万 / out≤5万 / cost≤1 元(F032)</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>        if (used.out_tokens &gt;= lim.max_out_tokens</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>                or used.in_tokens &gt;= lim.max_in_tokens</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>                or used.cost_est &gt;= lim.max_cost_yuan):</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>            await ctx.session.append(</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>                &quot;budget.paused&quot;, {&quot;state&quot;: &quot;exhausted&quot;,</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>                                  &quot;used&quot;: used.model_dump()}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>            raise PyHError(&quot;BUDGET-EXHAUSTED&quot;,</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>                           ctx={&quot;used&quot;: used.model_dump()})   # 偏离 3:未登记码直构</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>        warn_ratio = float(getattr(ctx.config.budget, &quot;warn_ratio&quot;, 0.8))</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>        if used.out_tokens &gt;= warn_ratio * lim.max_out_tokens:  # warn=80% 提醒</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>            _fire_emit(getattr(ctx, &quot;bus&quot;, None), &quot;budget.warn&quot;,</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>                       {&quot;used_out&quot;: used.out_tokens})</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>            return &quot;warn&quot;</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>        return &quot;ok&quot;</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code></code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>    def report(ctx) -&gt; dict:</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>        &quot;&quot;&quot;预算读数汇总(/cost 命令与审计数据源,CONSTRAINTS-07 §9;纯只读)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>        used = ctx.counters.task_total()</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>        lim = ctx.config.budget.task</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code>        return {&quot;used&quot;: used.model_dump(), &quot;limit&quot;: lim.model_dump(),</code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>                &quot;pct_out&quot;: used.out_tokens / lim.max_out_tokens * 100}</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code></code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code></code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>__all__ = [</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>    &quot;AdapterHealth&quot;, &quot;BudgetGuard&quot;, &quot;BudgetState&quot;, &quot;FallbackChain&quot;,</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>    &quot;HealthTable&quot;, &quot;LLMAdapter&quot;, &quot;TaskUsage&quot;, &quot;UsageCounters&quot;,</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

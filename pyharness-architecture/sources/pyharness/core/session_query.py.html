@@ -1,0 +1,307 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/session_query.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/session_query.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 307 行</span></nav><main class="wrap source-page"><h1>pyharness/core/session_query.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：c92d880104404746b8d024ec71bbc195f0a878c1<br>SHA-256（内容校验）：7d94a8a83fe16230f4975e8d1721252ee8ba254c3f4d6a64a16e610d041a34e4</p><p><a href="../../../architecture-detailed.html?node=session_query">Session Full Text Index（会话全文派生索引）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 6 个类、函数与方法</summary><ul><li><a href="#L136">SessionQueryIndex（类） · L136–L291</a><ul><li><a href="#L154">SessionQueryIndex.__init__（方法） · L154–L196</a></li><li><a href="#L204">SessionQueryIndex.on_event（异步方法） · L204–L219</a></li><li><a href="#L221">SessionQueryIndex._extract（方法） · L221–L226</a></li><li><a href="#L229">SessionQueryIndex.flush（异步方法） · L229–L272</a></li><li><a href="#L275">SessionQueryIndex.max_seq（方法） · L275–L291</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/session_query.py — 会话全文查询 FTS5 核心(specs/session_query.py.md;F057)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F057(会话全文查询 FTS5 核心)· 联动 F009/F011(FTS 索引 = JSONL 的**派生</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>副本**,原则 1)/F042(session.renamed 标题入索引)/F063(user.message_edited 级联更新</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>索引)/F060(repair 索引对账:落后即整体重建)/F058(compaction 不折叠 FTS——索引独立</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>于压缩)/F064(CLI `search` 子命令)。权威口径:specs/session_query.py.md(编码契约)、</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>PRD-Core §5.6 F057、EVENT-SCHEMA §4.2(派生视图纪律:FTS 是日志投影,可整体丢弃</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>重建)、CFG.md §3.7(storage.fts.index_batch_ms=200/query_timeout_s=5/result_limit=20)、</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>ERR.md §2.3(PERS-2xx)、SECURITY.md §8.3(索引同权限 600,不进版本库)。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>一句话:给全会话历史建 **SQLite FTS5 派生索引**,实现&quot;上次让它整理过某文件夹&quot;式</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>检索——索引**只做可整体重建的派生副本,永不写回、更不替代 JSONL 真源**(原则 1:</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>任何一行索引可删了重放日志再建);订阅 append 事件异步攒批(200ms)增量索引,关键词/</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>短语查询返回命中(带 **seq** 锚点,下游按 seq 回原会话 JSONL 取全事件);中文分词弱</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>用&quot;每字成词索引 + 查询端二元切分与连续子串补偿&quot;(unicode61 局限如实标注);查询超时</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>5s 软降级返回空+告警;索引损坏/落后由 rebuild() 整体重建。</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>实现要点(逐条兑现 spec):</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>1. events_fts 为 FTS5 虚表,每行从 JSONL 事件派生,行键 (session_id, seq) 唯一;</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>   本模块对 JSONL 只读(rebuild 经注入 replay 源读),禁止任何&quot;索引写回日志/日志补</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>   索引&quot;双写路径(INV-01);索引可随时 DELETE 全表重建,JSONL 一行不改。</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>2. on_event 订阅持久事件 → 白名单抽取文本(user.message.content / agent.message.content /</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   llm.response.content / tool.result.summary / session.renamed.new_title /</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   user.message_edited.new_content(更新 target 行)/ context.compacted.summary);</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   攒批:≥200ms(index_batch_ms,定时器)或 ≥64 条批量落库;瞬时事件(llm.chunk)永不索引。</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>3. query(q, limit=20, session_id?, actor?, after_ts?) —— 中文 2-gram + 英文 ≥3 字符词;</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>   词长低于下限 → EVT-100 拒;整串短语补偿;按 FTS5 rank 排序截断 ≤limit;**超时软降级**</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   返回 {&quot;hits&quot;: [], &quot;timed_out&quot;: True} + WARNING,不抛不挂(检索属 UX 场景)。</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>4. 每条 Hit 带 (session_id, seq, type, ts, snippet, rank) —— seq 即 JSONL 行号锚;</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   CLI/UI 拿到 Hit 后经 session.events_between(seq, seq) 回原会话取全事件。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>5. rebuild(session_id=None) 全量/单会话重建:清派生行 → 重放 JSONL → 逐事件重插</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>   (与 on_event 同一白名单/抽取逻辑,INV-03);崩溃后半索引/repair 对账落后时调用。</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>6. detach 幂等摘除;delete_session 级联删该会话索引行;索引物理位置 ~/.pyharness/index.db</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>   (WAL,权限 600,与 storage KV 分库;SQLite 串行写由进程内锁保证)。</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>中文分词与 unicode61 局限(如实标注):</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>- SQLite 默认 unicode61 分词器把连续中文当**一个 token**(只按标点/空白切分),对</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>  &quot;搜 2 字词&quot;完全不适用——实测 SQLite 3.50 下对原文直查 &#x27;备份&#x27;/&#x27;备份*&#x27; 均 0 命中。</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>- 本实现采用**索引侧每字成词**:写索引前把中文连续串逐字以空格隔开(每字一个 token,</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>  英文/数字连续段保持整词 token,其余字符丢弃),FTS5 即可表达&quot;相邻字&quot;短语。</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>- **查询端二元切分**:查询串中文段滑窗产 2-gram,每个 2-gram 转成相邻单字短语</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>  (&quot;备份&quot; → `&quot;备 份&quot;`,quoted phrase = 相邻 token 序列),OR 合并保证召回;</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>  **连续子串补偿**:整串(≥4 字/字符)再按同规则切成 token 短语 OR 上,收紧命中精度。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>- 局限:索引/摘要片段展示为字间带空格文本(查询结果 snippet 已做字间空格回缩美化);</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>  同音/繁体不联想;2 字以上连续子串命中依赖&quot;查询串含于原文连续字串&quot;,跨词序不命中。</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>偏离说明(契约 = specs/session_query.py.md;本仓库既有实现约束下的取舍,均列理由):</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>1. **actor 冗余列 + 7 列行**:spec 建表 6 列但注&quot;actor 过滤需冗余 actor 列&quot;且 query</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>   伪码带 actor=? —— 二者矛盾;取 spec 注的意图:建表含 actor UNINDEXED,行按 7 列</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>   插入,snippet 取 content 列(索引 6,伪码的 5 是 6 列布局下的旧序号)。</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>2. **行键唯一性靠伴生表而非 INSERT OR IGNORE**:FTS5 无唯一约束,实测同 (session_id,</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>   seq) 二次 INSERT OR IGNORE 会落两行——spec 伪码幂等语义无法靠 OR IGNORE 兑现;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>   故加伴生表 fts_rows(session_id, seq PRIMARY KEY) 在**同一事务**内做幂等闸</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>   (INSERT OR IGNORE 进 fts_rows 成功才写 events_fts),对外行为与 spec 一致。</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>3. **rebuild 对 user.message_edited 走共享抽取路径**:spec rebuild 伪码只按 _WHITELIST</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>   重插,会丢编辑(重放原 user.message 旧文,编辑事件被跳过);本实现与 on_event 共用</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>   _extract(),重放遇 edited 同样 UPDATE target 行——保证 INV-03&quot;重建与增量逐行一致&quot;</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>   及 F063&quot;编辑后 rebuild 仍搜得到新版&quot;。</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>4. **查询串不整体嵌入 MATCH**:spec 伪码把原始 q 直接引号嵌入(含引号即语法错,靠</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>   OperationalError 兜空);本实现短语补偿串先经自研 tokenizer 清洗再引号化,含引号</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>   查询不会破坏 MATCH 语法(OperationalError 兜底保留为双保险)。</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>5. **无 repo 装配面时 announce 降级**:spec announce 依赖 bus.tools.register_tool /</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>   locator.mount —— 本仓库阶段无 F064 消费方与全局工具装配,announce 在 ctx 带</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>   tools/registry 时注册工具并挂 ctx.session.fts,否则仅记 info(装配面缺失不阻断);</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>   注册入口单独提供 register()(spill 同款形态)供后续装配。</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>6. **全文/单会话 rebuild 数据源注入**:spec 伪码直接调 persistence.replay;本实现经</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>   attach_source(sid, store) 注入可回放源(鸭子类型:store.replay() 或</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>   SessionLog.events_after(0) 均可),单测不依赖真实用户目录。</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>依赖方向(INV-08):本文件 → errors(raise_code)、config(DEFAULTS 只读)、events(类型</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>仅作字段访问);不反向写 session/persistence。外部:sqlite3(stdlib,FTS5 ≥3.9,Python</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>3.11 自带)、asyncio(攒批定时/超时闸)、threading(单连接串行写)。无 LLM 依赖。</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>import asyncio</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>import logging</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>import os</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>import re</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>import sqlite3</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>import threading</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>from typing import Any, Iterator, Optional, Union</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>from pyharness.config import DEFAULTS</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code># ===================================================================== 常量</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code># CFG.md §3.7 storage.fts 默认值唯一落地(config.DEFAULTS 权威;运行期可经 ctx.config</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code># 覆盖,见 enter)。PARAMETER-ANCHOR 锁死:index_batch_ms=200 / query_timeout_s=5 /</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code># result_limit=20。</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code></code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code># 默认索引库:~/.pyharness/index.db(spec 数据结构表;与 storage KV 分库,WAL)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code># ------------------------------------------------------------- 分词器(纯函数)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code># unicode61 把连续中文当一个 token → 索引侧先逐字空格化(每字成词);查询侧按段</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code># 2-gram 滑窗 + 整串补偿。以下三个正则即全部分词口径,索引与查询严格同源。</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code></code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code># ================================================================= 事件白名单</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code># 索引事件类型 → 文本抽取器(数据结构表 _WHITELIST;user.message_edited 走修正分支,</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code># 见 _extract)。llm.response 仅在 content 非空时入索引(工具调用轮 content=&quot;&quot; 不索引)。</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code># 订阅类型全量:白名单 6 类 + user.message_edited(F063 修正 target 行)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code></code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code># 索引末 seq 的**唯一判据 SQL**(装配内 ``max_seq`` 与装配外 ``read_max_seq`` 共用,</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code># 避免 CND-06&quot;读写判据多源&quot;导致的漂移)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code></code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code></code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code># ================================================================= 结果模型</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code></code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code></code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code># ============================================================ 模块工具(读配置)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>from pyharness.core.config_access import _cfg_holder</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code></code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>from pyharness.core.config_access import _cfg</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code></code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code># ============================================================ FTS 查询工具句柄</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code></code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code></code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code># ============================================================ 主类</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>from pyharness.core.query_projection import (log, _FTS_DEFAULTS, _INDEX_BATCH_MS, _QUERY_TIMEOUT_S, _RESULT_LIMIT, _MIN_CJK, _MIN_LATIN, _FLUSH_BATCH, _OWNER, TOOL_NAME, _CONTENT_COL, DEFAULT_DB_NAME, default_db_path, _CJK_RUN, _CJK_CHAR, _WORD, _tokenize, _index_text, _pretty_snippet, _payload, _field, _payload_field, _extract_content, _extract_summary, _extract_new_title, _WHITELIST, _INDEX_TYPES, _index_item, is_indexable, _MAX_SEQ_SQL, read_max_seq, Hit, QueryResult, _log_warn, FtsQueryHandle, _replay_store)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code></code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>from pyharness.core.query_lifecycle import QueryLifecycle</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>from pyharness.core.query_search import QuerySearch</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>from pyharness.core.query_maintenance import QueryMaintenance</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code></code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>class SessionQueryIndex(QueryLifecycle, QuerySearch, QueryMaintenance):</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    &quot;&quot;&quot;会话全文查询 FTS5 派生索引(F057)。</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code></code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    派生纪律(原则 1):events_fts 每一行都从 JSONL 事件派生,行键 (session_id, seq)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    唯一;对 JSONL 只读,禁止&quot;索引写回日志/日志补索引&quot;双写路径;索引可随时 DELETE</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    全表重建(rebuild),JSONL 一行不改——FTS 是日志投影,可整体丢弃重建(EVENT-SCHEMA</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    §4.2)。物理:SQLite WAL 单库(默认 ~/.pyharness/index.db,权限 600),进程内锁</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    串行化写与查询线程(单连接 check_same_thread=False + threading.Lock)。</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    订阅 append 事件异步攒批(≥64 条或 index_batch_ms 定时器)→ 批量 INSERT;</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    user.message_edited 级联更新 target 行(派生视图允许更新,真源不动);查询 5s</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    超时软降级返回 QueryResult(timed_out=True),不抛不挂;rebuild/delete_session</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    提供整体重建与级联删除。</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code></code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    实例字段:db 连接 _db、攒批缓冲 _pending/_pending_edits、订阅/调度器引用</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    _bus/_owner/_sched_task、注入的回放源 _sources(sid → replayable 鸭子对象)。</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code></code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    def __init__(self, db_path: Optional[Union[str, Path]] = None, *,</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                 sources: Optional[dict] = None,</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                 batch_ms: Optional[int] = None,</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                 query_timeout_s: Optional[float] = None,</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                 result_limit: Optional[int] = None) -&gt; None:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        &quot;&quot;&quot;构造(未装载):db_path 缺省 ~/.pyharness/index.db;测试请显式传内存/tmp。</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code></code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        阈值优先级:构造显式参数 &gt; ctx.config(storage.fts.*,enter 时读) &gt; DEFAULTS。</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        sources: 会话回放源注册表 {session_id: replayable}——replayable 需提供</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        replay()(SessionStore 形态)或 events_after(0)(SessionLog 形态),供</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        rebuild() 读 JSONL 真源(派生服从真源)。</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        self._db_path: Path = (Path(db_path).expanduser()</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>                               if db_path is not None else default_db_path())</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        self._sources: dict = dict(sources or {})</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        # 阈值(F057 边界;显式参数优先于 ctx.config 覆盖,见 enter)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        self._explicit: dict[str, bool] = {</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>            &quot;index_batch_ms&quot;: batch_ms is not None,</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            &quot;query_timeout_s&quot;: query_timeout_s is not None,</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>            &quot;result_limit&quot;: result_limit is not None,</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        }</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        self.index_batch_ms: int = _INDEX_BATCH_MS if batch_ms is None else int(batch_ms)</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        self.query_timeout_s: float = (_QUERY_TIMEOUT_S if query_timeout_s is None</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                                       else float(query_timeout_s))</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        self.result_limit: int = _RESULT_LIMIT if result_limit is None else int(result_limit)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        # 运行态</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        self._db: Optional[sqlite3.Connection] = None</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        self._lock = threading.Lock()              # 单连接串行写+查询线程互斥</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        self._pending: list[tuple] = []            # 攒批缓冲(行)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        self._pending_edits: list[tuple] = []      # 攒批缓冲(编辑修正)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        self._bus: Any = None                      # 事件总线(enter 时接线)</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        # 订阅属主(退订按此摘除)。**必须含全部隔离维度(R31-1-F)**:总线在多租户</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        # 桌面下是**共享**的,而本索引是**每会话**一个、库按租户分域(R14-8)。</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        # 属主若只用一个模块常量,任一实例 `detach()` 的 `unsubscribe_all(owner)`</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        # 会把**其他租户/会话**的订阅一并摘掉(实测:2 租户共 14 条订阅被一次摘光)</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        # ⇒ 其他租户的检索**静默变陈旧**。故属主 = 常量前缀 + 库路径(含租户)+ 会话集。</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        _sids = &quot;,&quot;.join(sorted(str(k) for k in self._sources))</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        self._owner: str = f&quot;{_OWNER}:{self._db_path}:{_sids}&quot;</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        self._sched_task: Optional[asyncio.Task] = None  # 200ms 定时落库任务</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        # announce 痕迹(detach 逆序摘除用)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        self._announce_ctx: Any = None</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>        self._mounted: bool = False</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        self._tool_registered: bool = False</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code></code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>    # ------------------------------------------------------------ 装载/摘除</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code></code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code></code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>    # ------------------------------------------------------------ 攒批调度</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code></code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    # ------------------------------------------------------------ 事件 → 索引</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>    async def on_event(self, type_: str, env: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        &quot;&quot;&quot;白名单事件的订阅回调(spec 伪码):抽取入 _pending,攒满 64 条立即 flush。</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code></code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        user.message_edited 走&quot;修正 target 行&quot;(派生视图允许更新,真源不动,F063);</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        白名单外事件(含 guard.*/瞬时)不索引;flush 落库失败按 spec 记 PERS-202</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        上抛(总线侧 EVT-103 隔离,不中断主流程,索引稍后 rebuild 自愈)。</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        item = self._extract(type_, env)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        if item is None:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            return                                     # 白名单外不索引</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        if item[0] == &quot;edit&quot;:</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            self._pending_edits.append(item[1])</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        else:</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            self._pending.append(item[1])</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        if len(self._pending) + len(self._pending_edits) &gt;= _FLUSH_BATCH:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>            await self.flush()                         # 条数闸立即刷</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code></code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>    def _extract(self, type_: str, env: Any) -&gt; Optional[tuple]:</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        &quot;&quot;&quot;事件 → 攒批项(共享抽取核心;on_event/rebuild 同一口径,INV-03)。</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code></code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        委托模块级 ``_index_item``(单源,避免第二份口径漂移)。</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        return _index_item(type_, env)</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code></code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>    # ------------------------------------------------------------ 批量落库</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>    async def flush(self) -&gt; int:</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        &quot;&quot;&quot;把 _pending 批量落库(幂等,行键 (sid, seq) 唯一)+ _pending_edits 更新。</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code></code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        先取走缓冲再写(失败回填:拒新不丢旧);INSERT OR IGNORE 进伴生表 fts_rows</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        成功才写 events_fts(偏离 2:幂等语义落地);同一事务提交(WAL);返回新写入</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        行数。SQLite 写失败 → PERS-202 + 回填缓冲(repair/rebuild 可自愈,不中断</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        主流程)。进程内锁与查询线程互斥(单连接串行写)。</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        if self._db is None:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>            raise_code(&quot;PERS-202&quot;, op=&quot;fts_flush&quot;,</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                       hint=&quot;索引未装载(enter 未执行或已 detach)&quot;,</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                       advice=&quot;先 enter/重新装载索引&quot;)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        rows, edits = self._pending, self._pending_edits</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        self._pending, self._pending_edits = [], []    # 先取走(失败可回填)</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        if not rows and not edits:</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            return 0</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        n = 0</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        try:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>            with self._lock:</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>                with self._db:                         # WAL 事务(原子提交)</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                    for r in rows:</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>                        cur = self._db.execute(</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>                            &quot;INSERT OR IGNORE INTO fts_rows(session_id, seq)&quot;</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>                            &quot; VALUES(?,?)&quot;, (r[0], r[1]))</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>                        if cur.rowcount:               # 行键首见才写 FTS 行</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                            self._db.execute(</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>                                &quot;INSERT INTO events_fts VALUES(?,?,?,?,?,?,?)&quot;, r)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>                            n += 1</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>                    for sid, tseq, newc in edits:      # 派生视图更新(真源不动)</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>                        self._db.execute(</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>                            &quot;UPDATE events_fts SET content=? &quot;</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>                            &quot;WHERE session_id=? AND seq=?&quot;,</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>                            (_index_text(str(newc)), sid, tseq))</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        except sqlite3.Error as e:</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            self._pending = rows + self._pending        # 回填:拒新不丢旧</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            self._pending_edits = edits + self._pending_edits</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>            raise_code(&quot;PERS-202&quot;, op=&quot;fts_flush&quot;, n=len(rows),</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>                       hint=f&quot;FTS 索引落库失败: {e}&quot;,</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>                       advice=&quot;运行 repair(F060) 重建索引;缓冲已回填不丢&quot;)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        except BaseException:                           # 取消等:同样回填再上抛</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>            self._pending = rows + self._pending</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>            self._pending_edits = edits + self._pending_edits</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            raise</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        return n</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code></code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>    # ------------------------------------------------------------ 对账读数</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>    def max_seq(self, session_id: str) -&gt; int:</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        &quot;&quot;&quot;该会话在索引里已落库的最大 seq(派生视图末位,F060 落后对账用)。</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code></code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        只读;索引未装载 → 0(调用方据 0 判定&quot;未索引&quot;,不算落后);与攒批 flush</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        共用连接锁,避免读数与写批交错。判据 SQL 与 ``read_max_seq`` **同源**</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        (``_MAX_SEQ_SQL``),保证&quot;装配内读数&quot;与&quot;装配外读数&quot;口径一致(CND-06)。</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        db = self._db</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        if db is None:</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>            return 0</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        with self._lock:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>            try:</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>                row = db.execute(_MAX_SEQ_SQL, (str(session_id),)).fetchone()</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            except sqlite3.Error as e:</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                raise_code(&quot;PERS-202&quot;, op=&quot;fts_max_seq&quot;,</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                           hint=f&quot;索引末 seq 读数失败: {e}&quot;)</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>        return int(row[0] or 0) if row else 0</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code></code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>    # ------------------------------------------------------------ 全文查询</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code></code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code></code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>    # ------------------------------------------------------------ 分词器(纯函数)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code></code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code></code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>    # ------------------------------------------------------------ 重建/级联删</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code></code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code></code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>__all__ = [</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>    &quot;Hit&quot;, &quot;QueryResult&quot;, &quot;SessionQueryIndex&quot;, &quot;FtsQueryHandle&quot;,</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>    &quot;_WHITELIST&quot;, &quot;_MIN_CJK&quot;, &quot;_MIN_LATIN&quot;, &quot;_FLUSH_BATCH&quot;,</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>    &quot;_INDEX_BATCH_MS&quot;, &quot;_QUERY_TIMEOUT_S&quot;, &quot;_RESULT_LIMIT&quot;,</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>    &quot;TOOL_NAME&quot;, &quot;default_db_path&quot;, &quot;is_indexable&quot;, &quot;read_max_seq&quot;,</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

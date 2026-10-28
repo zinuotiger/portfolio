@@ -1,0 +1,193 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/tool_schema.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/tool_schema.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 193 行</span></nav><main class="wrap source-page"><h1>pyharness/core/tool_schema.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：3e75b200a04f1648cd299712aad594bddb7bb3fe<br>SHA-256（内容校验）：0762da633a146272cb210109ee5385e5c2e35fe5666b8c4890c6f946bdce9ddf</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 6 个类、函数与方法</summary><ul><li><a href="#L10">_sanitize（函数） · L10–L12</a></li><li><a href="#L14">_literal_annotation（函数） · L14–L24</a></li><li><a href="#L26">_annotation_from（函数） · L26–L101</a></li><li><a href="#L103">_field_spec（函数） · L103–L150</a></li><li><a href="#L152">_object_model（函数） · L152–L176</a></li><li><a href="#L178">_compile_model（函数） · L178–L193</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Tool schema: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import re</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from typing import TYPE_CHECKING, Any, Literal, Optional</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pydantic import BaseModel, ConfigDict, Field, create_model</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>if TYPE_CHECKING:  # 仅类型标注;总线实例鸭子注入(可 None = 未接线)</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>    pass</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>def _sanitize(part: str) -&gt; str:</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    &quot;&quot;&quot;名称片段清洗:非 [A-Za-z0-9_] 字符替换为 _ (防 create_model 名污染)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    return re.sub(r&quot;[^A-Za-z0-9_]&quot;, &quot;_&quot;, part) or &quot;_&quot;</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>def _literal_annotation(values: list[Any]) -&gt; Any:</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    &quot;&quot;&quot;动态 Literal 构造(eval 受限命名空间;值不可哈希 → TypeError 上抛)。</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    Python 3.13 的 typing.Literal 为特殊形式,无法经 __class_getitem__ 动态</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    展开,故把值逐一 repr 成 Python 字面量后在仅含 Literal 的命名空间 eval——</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    值来自 JSON-Schema dict,repr 文本不可执行任意代码(白名单命名空间)。</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    for v in values:</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        hash(v)                     # 不可哈希(如 dict)→ TypeError → TLB-803</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    expr = &quot;Literal[&quot; + &quot;, &quot;.join(repr(v) for v in values) + &quot;]&quot;</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    return eval(expr, {&quot;Literal&quot;: Literal})  # noqa: S307 受限命名空间,见上</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>def _annotation_from(prop: dict[str, Any], model_name: str, key: str) -&gt; Any:</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    &quot;&quot;&quot;单个属性 schema → typing 注解;不支持形态抛 ValueError(TLB-803 上游收)。</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    顺序:const/enum(不依赖 type)→ 标量 → array → object → null → anyOf/oneOf</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    (仅“单实型 + null”组合 → Optional);组合型/allOf/$ref → ValueError 早失败,</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    不静默降级成宽松类型(坏 schema 注册期即暴露,而非调用期神秘失败)。</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    if not isinstance(prop, dict):</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        raise ValueError(f&quot;属性 {key!r} 的 schema 须为 dict,&quot;</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                         f&quot;实为 {type(prop).__name__}&quot;)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    # ---- const:字面量单值</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    if &quot;const&quot; in prop:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        v = prop[&quot;const&quot;]</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        if v is None:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            return Optional[Any]</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        return _literal_annotation([v])</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    # ---- enum:字面量集合(允许 null 成员 → Optional)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    if &quot;enum&quot; in prop:</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        vals = prop[&quot;enum&quot;]</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        if not isinstance(vals, list) or not vals:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            raise ValueError(f&quot;属性 {key!r} 的 enum 须为非空 list&quot;)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        if any(v is None for v in vals):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            non_null = [v for v in vals if v is not None]</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            if not non_null:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                return Optional[Any]</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>            return Optional[_literal_annotation(non_null)]</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        return _literal_annotation(vals)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    # ---- anyOf/oneOf:仅“单实型 + null”(OpenAI nullable 惯用形态)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    for comb in (&quot;anyOf&quot;, &quot;oneOf&quot;):</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        if comb in prop:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            parts = prop[comb]</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            if not isinstance(parts, list) or not parts:</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                raise ValueError(f&quot;属性 {key!r} 的 {comb} 须为非空 list&quot;)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            real = [p for p in parts</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                    if not (isinstance(p, dict) and p.get(&quot;type&quot;) == &quot;null&quot;)]</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            if len(real) != len(parts) - 1 or len(real) != 1:</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                raise ValueError(f&quot;属性 {key!r} 的 {comb} 仅支持单实型+null 组合&quot;)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            return Optional[_annotation_from(real[0], model_name, key)]</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    if &quot;$ref&quot; in prop or &quot;allOf&quot; in prop:</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        raise ValueError(f&quot;属性 {key!r} 含 $ref/allOf,本注册表编译器不支持&quot;</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                         &quot;(能力包须内联展开)&quot;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    t = prop.get(&quot;type&quot;)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    if t is None:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        raise ValueError(f&quot;属性 {key!r} 缺 type(且无 enum/const/组合型)&quot;)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    if t == &quot;string&quot;:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        return str</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    if t == &quot;integer&quot;:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        return int</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    if t == &quot;number&quot;:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        return float</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    if t == &quot;boolean&quot;:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        return bool</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    if t == &quot;null&quot;:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        return type(None)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    if t == &quot;array&quot;:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        items = prop.get(&quot;items&quot;)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        if items is None:</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            return list[Any]                    # 合法 JSON-Schema:元素任意</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        if isinstance(items, dict):</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            return list[_annotation_from(items, model_name, f&quot;{key}[]&quot;)]</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        raise ValueError(f&quot;属性 {key!r} 的 items 仅支持单一 schema dict&quot;)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    if t == &quot;object&quot;:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        props = prop.get(&quot;properties&quot;, {})</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        if not isinstance(props, dict):</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            raise ValueError(f&quot;属性 {key!r} 的 properties 须为 dict&quot;)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        return _object_model(f&quot;{model_name}_{_sanitize(key)}&quot;, props,</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                             prop.get(&quot;required&quot;))</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code></code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    raise ValueError(f&quot;属性 {key!r} 的 type {t!r} 不支持&quot;)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code></code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>def _field_spec(prop: dict[str, Any], ann: Any, *,</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                required: bool) -&gt; tuple[Any, Any]:</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    &quot;&quot;&quot;属性约束装配 → (annotation, default);default 为 ... / 具体默认值 / Field。</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code></code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    映射:str maxLength/minLength → max_length/min_length、pattern;数值</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    minimum/maximum/exclusiveMinimum/exclusiveMaximum → ge/le/gt/lt;array</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    minItems/maxItems → min_length/max_length。Literal 化字段(enum/const/组合)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    忽略标量约束(Literal 已锁值域)。约束值非法(int()/re.compile 失败)→</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    ValueError → TLB-803 早失败,不静默忽略。</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    可选字段(非 required)一律 Optional 化 + 缺省 None(schema default 优先):</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    LLM 省略可选参数不误伤,显式传 null 亦放行。</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    kw: dict[str, Any] = {}</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    t = prop.get(&quot;type&quot;)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    literalized = any(k in prop for k in (&quot;enum&quot;, &quot;const&quot;, &quot;anyOf&quot;, &quot;oneOf&quot;))</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    if not literalized:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        if t == &quot;string&quot;:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            if &quot;maxLength&quot; in prop:</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                kw[&quot;max_length&quot;] = int(prop[&quot;maxLength&quot;])</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            if &quot;minLength&quot; in prop:</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                kw[&quot;min_length&quot;] = int(prop[&quot;minLength&quot;])</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            if &quot;pattern&quot; in prop:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                re.compile(str(prop[&quot;pattern&quot;]))   # 无效正则早失败(TLB-803)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                kw[&quot;pattern&quot;] = str(prop[&quot;pattern&quot;])</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        elif t in (&quot;integer&quot;, &quot;number&quot;):</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            for s_key, f_key in ((&quot;minimum&quot;, &quot;ge&quot;), (&quot;maximum&quot;, &quot;le&quot;),</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>                                 (&quot;exclusiveMinimum&quot;, &quot;gt&quot;),</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                                 (&quot;exclusiveMaximum&quot;, &quot;lt&quot;)):</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                if s_key in prop:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                    kw[f_key] = prop[s_key]</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        elif t == &quot;array&quot;:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            if &quot;minItems&quot; in prop:</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                kw[&quot;min_length&quot;] = int(prop[&quot;minItems&quot;])</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            if &quot;maxItems&quot; in prop:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                kw[&quot;max_length&quot;] = int(prop[&quot;maxItems&quot;])</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code></code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    if not required:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        if ann is not type(None):</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            ann = Optional[ann]</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        kw[&quot;default&quot;] = prop.get(&quot;default&quot;)      # 可选字段恒有默认(缺省 None)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        return ann, Field(**kw)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>    # 必填字段</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    if &quot;default&quot; in prop:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        kw[&quot;default&quot;] = prop[&quot;default&quot;]</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        return ann, Field(**kw)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    if kw:</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        return ann, Field(**kw)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    return ann, ...</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code></code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>def _object_model(model_name: str, props: dict[str, Any],</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>                  required: Any) -&gt; type[BaseModel]:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    &quot;&quot;&quot;properties dict → pydantic 模型(extra=forbid,恒 populate_by_name)。</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code></code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    属性名可为任意字符串(非标识符亦可,create_model 经 **dict 展开,实测可用;</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>    model_dump 输出原名 == schema 属性名,INV-06 可逐字段比对)。required 引用</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    未知属性 / 非 list → ValueError(TLB-803 上游收)。</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>    if not isinstance(props, dict):</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        raise ValueError(&quot;object 的 properties 须为 dict&quot;)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    req = required or []</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    if not isinstance(req, list) or not all(isinstance(r, str) for r in req):</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        raise ValueError(&quot;required 须为 str 元素 list&quot;)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    missing = [r for r in req if r not in props]</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    if missing:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        raise ValueError(f&quot;required 引用未知属性: {missing}&quot;)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code></code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    fields: dict[str, Any] = {}</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    for key, prop in props.items():</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        ann = _annotation_from(prop, model_name, key)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        fields[key] = _field_spec(prop, ann, required=key in req)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    return create_model(model_name,</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                        __config__=ConfigDict(extra=&quot;forbid&quot;,</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                                              populate_by_name=True),</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                        **fields)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code></code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>def _compile_model(tool_name: str, schema: Any) -&gt; type[BaseModel]:</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    &quot;&quot;&quot;工具注册时的 schema 编译入口(F026 早失败;失败 ValueError → TLB-803)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    if isinstance(schema, BaseModel):</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        raise ValueError(&quot;禁止 pydantic 模型对象混入 schema(须 JSON-Schema dict)&quot;)</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>    if not isinstance(schema, dict):</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        raise ValueError(f&quot;schema 须为 JSON-Schema dict,实为 {type(schema).__name__}&quot;)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>    t = schema.get(&quot;type&quot;)</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    if t not in (None, &quot;object&quot;):</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        raise ValueError(f&quot;顶层 type 须为 object(或省略),实为 {t!r}&quot;)</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    if t is None and &quot;properties&quot; not in schema and &quot;required&quot; not in schema:</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        # 顶层既无 type 也无 properties/required(如 {&quot;path&quot;: …} 裸键)→ 非</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        # object 参数形态,拒(空参数工具应显式写 {&quot;type&quot;: &quot;object&quot;})</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        raise ValueError(&quot;顶层缺 type/properties,非 object 参数形态&quot;)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    props = schema.get(&quot;properties&quot;, {})</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    return _object_model(f&quot;ToolArgs_{_sanitize(tool_name)}&quot;, props,</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                         schema.get(&quot;required&quot;))</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

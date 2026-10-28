@@ -1,0 +1,313 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/desktop/authority.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/desktop/authority.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 313 行</span></nav><main class="wrap source-page"><h1>pyharness/desktop/authority.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：0d77adaba1cc54950af55edd501f5eb0a2c7be47<br>SHA-256（内容校验）：020fd16b54c719bfabbd68e20ec5399c5200628c089b2bc6d698aac03f71cbe3</p><p><a href="../../../architecture-detailed.html?node=identity">Tenant Request Authority（租户请求身份与权限）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 17 个类、函数与方法</summary><ul><li><a href="#L19">DesktopAuthority（类） · L19–L312</a><ul><li><a href="#L22">DesktopAuthority._candidate_session_dirs（方法） · L22–L44</a></li><li><a href="#L46">DesktopAuthority._disk_owners（方法） · L46–L68</a></li><li><a href="#L70">DesktopAuthority._request_sid（方法） · L70–L82</a></li><li><a href="#L84">DesktopAuthority.resolve_request_tenant（方法） · L84–L116</a></li><li><a href="#L118">DesktopAuthority.bootstrap_url（方法） · L118–L127</a></li><li><a href="#L129">DesktopAuthority._declared_tenant（方法） · L129–L138</a></li><li><a href="#L140">DesktopAuthority._tenant_store（方法） · L140–L151</a></li><li><a href="#L153">DesktopAuthority._verify_tenant_token（方法） · L153–L156</a></li><li><a href="#L158">DesktopAuthority._presented_token（方法） · L158–L170</a></li><li><a href="#L172">DesktopAuthority._presented_tenant_token（方法） · L172–L179</a></li><li><a href="#L181">DesktopAuthority._operator_ok（方法） · L181–L192</a></li><li><a href="#L194">DesktopAuthority._tenant_authorized（方法） · L194–L209</a></li><li><a href="#L211">DesktopAuthority._tenant_middleware（异步方法） · L211–L250</a></li><li><a href="#L252">DesktopAuthority._storage_root（方法） · L252–L257</a></li><li><a href="#L260">DesktopAuthority._resolve_api_token（方法） · L260–L275</a></li><li><a href="#L277">DesktopAuthority._require_api_auth（方法） · L277–L312</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;DesktopAuthority operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from typing import TYPE_CHECKING</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import re</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import secrets</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import stat</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from fastapi import Header, Request</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from fastapi.responses import JSONResponse</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.core.tenant_settings import TenantSettingsStore, normalize_tenant_id, session_tenants, tenant_of_log, tenants_dir</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from .auth_cookies import read_cookie</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from .sessions import _SID_RE, _cfg_of, _resolve_secret_value, _sessions_dir_of</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>from pyharness.desktop.host_policy import _SESSION_ID_IN_PATH</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>if TYPE_CHECKING:  # 仅注解引用(app↔bridge 环形依赖,运行时不需要)</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    pass</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>class DesktopAuthority:</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    &quot;&quot;&quot;DesktopAuthority responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    def _candidate_session_dirs(self) -&gt; list[Path]:</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        &quot;&quot;&quot;会话可能落盘的**全部权威目录** = 默认 sessions 目录 + `&lt;root&gt;/tenants/*/sessions`。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        与 ``ApplicationService._tenant_sessions_dir`` 的派生一致(default 用装配的</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        ``storage.sessions_dir``,其余租户用 ``&lt;storage.root&gt;/tenants/&lt;t&gt;/sessions``)。</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        这里只做**枚举**,不做归属判定 —— &quot;同源规则多份实现必然漂移&quot;,故派生点唯一。</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        dirs: list[Path] = []</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        try:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            base = _sessions_dir_of(self.ctx)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>            if base:</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>                dirs.append(Path(str(base)))</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            pass</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        try:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>            root = Path(str(_cfg_of(self.ctx).storage.root)).expanduser()</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            tdir = root / &quot;tenants&quot;</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            if tdir.is_dir():</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                dirs.extend(sorted(d / &quot;sessions&quot; for d in tdir.iterdir()</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>                                   if d.is_dir()))</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        except (AttributeError, TypeError, ValueError, OSError):</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>            pass</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        return dirs</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    def _disk_owners(self, sid: str) -&gt; tuple[set, bool]:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        &quot;&quot;&quot;磁盘上的**权威归属** → ``(租户集合, 是否存在&quot;归属不可得&quot;的会话文件)``。</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        第二项是 fail-closed 的枢轴:文件**在盘**但读不出租户(GAP-10 缺失/坏行)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        ⇒ 归属**未知**,调用方必须拒绝;绝不能把&quot;读不出归属&quot;混同于&quot;会话不存在&quot;</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        (后者才允许回落客户端自报头)。</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        owners: set = set()</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        unknown = False</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        for d in self._candidate_session_dirs():</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>            f = d / f&quot;{sid}.jsonl&quot;</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            try:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                if not f.is_file():</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                    continue</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            except OSError:</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                unknown = True               # 目录不可读 ⇒ 无法断言归属</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                continue</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            t = tenant_of_log(f)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            if t:</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                owners.add(t)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            else:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                unknown = True                # 会话在盘但未载租户 ⇒ 归属未知</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        return owners, unknown</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    def _request_sid(request: Request) -&gt; str:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        &quot;&quot;&quot;本请求指向的**会话 id**:路径段优先,其次 ``?sid=``(SSE 流式面)。</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        SSE 把 sid 放在查询串(`/api/stream?sid=…`)⇒ 只认路径会**整条绕过**归属</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        判定,流式面就成了&quot;声明即授权&quot;(实测:声明任意租户即可订阅该租户会话事件)。</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        查询参数按 ``validate_session_id`` 同款正则校验,避免把普通查询参数误判为 sid。</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        m = _SESSION_ID_IN_PATH.search(request.url.path)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        if m:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            return m.group(1)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        q = str(request.query_params.get(&quot;sid&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        return q if _SID_RE.fullmatch(q) else &quot;&quot;</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code></code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    def resolve_request_tenant(self, request: Request) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        &quot;&quot;&quot;解析本请求的**服务端权威**租户;不可得 → ``None``(调用方须 fail-closed)。</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code></code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        **不变式(2026-09-21 R31-1)**:客户端自报头只声明&quot;我要访问哪个租户的**分区**&quot;,</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        它**绝不决定一个已存在会话的归属**,服务端也**绝不据此把请求改判/重定向到</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        另一个租户**。解析序:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code></code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>          ① 无会话语境(路径与查询都没有 sid) ⇒ 头即声明(既有语义);</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>          ② 会话的权威归属 = 进程内认领集合 ∪ 全部权威目录的落盘事实;</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>          ③ **归属不可得**(文件在盘但未载租户)或**归属歧义**(多租户同名 sid)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>             ⇒ ``None``(**拒绝**);</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>          ④ 归属确定:声明与归属**相同** ⇒ 放行;**不同** ⇒ ``None``(拒绝);</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>          ⑤ 任何权威来源都查无此会话 ⇒ 回落声明(该路由只会 404/EVT-106,无数据可泄)。</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        为什么&quot;不一致即拒&quot;而不是&quot;改判为真实归属&quot;:改判等于把**声明了 A 的请求交给</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        B 的租户服务作答** ⇒ 未声明 B 的客户端读到 B 的会话正文。两版实现均可复现:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        HEAD 版在 default 分区(即全局 sessions 目录)按目录归属放行,不认信封租户;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        本轮前版(按权威目录改判)更彻底 —— **任意头甚至不带头**都返回真实归属的数据</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        (实测 `header=alpha/default/无` 于 beta 会话一律 200 + `BETA-ONLY`)。</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        **鉴权不由本函数负责**:R31-2 在中间件里先行把关(``_tenant_authorized``),</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        本函数只回答&quot;这个会话的**权威归属**是谁&quot;,不回答&quot;该主体**能否**用这个租户&quot;。</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        declared = self._declared_tenant(request)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        sid = self._request_sid(request)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        if not sid:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            return declared                      # ① 无会话语境:头即声明</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        owners, unknown = self._disk_owners(sid)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        owners |= session_tenants(sid)           # ② 进程内认领(仅作**归属来源**)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        if unknown or len(owners) &gt; 1:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            return None                          # ③ 归属不可得 / 歧义 ⇒ 拒</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        if not owners:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>            return declared                      # ⑤ 查无此会话(路由只会 404)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        return declared if declared in owners else None   # ④ 声明≠权威归属 ⇒ 拒</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code></code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    def bootstrap_url(self, host: str, port: int) -&gt; str:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        &quot;&quot;&quot;壳加载 UI 的 URL(**带操作者令牌**,R31-2)。</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        ``/`` 不再无条件发放全局令牌,故壳必须自证持有它。令牌走 URL 查询串而非页面</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        meta:它随即被换成 HttpOnly cookie(JS 不可读、不进 DOM/日志),与既有 P1-2</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        口径一致。URL 构造收在此处,供两处启动路径共用(免第二份实现漂移)。</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        authority = f&#x27;[{host}]&#x27; if &#x27;:&#x27; in host else host</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        base = f&quot;http://{authority}:{port}/&quot;</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        return f&quot;{base}?token={self._api_token}&quot; if self._api_token else base</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code></code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    def _declared_tenant(request: Request) -&gt; str:</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        from .accounts_api import principal</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        account = principal(request)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        if account:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            return account[&#x27;tenant&#x27;]</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        &quot;&quot;&quot;客户端**声明**的租户(头优先,其次 ``?tenant=``,缺省 ``default``)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        return normalize_tenant_id(</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            request.headers.get(&quot;x-pyharness-tenant&quot;)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            or request.query_params.get(&quot;tenant&quot;) or &quot;default&quot;)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code></code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    def _tenant_store(self) -&gt; Optional[TenantSettingsStore]:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        &quot;&quot;&quot;租户令牌库;派生点与 ``ApplicationService`` 同为 ``tenants_dir(root)``。</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code></code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        拿不到 ``storage.root``(鸭子类型 ctx / 无配置)⇒ ``None`` ⇒ 调用方按</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        **无法校验** 处理(fail-closed),而不是回落放行。</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        if self._tstore is None:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            root = self._storage_root()</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            if root is None:</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                return None                 # fail-closed:无 root 即无法校验</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>            self._tstore = TenantSettingsStore(tenants_dir(root))</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        return self._tstore</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code></code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    def _verify_tenant_token(self, tenant: str, given: str) -&gt; bool:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        &quot;&quot;&quot;校验租户令牌;无令牌库 ⇒ ``False``(**fail-closed**)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        store = self._tenant_store()</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        return bool(store) and store.verify_token(tenant, given)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code></code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    def _presented_token(request: Request) -&gt; str:</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        &quot;&quot;&quot;请求出示的**全局**令牌(头 / Bearer / cookie / ``?token=``)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        hdrs = getattr(request, &quot;headers&quot;, None) or {}</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        given = hdrs.get(&quot;x-pyharness-token&quot;) or &quot;&quot;</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        auth = hdrs.get(&quot;authorization&quot;) or &quot;&quot;</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        if not given and auth.lower().startswith(&quot;bearer &quot;):</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>            given = auth[7:].strip()</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        if not given:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            given = read_cookie(request, &quot;pyharness_token&quot;)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        if not given:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            given = str((getattr(request, &quot;query_params&quot;, None) or {}).get(&quot;token&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        return str(given)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code></code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    def _presented_tenant_token(request: Request) -&gt; str:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        &quot;&quot;&quot;请求出示的**租户**令牌:头 / 同名 cookie / ``?token=``(壳加载 URL)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        hdrs = getattr(request, &quot;headers&quot;, None) or {}</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        qp = getattr(request, &quot;query_params&quot;, None) or {}</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        return str(hdrs.get(&quot;x-pyharness-tenant-token&quot;)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                   or read_cookie(request, &quot;pyharness_tenant_token&quot;)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                   or qp.get(&quot;token&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code></code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    def _operator_ok(self, request: Request) -&gt; bool:</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        &quot;&quot;&quot;是否持有全局(操作者)令牌;未配置令牌时视为放行(沿用既有语义)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        from .accounts_api import principal, operator_principal</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        if operator_principal(request):</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>            return True</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        if principal(request):</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>            return False</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        expected = self._api_token</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        if not expected:</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>            return True</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        given = self._presented_token(request)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        return bool(given) and secrets.compare_digest(given, expected)</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code></code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>    def _tenant_authorized(self, request: Request, tenant: str) -&gt; bool:</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>        &quot;&quot;&quot;**鉴权(R31-2)**:声明 ``default`` 沿用全局令牌(路由依赖再强制一次);</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        声明非 default ⇒ 必须出示**该租户**的令牌。</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code></code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        为什么 default 放行:它是**兼容口** —— 桌面壳与既有客户端只持全局令牌,</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        若 default 也要租户令牌,引导页与全部既有流程即刻断。收益全在非 default:</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        此前任何人只要**报对租户名**即可进入(只有归属校验 R31-1,没有资格校验)。</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        from .accounts_api import principal</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        account = principal(request)</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        if account:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            return account[&#x27;tenant&#x27;] == tenant</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        if tenant == &quot;default&quot;:</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>            return True</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        return self._verify_tenant_token(</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            tenant, self._presented_tenant_token(request))</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    async def _tenant_middleware(self, request: Request, call_next: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        # The only public mutation is an independently signed Feishu callback.</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        # It cannot select a tenant or reach any management/API endpoint.</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        if getattr(request,&#x27;method&#x27;,&#x27;GET&#x27;) == &#x27;POST&#x27; and re.fullmatch(r&#x27;/hooks/feishu/[a-z][a-z0-9_]{1,30}&#x27;, request.url.path):</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            return await call_next(request)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        from .accounts_api import inspect_request, principal</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        rejected = inspect_request(self, request)</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        if rejected is not None:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>            return rejected</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        if request.url.path.startswith(&#x27;/api/account/&#x27;) or request.url.path == &#x27;/login&#x27;:</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>            return await call_next(request)</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        # ① 鉴权先行:未出示 / 出示错误的本租户令牌 ⇒ 401。**先于**归属判定,故不会向</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        #    未授权方泄露&quot;该租户下是否存在某会话&quot;(403 与 404 之差即是信息)。</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        declared = self._declared_tenant(request)</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        # 引导页 ``/`` **自带**更细的凭证规则(持操作者令牌者可铸所声明租户的令牌),</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        # 故此处放行 —— 否则中间件先 401,铸令牌那条路径根本到不了(实测)。</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        if request.url.path != &quot;/&quot; and not self._tenant_authorized(request, declared):</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>            return JSONResponse(status_code=401, content={</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                &quot;code&quot;: &quot;CRED-701&quot;,</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                &quot;advice&quot;: f&quot;租户 {declared} 需要该租户的 API 令牌&quot;</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                          &quot;(X-PyHarness-Tenant-Token,或 /?tenant= 下发的 cookie);&quot;</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                          &quot;default 租户沿用全局令牌&quot;})</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        # ② 归属判定(R31-1):不可得 / 歧义 / 与声明不符 ⇒ 403</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        tenant = self.resolve_request_tenant(request)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        if tenant is None:</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>            # 归属不可得 / 歧义 / 声明与权威归属不符 ⇒ **拒绝**;一律不按客户端自报头</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>            # 放行,也不改判到别的租户(防伪造头跨租户读取,L-1/R31-1)</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>            return JSONResponse(status_code=403, content={</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                &quot;code&quot;: &quot;GRD-401&quot;,</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                &quot;advice&quot;: &quot;会话租户归属不可得、存在歧义,或与请求声明的租户不符;&quot;</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                          &quot;拒绝服务(既不按客户端自报头判定,也不跨租户改判)&quot;})</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        token = self._tenant_var.set(tenant)</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        from pyharness.application.accounts import current_actor, public_actor</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        actor_token = current_actor.set(public_actor(principal(request)))</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        try:</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>            from .accounts_api import serve_with_quota</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>            return await serve_with_quota(self, request, call_next)</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        finally:</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>            current_actor.reset(actor_token)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>            self._tenant_var.reset(token)</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code></code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    def _storage_root(self) -&gt; Optional[Path]:</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        &quot;&quot;&quot;``storage.root``;鸭子类型 ctx / 无配置 ⇒ ``None``(调用方 fail-closed)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        try:</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>            return Path(str(_cfg_of(self.ctx).storage.root)).expanduser()</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        except (AttributeError, TypeError, ValueError):</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>            return None</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code></code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code></code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>    def _resolve_api_token(self) -&gt; str:</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        &quot;&quot;&quot;API token:配置 shell.web.token(env:/file: 引用)优先,缺省进程级随机令牌。</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code></code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        同时记录 ``_api_token_generated``:随机态下该令牌**无处可查**,须由</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        :meth:`publish_operator_token` 落盘,否则浏览器/外部客户端无从取得。</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        raw = &quot;&quot;</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        cfg = _cfg_of(self.ctx)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        try:</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>            web = getattr(getattr(cfg, &quot;shell&quot;, None), &quot;web&quot;, None)</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>            raw = str(getattr(web, &quot;token&quot;, None) or &quot;&quot;)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        except Exception:                                # noqa: BLE001 非 Settings 形状</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>            raw = &quot;&quot;</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        val = _resolve_secret_value(raw)</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        self._api_token_generated = not bool(val)</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>        return val if val else secrets.token_hex(16)</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code></code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>    def _require_api_auth(self, request: Request,</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>                          x_pyharness_token: Optional[str] = Header(default=None),</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>                          authorization: Optional[str] = Header(default=None)) -&gt; None:</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        &quot;&quot;&quot;读/写端点统一鉴权依赖(P1-2 收紧):令牌缺失/不匹配 → CRED-701(401)。</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code></code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        令牌来源:① X-PyHarness-Token / Authorization: Bearer 头(pywebview 桥/</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        测试/外部客户端);② pyharness_token HttpOnly cookie(_index_page 下发,</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        JS 不可读、同源请求自动携带)。仅索引页 / 与 webhook 入站端点免鉴权</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        (引导/外联);全部数据端点(含读端与 SSE)强制鉴权——此前 39 个读端点</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        匿名、SSE 无鉴权,任何本地进程可枚举全部会话。</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        from .accounts_api import principal, operator_principal</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        if principal(request) or operator_principal(request):</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>            return</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>        expected = self._api_token</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>        if not expected:</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            return</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>        given = x_pyharness_token or &quot;&quot;</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        if not given and authorization and authorization.lower().startswith(&quot;bearer &quot;):</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>            given = authorization[7:].strip()</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        if not given:</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>            given = read_cookie(request, &quot;pyharness_token&quot;)</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>        ok = bool(given) and secrets.compare_digest(given, expected)</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        if not ok:</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>            # ``R31-2``:非 default 租户可用**该租户令牌**通过本依赖。租户**授权**已在</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>            # 中间件强制(它先跑);此处只是第二层,不代替它 —— 只有租户令牌、没有全局</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>            # 令牌的浏览器因此可用,而它拿不到全局令牌,故换不到别的租户的 cookie。</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>            tenant = self.current_tenant()</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>            ok = (tenant != &quot;default&quot;</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                  and self._verify_tenant_token(</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>                      tenant, self._presented_tenant_token(request)))</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        if not ok:</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            raise_code(&quot;CRED-701&quot;, reason=&quot;api-token&quot;,</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>                       hint=&quot;缺少或非法 API token&quot;</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>                            &quot;(X-PyHarness-Token / Bearer / pyharness_token cookie;&quot;</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>                            &quot;非 default 租户亦可出示该租户令牌)&quot;)</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

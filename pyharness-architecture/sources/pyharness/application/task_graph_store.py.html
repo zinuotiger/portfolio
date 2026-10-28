@@ -1,0 +1,77 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/task_graph_store.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/task_graph_store.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 77 行</span></nav><main class="wrap source-page"><h1>pyharness/application/task_graph_store.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：1450599478da0f313444f4af31d735c25f4dcd71<br>SHA-256（内容校验）：74b06dab9741831fbc037f731c8b5a4f2a54c1dd06c0620f207add291b0ef37a</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 5 个类、函数与方法</summary><ul><li><a href="#L14">TaskGraphStore（类） · L14–L77</a><ul><li><a href="#L15">TaskGraphStore.save_task_graph（异步方法） · L15–L45</a></li><li><a href="#L47">TaskGraphStore.task_graph（异步方法） · L47–L52</a></li><li><a href="#L54">TaskGraphStore.task_graph_submission（异步方法） · L54–L62</a></li><li><a href="#L64">TaskGraphStore.task_graphs（异步方法） · L64–L77</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Versioned DAG definitions on the original control owner, without dispatch.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import time</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.task_graph_support import TaskGraphSupport</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.task_graph_run_store import TaskGraphRunStore</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.task_graph_contracts import TaskGraphRevision</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.workspace_input_pages import workspace_input_page</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.errors import PyHError,raise_code</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.application.task_graph_control_store import TaskGraphControlStore</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.application.task_graph_node_store import TaskGraphNodeStore</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>class TaskGraphStore(TaskGraphSupport,TaskGraphRunStore,TaskGraphControlStore,TaskGraphNodeStore):</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    async def save_task_graph(self,project,command,*,command_id,authorize,describe):</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        started=time.monotonic();ident=command.graph_id</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>            actor=authorize();await self._open(initialize=False);resources,commands=self._grant_state()</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>            request=digest_of(canonical(dict(operation=&#x27;task_graph.save&#x27;,project_id=project,command=command.model_dump())))</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>            self._context_envelope(&#x27;task_graph&#x27;,ident,command.expected_revision+1,command_id,actor,request)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>            self._context_project(resources,project,command.project_revision)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>            if old:=commands.get((actor,command_id)):</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>                if old[0]!=request:raise_code(&#x27;EVT-100&#x27;,reason=&#x27;idempotency_conflict&#x27;)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>                return self._graph_summary(resources,old[1],actor,authorize,started)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>            versions={}</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>            def gate():</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>                fresh,_=self._grant_state();self._context_project(fresh,project,command.project_revision)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>                prior=fresh.get(ident)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>                if prior:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>                    self._context_owned(fresh,ident,&#x27;task_graph&#x27;,project,actor)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>                    if prior[&#x27;task_graph&#x27;][&#x27;retired&#x27;]:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;task_graph_retired&#x27;)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>                if (prior[&#x27;task_graph&#x27;][&#x27;revision&#x27;] if prior else 0)!=command.expected_revision:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;stale_revision&#x27;)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                self._context_quota(fresh,&#x27;task_graph&#x27;,project);grants=set()</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                for node in command.nodes:</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>                    _,_,owned=self._graph_node_current(fresh,project,node,actor,authorize,started);grants.update(owned)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                    version=describe(node.agent_ref)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>                    if node.node_id in versions and versions[node.node_id]!=version:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;task_graph_agent_changed&#x27;)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>                    versions[node.node_id]=version</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                self._context_finish(authorize,actor,fresh,grants)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            gate()</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            definition=TaskGraphRevision(**command.model_dump(exclude={&#x27;expected_revision&#x27;}),project_id=project,revision=command.expected_revision+1,created_by=actor)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>            resources,row=await self._append_context(definition,&#x27;task_graph&#x27;,ident,command_id,actor,request,gate)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>            try:return self._graph_summary(resources,row,actor,authorize,started)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            except PyHError:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;workspace_commit_receipt_unavailable&#x27;)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    async def task_graph(self,project,ident,revision,*,authorize):</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            actor=authorize();resources,_,_=await self._execution_read_state()</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            row=self._graph_revision(resources,project,ident,revision,actor)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            return self._graph_summary(resources,row,actor,authorize,started)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    async def task_graph_submission(self,project,key,*,authorize):</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            actor=authorize();resources,commands,_=await self._execution_read_state();self._context_project(resources,project)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            old=commands.get((actor,key));row=old[1] if old else None</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            if row and (not row.get(&#x27;task_graph&#x27;) or row[&#x27;task_graph&#x27;][&#x27;project_id&#x27;]!=project):raise_code(&#x27;GRD-403&#x27;,reason=&#x27;task_graph_submission_unavailable&#x27;)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            graph=self._graph_summary(resources,row,actor,authorize,started) if row else None</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            return dict(schema_version=1,project_id=project,submission_key=key,status=&#x27;committed&#x27; if row else &#x27;not_found&#x27;,graph=graph,execution_authorized=False,writer_requires_reopen=self._failed)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    async def task_graphs(self,project,query,*,authorize):</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            actor=authorize();resources,_,events=await self._execution_read_state();self._context_project(resources,project);rows=[]</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            for row in resources.values():</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                graph=row.get(&#x27;task_graph&#x27;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                if not graph or graph[&#x27;project_id&#x27;]!=project or graph[&#x27;created_by&#x27;]!=actor:continue</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>                if authorize()!=actor:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;task_graph_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                try:rows.append(self._graph_summary(resources,row,actor,authorize,started))</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                except PyHError as exc:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                    if exc.code!=&#x27;GRD-403&#x27;:raise</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            if time.monotonic()-started&gt;=self.MAX_WORKSPACE_CAPTURE_SECONDS:raise_code(&#x27;EVT-104&#x27;,reason=&#x27;task_graph_observation_time_limit&#x27;)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            return workspace_input_page(rows,query,kind=&#x27;graphs&#x27;,project=project,actor=actor,watermark=len(events))</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

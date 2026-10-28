@@ -1,0 +1,72 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/execution_preparation.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/execution_preparation.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 72 行</span></nav><main class="wrap source-page"><h1>pyharness/application/execution_preparation.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：1e25acf62176bf19a7f9c3483e3d90bd8fb74fb2<br>SHA-256（内容校验）：692540d20bbf68275b8631f3fc5d0cc70b91fe6b1e9771b79ce9e58ab20fa7c0</p><p><a href="../../../architecture-detailed.html?node=execution_preparation">ExecutionPreparation（执行输入准备）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 7 个类、函数与方法</summary><ul><li><a href="#L10">ExecutionPreparationStore（类） · L10–L72</a><ul><li><a href="#L11">ExecutionPreparationStore.execution_preparation（异步方法） · L11–L72</a><ul><li><a href="#L32">ExecutionPreparationStore.execution_preparation.gate（方法） · L32–L37</a></li><li><a href="#L38">ExecutionPreparationStore.execution_preparation.destination（方法） · L38–L39</a></li><li><a href="#L40">ExecutionPreparationStore.execution_preparation.checked_with_boundary（方法） · L40–L47</a></li><li><a href="#L48">ExecutionPreparationStore.execution_preparation.verify（方法） · L48–L63</a></li><li><a href="#L64">ExecutionPreparationStore.execution_preparation.populate（方法） · L64–L69</a></li></ul></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Single-use captured input plus derived context preparation on the sole owner.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import time</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from contextlib import asynccontextmanager</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.workspace_materialization import copy_attempt_inputs,verify_attempt_inputs</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.core.sandbox import WorkspaceInputPreparation,safe_path</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>class ExecutionPreparationStore:</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    @asynccontextmanager</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    async def execution_preparation(self, project, ident, materials, *, authorize, describe, expected_digest, check_boundary=None):</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>        from pyharness.application.execution_workspace import workspace_plan</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>            if check_boundary is None:</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>                row,attempt,resources,actor,_=self.checked_execution(project,ident,authorize=authorize,</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>                    describe=describe,expected_digest=expected_digest)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>            else:</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>                check_boundary()</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>                captured=self.checked_execution(project,ident,authorize=authorize,</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>                    describe=describe,expected_digest=expected_digest)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>                try:</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>                    check_boundary(captured)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>                    row,attempt,resources,actor,_=captured</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>                finally:del captured</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>            wi=self._task_bound_input(resources,resources[attempt[&#x27;run_attempt&#x27;][&#x27;prerequisites&#x27;][&#x27;task_ref&#x27;][&#x27;product_task_id&#x27;]][&#x27;product_task&#x27;],actor)[&#x27;workspace_input&#x27;]</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>            plan=workspace_plan(materials)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        # The single writer owns capture, not the asynchronous backend lifetime.</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        # A slow backend must not prevent a durable revocation/cancellation.</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        active=True;bound=None;identity=None</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        def gate():</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            if not active:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;execution_preparation_closed&#x27;)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            self._input_gate(resources,wi,actor,authorize,started)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            for ref in attempt[&#x27;run_attempt&#x27;][&#x27;context&#x27;][&#x27;document_refs&#x27;]:</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>                doc=self._s05_exact(resources,project,&#x27;document&#x27;,ref,&#x27;document_id&#x27;,actor)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                self._document_gate(resources,doc,actor,authorize,started)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        def destination(target):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            gate();self._input_destination(target,resources,wi)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        def checked_with_boundary():</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            if not active:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;execution_preparation_closed&#x27;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            check_boundary()</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>            checked=self.checked_execution(project,ident,authorize=authorize,</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>                describe=describe,expected_digest=expected_digest)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            if checked[3]!=actor:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;execution_preparation_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>            check_boundary(checked)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            return checked</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        def verify():</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            nonlocal resources</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            # Refresh before each no-await copy/verify segment, including after</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            # waiting for the sandbox lock and after actual backend creation.</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            if check_boundary is None:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                _,_,resources,_,_=self.checked_execution(project,ident,authorize=authorize,</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                    describe=describe,expected_digest=expected_digest)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>            else:_,_,resources,_,_=checked_with_boundary()</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>            gate()</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            if bound is not None:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                safe_path(bound,&#x27;owned-check&#x27;);info=bound.stat()</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                if (info.st_dev,info.st_ino)!=identity:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;execution_workspace_root_changed&#x27;)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>                verify_attempt_inputs(bound,plan[&#x27;files&#x27;],gate)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            if check_boundary is None:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                self.checked_execution(project,ident,authorize=authorize,describe=describe,expected_digest=expected_digest)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            else:checked_with_boundary()</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        def populate(target):</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            nonlocal bound,identity</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            if bound is not None:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;execution_preparation_already_used&#x27;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            destination(target);bound=Path(target);info=bound.stat();identity=(info.st_dev,info.st_ino)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            copy_attempt_inputs(bound,plan[&#x27;files&#x27;],lambda item:plan[&#x27;contents&#x27;][item[&#x27;path&#x27;]],gate)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            verify()</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        verify()</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        try:yield WorkspaceInputPreparation(materials[&#x27;materials_digest&#x27;],populate,verify,destination)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        finally:active=False</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

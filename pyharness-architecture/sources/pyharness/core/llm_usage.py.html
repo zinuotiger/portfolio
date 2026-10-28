@@ -1,0 +1,95 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/llm_usage.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/llm_usage.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 95 行</span></nav><main class="wrap source-page"><h1>pyharness/core/llm_usage.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：64bd6b929c2bf3abb0931d0c5a8e90ef699945e3<br>SHA-256（内容校验）：2fd69229b1dd1a2e154fbe9fc1cdd2e14849295ca49bead43a54e4e77f04d8b0</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 6 个类、函数与方法</summary><ul><li><a href="#L9">estimate_cost（函数） · L9–L23</a></li><li><a href="#L25">_price_table（函数） · L25–L35</a></li><li><a href="#L37">_llm_cfg_from_ctx（函数） · L37–L45</a></li><li><a href="#L47">_request_payload（函数） · L47–L54</a></li><li><a href="#L56">_response_payload（函数） · L56–L65</a></li><li><a href="#L67">report_usage（异步函数） · L67–L95</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Llm usage: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from typing import TYPE_CHECKING, Any, Optional</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>if TYPE_CHECKING:  # 仅类型标注;装配对象鸭子注入(session/bus 经 ctx)</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>    pass</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.core.llm_types import ToolCall, UsageCounters, _l1_settings</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>def estimate_cost(model: str, usage: Any, prices: dict, hit_discount: float = 0.1) -&gt; float:</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    &quot;&quot;&quot;成本估算(ADI §8.2,元/百万):未命中输入 + 命中输入×折扣 + 输出;只进事件/报表(N14)。</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    usage 无缓存字段厂商按全价估算(保守);prices 缺模型直取 KeyError 属调用方先查表(偏离 4)。</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    hit_discount 默认 0.1(缓存命中官方约 1/10 价)——原默认 1.0 使命中按全价计,成本恒高估</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    (P3:estimate_cost 折扣)。调用方未传折扣时取真实折扣,而非全价。</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    p = prices[model]                              # {in_per_million, out_per_million}</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    hit = getattr(usage, &quot;prompt_cache_hit_tokens&quot;, 0) or 0</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    miss = getattr(usage, &quot;prompt_cache_miss_tokens&quot;, 0) or 0</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    if not (hit or miss):                          # 无缓存字段厂商:prompt 全按未命中</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        miss = getattr(usage, &quot;prompt_tokens&quot;, 0) or 0</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    billed_in = miss + hit * hit_discount          # 命中按折扣价(官方约 1/10)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    out = getattr(usage, &quot;completion_tokens&quot;, 0) or 0</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    return billed_in / 1e6 * p[&quot;in_per_million&quot;] + out / 1e6 * p[&quot;out_per_million&quot;]</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>def _price_table(unit_price: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    &quot;&quot;&quot;config 单价表(pydantic UnitPriceCfg 或 dict)→ 纯 dict {模型: {in,out}}。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    out: dict = {}</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    for name, p in (unit_price or {}).items():</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        if isinstance(p, dict):</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>            out[name] = {&quot;in_per_million&quot;: float(p[&quot;in_per_million&quot;]),</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>                         &quot;out_per_million&quot;: float(p[&quot;out_per_million&quot;])}</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        else:                                      # pydantic 模型:attr 取数</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            out[name] = {&quot;in_per_million&quot;: float(p.in_per_million),</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                         &quot;out_per_million&quot;: float(p.out_per_million)}</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    return out</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>def _llm_cfg_from_ctx(ctx: Any, fallback: Any = None) -&gt; Any:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    &quot;&quot;&quot;逐级解析 llm 配置段:ctx.config.llm → 注入 cfg.llm → L1 默认(键缺省必可加载)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    cfg = getattr(ctx, &quot;config&quot;, None)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    llm = getattr(cfg, &quot;llm&quot;, None) if cfg is not None else None</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    if llm is None and fallback is not None:</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        llm = getattr(fallback, &quot;llm&quot;, None)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    if llm is None:</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        llm = _l1_settings().llm</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    return llm</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>def _request_payload(model: str, degraded_from: Optional[str], tools: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    &quot;&quot;&quot;llm.request payload(EVENT-SCHEMA 字段级;降级来源非空才带)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    from pyharness.core.llm_diagnostics import call_role, call_attempt</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    p: dict = {&quot;model&quot;: model, &quot;n_tools&quot;: len(tools or []),</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>               &quot;role&quot;: call_role.get(), &quot;attempt&quot;: call_attempt.get()}</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    if degraded_from:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        p[&quot;degraded_from&quot;] = degraded_from</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    return p</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>def _response_payload(model: str, finish_reason: str, content: str,</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                      calls: list[ToolCall], request_seq=None) -&gt; dict:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    &quot;&quot;&quot;llm.response payload:content 与 tool_calls 至少其一;arguments 原文回填(INV-06)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    from pyharness.core.llm_diagnostics import call_role</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    p: dict = {&quot;model&quot;: model, &quot;finish_reason&quot;: finish_reason, &quot;content&quot;: content,</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>               &quot;role&quot;: call_role.get(), &quot;request_seq&quot;: request_seq}</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    if calls:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        p[&quot;tool_calls&quot;] = [{&quot;id&quot;: c.id, &quot;name&quot;: c.name, &quot;arguments&quot;: c.raw_json}</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                           for c in calls]</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    return p</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>async def report_usage(usage: Any, model: str, *, ctx: Any,</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>                       counters: Optional[UsageCounters] = None) -&gt; Any:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    &quot;&quot;&quot;F029 token 计量:每成功请求落 llm.usage 事件 + 更新 UsageCounters(F029 唯一写入)。</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    usage 事件即事实,计数器可整体重建(INV-01);预算硬闸判据 = **token 与 cost 并列**</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    (out/in/cost_est 任一 ≥ 上限即 exhausted;cost 由**软约束**单价表估算,上限见 CFG §3.1</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    `budget.task.max_cost_yuan` —— 实测「纯成本超限」即拦,R21 更正了旧措辞「只读 token 数」);</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    价格表缺模型 → cost_est 记 0 照常记账(偏离 4);缺失缓存字段按 0,不做厂商猜。</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    llm_cfg = _llm_cfg_from_ctx(ctx)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    unit_price = getattr(getattr(llm_cfg, &quot;usage&quot;, None), &quot;unit_price&quot;, None) or {}</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    prices = _price_table(unit_price)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    cost: Optional[float] = None</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    if model in prices:                            # 缺单价表不炸记账(仅报表,偏离 4)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        cost = estimate_cost(model, usage, prices)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    payload = {</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        &quot;model&quot;: model,                            # 实际服务模型(降级后记备用,不记主名)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        &quot;in_tokens&quot;: int(getattr(usage, &quot;prompt_tokens&quot;, 0) or 0),</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        &quot;out_tokens&quot;: int(getattr(usage, &quot;completion_tokens&quot;, 0) or 0),</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        &quot;cache_hit&quot;: int(getattr(usage, &quot;prompt_cache_hit_tokens&quot;, 0) or 0),</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        &quot;cost_est&quot;: cost,</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        &quot;estimated&quot;: bool(getattr(usage, &#x27;estimated&#x27;, False)),</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        &quot;input_unknown&quot;: bool(getattr(usage, &#x27;input_unknown&#x27;, False)),</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    }</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    ev = await ctx.session.append(&quot;llm.usage&quot;, payload, actor=&quot;llm&quot;)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    cnt = counters if counters is not None else getattr(ctx, &quot;counters&quot;, None)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    if cnt is not None:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        cnt.task_add(ev.payload)                   # 预算硬闸读 token(F032)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    return ev</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

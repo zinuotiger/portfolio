@@ -1,0 +1,125 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/budget.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/budget.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 125 行</span></nav><main class="wrap source-page"><h1>pyharness/core/budget.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：d4a16247c7b35be41b1cde9c36b970e86051383b<br>SHA-256（内容校验）：4f983564b0efe5b3d367c0ba8dc44e82a1642f5caab3a1a7fb81a642562bdbd0</p><p><a href="../../../architecture-detailed.html?node=budget">Usage and Budget View（用量预算与观测）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 8 个类、函数与方法</summary><ul><li><a href="#L27">BudgetSnapshot（类） · L27–L53</a><ul><li><a href="#L44">BudgetSnapshot.model_dump（方法） · L44–L53</a></li></ul></li><li><a href="#L56">BudgetGate（类） · L56–L122</a><ul><li><a href="#L65">BudgetGate.__init__（方法） · L65–L70</a></li><li><a href="#L73">BudgetGate._usage（方法） · L73–L82</a></li><li><a href="#L84">BudgetGate.state（方法） · L84–L91</a></li><li><a href="#L93">BudgetGate._compute_state（方法） · L93–L104</a></li><li><a href="#L106">BudgetGate.snapshot（方法） · L106–L122</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/budget.py — 预算门面(只读快照面,BudgetGate)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>一句话职责:把**已在链上**的预算数据源(Scope 预算硬闸的 BudgetLimits + 会话级</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>UsageCounters,均来自 F032 装配)聚合为一个只读门面,供外壳的预算仪表盘与</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>`/api/budget` 查询面消费——不引入第二套预算状态,不新增写路径。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>设计纪律(原则 1:单一真源):</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>- 计数真源 = events 日志的 llm.usage 事件(UsageCounters 是它的投影,可整体重建);</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>  BudgetGate 只读 `counters` 与 `limits`,自身零状态、零写入、零事件。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>- 与 Scope.budget_state() **同源同判定**:同一个 counters 实例 + 同一份 limits</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>  (engine 装配时注入同一对象),因此门面读数与 agent-loop 的强制终态判据一致,</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>  不会出现&quot;仪表盘说没超、循环说超了&quot;的双口径。</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>- 硬闸/终态归 agent-loop + Scope(见 scope.py/L4);本模块**不拦不抛**。</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>历史缺口(2026-09-12 修复):装配层从未赋值 ctx.budget,导致</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>`ApplicationService.budget_dashboard` 恒回 {&quot;disabled&quot;: true, &quot;reason&quot;:</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>&quot;budget-gate-unassembled&quot;},桌面预算仪表盘只有 token 报表、没有成本闸位。</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>from dataclasses import dataclass</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>from pyharness.core.scope import BudgetLimits</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>class BudgetSnapshot:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    &quot;&quot;&quot;预算只读快照(值拷贝;frozen 防门面被当状态机改)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code></code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    sid: str</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    state: str                      # ok / warn / exhausted(与 scope 同判定)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    limit_cny: float                # 成本上限(元)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    used_cny: float                 # 已用估算成本(元)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    ratio: float                    # used_cny / limit_cny(limit=0 → 0.0)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    warn_ratio: float               # 告警比例(默认 0.8)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    warned: bool                    # ratio &gt;= warn_ratio</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    limit_in_tokens: int</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    limit_out_tokens: int</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    used_in_tokens: int</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    used_out_tokens: int</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    requests: int</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    def model_dump(self) -&gt; dict:</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        return {&quot;sid&quot;: self.sid, &quot;state&quot;: self.state,</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                &quot;limit_cny&quot;: self.limit_cny, &quot;used_cny&quot;: self.used_cny,</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>                &quot;ratio&quot;: self.ratio, &quot;warn_ratio&quot;: self.warn_ratio,</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>                &quot;warned&quot;: self.warned,</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>                &quot;limit_in_tokens&quot;: self.limit_in_tokens,</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>                &quot;limit_out_tokens&quot;: self.limit_out_tokens,</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                &quot;used_in_tokens&quot;: self.used_in_tokens,</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                &quot;used_out_tokens&quot;: self.used_out_tokens,</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                &quot;requests&quot;: self.requests}</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>class BudgetGate:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    &quot;&quot;&quot;会话预算门面(只读):counters + limits → snapshot / state。</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    用法(外壳只读消费):</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        snap = gate.snapshot(sid); snap.limit_cny, snap.used_cny, snap.ratio</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    `scope` 可选注入:注入时 state 直接取 Scope.budget_state()(含 warn/exhausted</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    迁移语义与 budget.paused 事件副作用),否则由本门面按同一判据纯计算(不落事件)。</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    def __init__(self, *, limits: Any = None, counters: Any = None,</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                 scope: Optional[Any] = None, session_id: str = &quot;&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        self.limits = limits if limits is not None else BudgetLimits()</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        self.counters = counters</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        self.scope = scope</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        self.session_id = session_id</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code></code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    # ------------------------------------------------------------ 只读读数</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    def _usage(self) -&gt; tuple[int, int, float, int]:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        &quot;&quot;&quot;(in, out, cost, requests) 现读;counters 缺失 → 全零(不猜)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        c = getattr(self.scope, &#x27;_counters&#x27;, None) or self.counters</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        if c is None:</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            return 0, 0, 0.0, 0</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        used = c.task_total() if callable(getattr(c, &#x27;task_total&#x27;, None)) else c</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        return (int(getattr(used, &quot;in_tokens&quot;, 0) or 0),</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                int(getattr(used, &quot;out_tokens&quot;, 0) or 0),</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                float(getattr(used, &quot;cost_est&quot;, 0.0) or 0.0),</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                int(getattr(c, &quot;requests&quot;, 0) or 0))</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code></code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    def state(self) -&gt; str:</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        &quot;&quot;&quot;与 Scope.budget_state() 同判定:注入 scope 时直接复用其状态机。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        if self.scope is not None:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            try:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                return str(self.scope.budget_state())</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            except Exception:                            # noqa: BLE001 只读降级</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                pass</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        return self._compute_state()</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    def _compute_state(self) -&gt; str:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        used_in, used_out, used_cny, _ = self._usage()</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        lim = self.limits</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        if (used_out &gt;= getattr(lim, &quot;max_out_tokens&quot;, 0)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                or used_in &gt;= getattr(lim, &quot;max_in_tokens&quot;, 0)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                or used_cny &gt;= float(getattr(lim, &quot;max_cost_yuan&quot;, 0.0))):</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            return &quot;exhausted&quot;</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        warn_ratio = float(getattr(lim, &quot;warn_ratio&quot;, 0.8))</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        if (used_out &gt;= warn_ratio * getattr(lim, &quot;max_out_tokens&quot;, 0)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                or used_cny &gt;= warn_ratio * float(getattr(lim, &quot;max_cost_yuan&quot;, 0.0))):</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            return &quot;warn&quot;</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        return &quot;ok&quot;</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    def snapshot(self, sid: Optional[str] = None) -&gt; BudgetSnapshot:</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        &quot;&quot;&quot;只读快照(幂等;不写日志、不落事件、不改任何状态)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        used_in, used_out, used_cny, requests = self._usage()</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        lim = self.limits</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        limit_cny = float(getattr(lim, &quot;max_cost_yuan&quot;, 0.0) or 0.0)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        warn_ratio = float(getattr(lim, &quot;warn_ratio&quot;, 0.8))</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        ratio = (used_cny / limit_cny) if limit_cny else 0.0</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        return BudgetSnapshot(</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            sid=str(sid or self.session_id or &quot;&quot;),</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>            state=self.state(),</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            limit_cny=limit_cny, used_cny=round(used_cny, 6),</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            ratio=round(ratio, 4), warn_ratio=warn_ratio,</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            warned=ratio &gt;= warn_ratio,</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            limit_in_tokens=int(getattr(lim, &quot;max_in_tokens&quot;, 0) or 0),</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            limit_out_tokens=int(getattr(lim, &quot;max_out_tokens&quot;, 0) or 0),</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            used_in_tokens=used_in, used_out_tokens=used_out,</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            requests=requests)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code></code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>__all__ = [&quot;BudgetGate&quot;, &quot;BudgetSnapshot&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

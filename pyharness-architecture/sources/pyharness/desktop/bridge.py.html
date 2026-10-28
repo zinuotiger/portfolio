@@ -1,0 +1,112 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/desktop/bridge.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/desktop/bridge.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 112 行</span></nav><main class="wrap source-page"><h1>pyharness/desktop/bridge.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：cf95d599f040f8f71564230565e9ccc960045e71<br>SHA-256（内容校验）：006438bbb131d314138d051a6334e9e0f915acb9daae053eb4b5125919a648f2</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 12 个类、函数与方法</summary><ul><li><a href="#L22">DesktopBridge（类） · L22–L110</a><ul><li><a href="#L30">DesktopBridge.__init__（方法） · L30–L32</a></li><li><a href="#L34">DesktopBridge._run（方法） · L34–L66</a></li><li><a href="#L69">DesktopBridge._appearance_store（方法） · L69–L72</a></li><li><a href="#L74">DesktopBridge.appearance_load（方法） · L74–L75</a></li><li><a href="#L77">DesktopBridge.appearance_save（方法） · L77–L78</a></li><li><a href="#L80">DesktopBridge.appearance_reset（方法） · L80–L81</a></li><li><a href="#L83">DesktopBridge.submit（方法） · L83–L85</a></li><li><a href="#L87">DesktopBridge.approve（方法） · L87–L94</a></li><li><a href="#L96">DesktopBridge.replay_frame（方法） · L96–L102</a></li><li><a href="#L104">DesktopBridge.list_sessions（方法） · L104–L106</a></li><li><a href="#L108">DesktopBridge.on_close（方法） · L108–L110</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pywebview JavaScript bridge.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code></code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import asyncio</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import inspect</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import json</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import logging</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>import time</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import uuid</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from typing import TYPE_CHECKING, Any</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from .constants import BRIDGE_TIMEOUT_S</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>from .projection import _jsonable</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>if TYPE_CHECKING:  # 仅注解引用(app↔bridge 环形依赖,运行时不需要)</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    from .app import DesktopApp</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>log = logging.getLogger(&quot;pyharness.desktop.bridge&quot;)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>class DesktopBridge:</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    &quot;&quot;&quot;pywebview js_api:webview 线程方法 → 引擎事件循环跨线程投递(run_coroutine_threadsafe)。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    暴露 window.submit(text)/approve(aid,decision)/replay_frame(sid,from_seq)/</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    list_sessions();方法薄壳无业务,返回 JSON 字符串(错误 = code 体 ADR-011)。桥无特权:</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    裁决仍过 guard/预算引擎链(单调性高于人类意志)。_pending_calls 登记在途调用供审计。</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    def __init__(self, app: DesktopApp) -&gt; None:</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        self.app = app</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        self._pending_calls: dict[str, float] = {}      # call_id → 发起时刻(在途登记)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    def _run(self, coro: Any) -&gt; str:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        &quot;&quot;&quot;跨线程投递并阻塞取结果(≤60s);PyHError → code 体;超时 → BUSY(不悬挂)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        app = self.app</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        loop = app.loop</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        if loop is None or not loop.is_running():</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            if inspect.iscoroutine(coro):</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                coro.close()                # 未投递协程显式关闭,防 &#x27;never awaited&#x27; 告警</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            return json.dumps({&quot;code&quot;: &quot;BUSY&quot;,</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>                               &quot;advice&quot;: &quot;引擎服务未就绪(loop 未运行),稍后再试&quot;},</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>                              ensure_ascii=False)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        call_id = uuid.uuid4().hex[:8]</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        self._pending_calls[call_id] = time.monotonic()</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        fut = None</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        try:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            fut = asyncio.run_coroutine_threadsafe(coro, loop)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            data = fut.result(timeout=BRIDGE_TIMEOUT_S)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            return json.dumps(_jsonable(data), ensure_ascii=False)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        except PyHError as e:                           # 引擎错:远端只回 code+advice</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            advice = (e.ctx.get(&quot;advice&quot;) or e.ctx.get(&quot;hint&quot;) or e.spec.advice)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>            return json.dumps({&quot;code&quot;: e.code, &quot;advice&quot;: str(advice)},</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                              ensure_ascii=False)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        except (asyncio.TimeoutError, TimeoutError):    # 引擎忙:本地错误体(提示稍后再试)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>            if fut is not None:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                fut.cancel()                            # 不留下继续消费/重复执行的协程</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            return json.dumps({&quot;code&quot;: &quot;BUSY&quot;, &quot;advice&quot;: &quot;引擎繁忙,稍后再试&quot;},</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                              ensure_ascii=False)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        except Exception as exc:                        # noqa: BLE001 未预期兜底</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            log.error(&quot;bridge 调用未预期异常&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            return json.dumps({&quot;code&quot;: &quot;CYC-999&quot;,</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                               &quot;advice&quot;: f&quot;{type(exc).__name__}: 引擎内部错误&quot;},</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                              ensure_ascii=False)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        finally:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            self._pending_calls.pop(call_id, None)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    # ---------------- js_api 方法(薄壳,无业务;前端 window.&lt;name&gt; 直调)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    def _appearance_store(self):</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        from pathlib import Path</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        from pyharness.ui.appearance import FilePreferences</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        return FilePreferences(Path(self.app.service._storage_root())/&#x27;appearance&#x27;/&#x27;webview.json&#x27;)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    def appearance_load(self) -&gt; dict:</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        return self._appearance_store().load()</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    def appearance_save(self, value: dict) -&gt; bool:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        return self._appearance_store().save(value)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    def appearance_reset(self) -&gt; bool:</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        return self._appearance_store().reset()</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    def submit(self, sid: str, text: str) -&gt; str:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        &quot;&quot;&quot;前端回车/发送按钮 → create_message(门面写,无特权)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        return self._run(self.app.create_message(str(sid), {&quot;text&quot;: str(text)}))</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code></code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    def approve(self, aid: Any, decision: str) -&gt; str:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        &quot;&quot;&quot;审批弹窗按钮(approve/deny;桥无特权:裁决仍过引擎链)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        try:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            aid_int = int(aid)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            return json.dumps({&quot;code&quot;: &quot;EVT-100&quot;, &quot;advice&quot;: &quot;aid 须为数字&quot;},</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                              ensure_ascii=False)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        return self._run(self.app.decide_approval(aid_int, {&quot;decision&quot;: str(decision)}))</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code></code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    def replay_frame(self, sid: str, from_seq: Any) -&gt; str:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        &quot;&quot;&quot;轨迹面板逐帧回放取帧(session_timeline 增量续拉)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        try:</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            fseq = int(from_seq)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            fseq = 0</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        return self._run(self.app.session_timeline(str(sid), after_seq=fseq))</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    def list_sessions(self) -&gt; str:</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        &quot;&quot;&quot;会话列表(前端启动拉取)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        return self._run(self.app.list_sessions())</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    def on_close(self) -&gt; None:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        &quot;&quot;&quot;窗口关闭事件:优雅停服入口(与 window.events.closing 双保险,幂等)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        self.app.request_shutdown()</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code></code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

@@ -1,0 +1,261 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/engine_types.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/engine_types.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 261 行</span></nav><main class="wrap source-page"><h1>pyharness/engine_types.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：df8a1dfaa77e3700cfcaf5232b763ee87714eae5<br>SHA-256（内容校验）：88ce108fffc2d5cc69feabf90e92f36f32a985c81e1e4a31605829b2426459c3</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 9 个类、函数与方法</summary><ul><li><a href="#L39">EngineStorage（类） · L39–L45</a></li><li><a href="#L47">EngineSpine（类） · L47–L224</a><ul><li><a href="#L112">EngineSpine.start_flush_ticker（异步方法） · L112–L163</a><ul><li><a href="#L142">EngineSpine.start_flush_ticker._loop（异步方法） · L142–L159</a></li></ul></li><li><a href="#L165">EngineSpine.close（异步方法） · L165–L171</a></li><li><a href="#L173">EngineSpine._close_owned（异步方法） · L173–L224</a><ul><li><a href="#L175">EngineSpine._close_owned.attempt（异步方法） · L175–L181</a></li></ul></li></ul></li><li><a href="#L226">EngineRunner（类） · L226–L231</a></li><li><a href="#L233">EngineContext（类） · L233–L255</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Engine types: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import asyncio</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import inspect</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import logging</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from typing import Any, Awaitable, Callable, TYPE_CHECKING</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.core.task_queue import Task, TaskQueue</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.core.task_runner import RunnerResult, TaskLifecycle, TaskRunner</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>if TYPE_CHECKING:</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    from pyharness.config import Settings</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    from pyharness.core.approval import ApprovalProvider</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    from pyharness.core.compaction import Compactor</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    from pyharness.core.goal import GoalManager</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    from pyharness.core.jobs import JobManager</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    from pyharness.core.kv import SessionKV</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    from pyharness.core.schedule import Scheduler</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    from pyharness.core.skill import SkillManager</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    from pyharness.core.spill import SpillProvider</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    from pyharness.core.subagent import SubagentManager</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    from pyharness.core.system_prompt import SystemPromptAssembler</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    from pyharness.core.todo import TodoManager</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    from pyharness.core.tools_executor import ToolExecutor</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    from pyharness.core.tools_guard import GuardChain</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    from pyharness.core.tools_registry import ToolRegistry</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    from pyharness.core.user_ask import AskProvider</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    from pyharness.core.budget import BudgetGate</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>from pyharness.bus import EventBus</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>from pyharness.bus.registry import Registry</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>from pyharness.core.agent import CHANNEL_UNDECLARED</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>from pyharness.core.agent_loop import AgentLoop</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>from pyharness.core import llm as llm_mod</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>from pyharness.core.scope import Scope</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>from pyharness.core.session import SessionLog</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>log = logging.getLogger(&quot;pyharness.engine&quot;)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code></code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>@dataclass</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>class EngineStorage:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    &quot;&quot;&quot;引擎存储挂载面:路径 + 懒激活的 spill/KV provider。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code></code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    sessions_dir: Path</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    spill: SpillProvider | None = None</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    kv: SessionKV | None = None</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>@dataclass</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>class EngineSpine:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    &quot;&quot;&quot;会话级引擎装配束(替代无类型 SimpleNamespace)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    session: SessionLog</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    bus: EventBus</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    registry: Registry</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    scope: Scope</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    llm: llm_mod.LLMClient</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    tools: ToolExecutor</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    guard: GuardChain</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    approval: ApprovalProvider</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    counters: llm_mod.UsageCounters</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    sysprompt: SystemPromptAssembler</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    compactor: Compactor</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    goals: GoalManager</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    todos: TodoManager</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    ask: AskProvider</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    skills: SkillManager</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    plugins: Any</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    plugin_state: dict</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    tool_registry: ToolRegistry</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    streaming: bool</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    loop: AgentLoop</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    settings: Settings</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    storage: EngineStorage</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    persistence: Any = None</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    sys: Any = None</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    active_agents: dict[str, Any] = field(default_factory=dict)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    headless: bool = False</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    plan: Any = None</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    schedule: Scheduler | None = None</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    jobs: JobManager | None = None</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    subagent: SubagentManager | None = None</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    task_queue: TaskQueue | None = None</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    task_lifecycle: TaskLifecycle | None = None</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    external_runner: TaskRunner | None = None</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    search_backend: Any = None</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    budget: BudgetGate | None = None</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    fts: Any = None</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    llm_probe: Any = None                          # F033 健康探针后台任务(收尾须取消)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    bus_owners: list = field(default_factory=list)  # 本会话在总线上持有的订阅属主</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    governance: Any = None                         # 治理层单实例(ADR-018;S2-3)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    # 通道身份(GAP-11):外壳装配期**显式声明**&quot;谁在驱动本引擎&quot;。</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    # 三态:字符串 = 人类通道(cli/web/acp:&lt;id&gt;/desktop);``None`` = 显式 headless;</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    # ``CHANNEL_UNDECLARED`` = 从未声明 ⇒ 不写 ``ctx.channel`` ⇒ 治理层</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    # ``principal_of`` 见属性缺失即 APR-503 fail-closed(禁止静默降级为 system)。</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    channel: Any = CHANNEL_UNDECLARED</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    _plugins_ready: bool = False</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    _auto_titled: bool = False</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    _spill_provider: Any = None</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    _kv_activated: bool = False</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    _fts_entered: bool = False</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    _mcp_clients: list[Any] = field(default_factory=list)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    _orchestration_ready: bool = False</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    _schedule_started: bool = False</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    _policy_announced: bool = False        # 装配期策略留痕幂等闸(F-01:每 spine 恰一次)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    _jobs_recovered: bool = False          # 崩溃 job 事件级恢复幂等闸(B1/R24:每 spine 恰一次)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    # 攒批落盘定时器(GAP-13):此前 ``flush_interval_s`` 只被存下、**无读取者**,</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    # 而 persistence/cli 三处注释都宣称&quot;0.5s 定时器兜底&quot; —— 文档描述了一个不存在</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    # 的机制。定时器由本 spine 持有(惰性启动、close 时先停),使攒批事件(非 SYNC</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    # 的 tool.call/guard.evaluated/tool.result 等)的**落盘窗口有上界**。</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    _flush_task: Any = None</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    _flush_stop: Any = None</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code></code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    async def start_flush_ticker(self) -&gt; bool:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        &quot;&quot;&quot;幂等启动攒批落盘定时器(间隔 = ``store.flush_interval_s``;GAP-13)。</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code></code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        语义与边界:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code></code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        - **幂等**:已在跑(未 done)→ 返回 False,不重复起任务;</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        - **无 store / 间隔 ≤0** → 不起(返回 False),不是错误;</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        - **单次失败不杀定时器**:``store.flush()`` 抛 ``PERS-202`` 时只记日志,</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>          落盘故障状态由 ``SessionStore._fail_streak`` / ``_suspended`` 自行记账</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>          (拒新不丢旧),定时器继续按周期间隔重试 —— 崩溃窗口因此**有上界**;</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        - **不吞取消**:收到 ``CancelledError`` 立即 re-raise(取消协议);</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        - 停止方式 = ``close()`` 置位 ``_flush_stop`` 并 await,超时则 cancel。</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        该定时器**不是第二写者**:它只调 store 自己的 ``flush()``,与强同步路径</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        共用同一把攒批缓冲与 seq 校验(INV-07 单写者不变)。</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        if self._flush_task is not None and not self._flush_task.done():</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            return False</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        store = self.persistence</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        if store is None:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            return False</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        try:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            interval = float(getattr(store, &quot;flush_interval_s&quot;, 0.5) or 0.5)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        except (TypeError, ValueError):</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            interval = 0.5</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        if interval &lt;= 0:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            return False</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        stop = asyncio.Event()</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        self._flush_stop = stop</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code></code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        async def _loop() -&gt; None:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            while True:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                try:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                    await asyncio.wait_for(stop.wait(), timeout=interval)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                    return                       # 收到停止信号:正常退出</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                except asyncio.TimeoutError:</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                    pass</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                    raise</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>                try:</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                    r = store.flush()</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>                    if inspect.isawaitable(r):</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                        await r</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                    raise</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                except Exception:                # noqa: BLE001 单次失败不杀定时器</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                    log.warning(&quot;flush ticker 落盘失败(store 自行记账 PERS-202)&quot;,</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                                exc_info=True)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code></code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        self._flush_task = asyncio.create_task(</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>            _loop(), name=f&quot;flush-ticker:{getattr(self.session, &#x27;sid&#x27;, &#x27;?&#x27;)}&quot;)</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        return True</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code></code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    async def close(self) -&gt; None:</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        &quot;&quot;&quot;Stop all writers before releasing subscriptions, stores and connections.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        task = getattr(self, &#x27;_close_task&#x27;, None)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        if task is None:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            self._closing = True</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>            task = self._close_task = asyncio.create_task(self._close_owned())</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        await asyncio.shield(task)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code></code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    async def _close_owned(self):</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        errors = []</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        async def attempt(fn, *args, **kwargs):</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            try:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                value = fn(*args, **kwargs)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                if inspect.isawaitable(value):</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                    await value</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>            except BaseException as exc:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                errors.append(exc)</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        if self.schedule is not None:</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>            await attempt(getattr(self.schedule, &#x27;aclose&#x27;, None) or self.schedule.stop)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        if self.jobs is not None:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>            await attempt(self.jobs._on_session_closing, &#x27;session.closing&#x27;, None)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        if self.subagent is not None:</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>            # Stop child admissions and await child cleanup while dependencies live.</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            # Parent providers must also drain before their tools are unregistered.</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>            await attempt(self.subagent.close_children, reason=&#x27;parent-detach&#x27;)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        if self.task_queue is not None:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>            await attempt(self.task_queue.shutdown, reason=&#x27;session-close&#x27;)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        if self.subagent is not None:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            await attempt(self.subagent.detach)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        if self.approval is not None:</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            await attempt(getattr(self.approval, &#x27;aclose&#x27;, None) or self.approval.detach)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        for name in (&#x27;_flush_task&#x27;, &#x27;llm_probe&#x27;):</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>            task = getattr(self, name, None)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            if task is not None:</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>                task.cancel()</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>                result = await asyncio.gather(task, return_exceptions=True)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                errors.extend(e for e in result if isinstance(e, BaseException) and not isinstance(e, asyncio.CancelledError))</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>                setattr(self, name, None)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        self._flush_stop = None</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        from pyharness.core import proc as proc_mod</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        await attempt(asyncio.to_thread, proc_mod.close_session, str(getattr(self.session, &#x27;sid&#x27;, &#x27;&#x27;)))</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        while self._mcp_clients:</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>            await attempt(self._mcp_clients.pop().close)</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        if self.fts is not None:</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            await attempt(self.fts.detach, None)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>            self.fts = None</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        store = self.persistence</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        if store is not None and getattr(self, &#x27;owns_persistence&#x27;, True):</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            flush = getattr(store, &#x27;flush&#x27;, None) or getattr(store, &#x27;flush_sync&#x27;, None)</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            if callable(flush): await attempt(flush)</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            close = getattr(store, &#x27;close&#x27;, None)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>            if callable(close): await attempt(close)</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        if self.bus is not None:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>            for owner in self.bus_owners:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>                await attempt(self.bus.unsubscribe_all, owner)</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>            self.bus_owners = []</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        if getattr(self, &#x27;owns_llm_runtime&#x27;, False):</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>            await attempt(self.llm_runtime.aclose)</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        if errors:</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            raise BaseExceptionGroup(&#x27;engine cleanup failed&#x27;, errors)</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code></code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>@dataclass</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>class EngineRunner:</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>    &quot;&quot;&quot;task_queue runner 适配面。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code></code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>    run_for_task: Callable[[Task], Awaitable[RunnerResult | None]]</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    cancel_current: Callable[[str | None], Awaitable[None]]</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code></code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>@dataclass</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>class EngineContext:</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>    &quot;&quot;&quot;桌面/CLI 消费的引擎上下文(字段显式化,保留鸭子兼容)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code></code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>    settings: Any</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>    bus: Any</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>    session: Any</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>    llm: Any</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>    scope: Any</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>    loop: Any</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>    tools: Any</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>    registry: Any</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>    guard: Any</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>    approval: Any</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>    counters: Any</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>    storage: EngineStorage</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>    engine_spine: EngineSpine</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>    task_runner: EngineRunner</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>    make_runner: Callable[[], EngineRunner]</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    agent: Any = None</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>    task_queue: Any = None</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>    budget: Any = None</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>    governance: Any = None                 # 治理层单实例(ADR-018;S2-3 装配面)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code></code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>EngineStorage.__module__ = &#x27;pyharness.engine&#x27;</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>EngineSpine.__module__ = &#x27;pyharness.engine&#x27;</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>EngineRunner.__module__ = &#x27;pyharness.engine&#x27;</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>EngineContext.__module__ = &#x27;pyharness.engine&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

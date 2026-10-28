@@ -1,0 +1,221 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/wechat_channel.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/wechat_channel.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 221 行</span></nav><main class="wrap source-page"><h1>pyharness/application/wechat_channel.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：6c44de4f282c3b82f6edbce38958409a2f39d925<br>SHA-256（内容校验）：70a1777ba77ce797c0c6a2ff9fde9c4d62142a143c2769c85fbde62fa702b50b</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 15 个类、函数与方法</summary><ul><li><a href="#L20">WechatChannel（类） · L20–L221</a><ul><li><a href="#L21">WechatChannel.__init__（方法） · L21–L32</a></li><li><a href="#L34">WechatChannel.config（方法） · L34–L35</a></li><li><a href="#L37">WechatChannel._save（方法） · L37–L39</a></li><li><a href="#L41">WechatChannel.configure（异步方法） · L41–L56</a></li><li><a href="#L58">WechatChannel.status（方法） · L58–L64</a></li><li><a href="#L66">WechatChannel.begin_login（异步方法） · L66–L82</a></li><li><a href="#L84">WechatChannel.login_status（异步方法） · L84–L122</a></li><li><a href="#L124">WechatChannel.start（方法） · L124–L128</a></li><li><a href="#L130">WechatChannel._poll_done（方法） · L130–L136</a></li><li><a href="#L138">WechatChannel._poll（异步方法） · L138–L175</a></li><li><a href="#L177">WechatChannel._receive（异步方法） · L177–L193</a></li><li><a href="#L195">WechatChannel.reply（异步方法） · L195–L204</a></li><li><a href="#L206">WechatChannel.stop（异步方法） · L206–L214</a></li><li><a href="#L216">WechatChannel.close（异步方法） · L216–L221</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Personal WeChat account lifecycle around the Tencent iLink protocol.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code></code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import asyncio</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import base64</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import hashlib</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import io</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>import json</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import time</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import uuid</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>import httpx</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from typing import TYPE_CHECKING</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>if TYPE_CHECKING:</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    from pyharness.application.channels import Channels</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from pyharness.integrations.wechat_ilink import BASE, ILinkClient, ILinkError, WechatConfig, official_url</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>from pyharness.core.sandbox import fail</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>class WechatChannel:</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    def __init__(self, channels: Channels):</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        self.channels, self.service = channels, channels.service</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        self.client = None</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        self.poller = None</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        self.login = None</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        self.state = &#x27;not_bound&#x27;</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        self.error = None</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        self.last_received = self.last_sent = None</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        self.lock = asyncio.Lock()</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        self.login_client = None</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        self.client_factory = ILinkClient</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        channels.db.execute(&#x27;CREATE TABLE IF NOT EXISTS channel_state(key TEXT PRIMARY KEY,value TEXT NOT NULL)&#x27;)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    def config(self):</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        return WechatConfig.model_validate(self.service.platform.store.read()[&#x27;preferences&#x27;].get(&#x27;wechat&#x27;,{}))</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    def _save(self, config):</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        with self.service.platform.store.transaction() as doc:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            doc[&#x27;preferences&#x27;][&#x27;wechat&#x27;] = config.model_dump()</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    async def configure(self, body):</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        self.channels._local_only()</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        old = self.config()</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        config = WechatConfig.model_validate({**old.model_dump(),**body})</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        if any(k in body for k in (&#x27;secret_ref&#x27;,&#x27;base_url&#x27;,&#x27;bot_id&#x27;)):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>            fail(&#x27;wechat_server_owned_configuration&#x27;)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        if config.name != old.name and old.secret_ref:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            fail(&#x27;wechat_bound_name_fixed&#x27;)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        if bool(config.agent_id) != bool(config.agent_version):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            fail(&#x27;channel_agent_version_required&#x27;)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        if config.agent_id:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            self.service.platform.new_binding_version(config.agent_id,config.agent_version)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        await self.stop()</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        self._save(config)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        self.start()</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        return self.status()</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    def status(self):</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        config = self.config()</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        return {&#x27;kind&#x27;:&#x27;personal&#x27;,&#x27;provider&#x27;:&#x27;tencent_ilink&#x27;,&#x27;name&#x27;:config.name,</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            &#x27;enabled&#x27;:config.enabled,&#x27;bound&#x27;:bool(config.secret_ref),&#x27;connected&#x27;:self.state==&#x27;receiving&#x27;,</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            &#x27;status&#x27;:self.state,&#x27;error&#x27;:self.error,&#x27;last_received&#x27;:self.last_received,&#x27;last_sent&#x27;:self.last_sent,</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            &#x27;account_action_required&#x27;:not bool(config.secret_ref),</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            &#x27;detail&#x27;:&#x27;微信 ClawBot / iLink 自动收发；需在微信启用插件并扫码确认。当前仅处理已授权私聊文本。&#x27;}</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code></code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    async def begin_login(self):</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        self.channels._local_only()</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        async with self.lock:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            if self.login_client:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                await self.login_client.close()</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            self.login_client = self.client_factory()</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            value = await self.login_client.login_qr()</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            content = str(value[&#x27;qrcode_img_content&#x27;])</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            if len(content)&gt;10000 or not value.get(&#x27;qrcode&#x27;):</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                raise ILinkError(&#x27;wechat_invalid_qrcode&#x27;)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            import qrcode</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            buffer = io.BytesIO()</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            qrcode.make(content).save(buffer, format=&#x27;PNG&#x27;)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            self.login = {&#x27;id&#x27;:uuid.uuid4().hex,&#x27;qrcode&#x27;:value[&#x27;qrcode&#x27;],&#x27;created&#x27;:time.time()}</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            self.state = &#x27;waiting_scan&#x27;</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            return {&#x27;login_id&#x27;:self.login[&#x27;id&#x27;],&#x27;image&#x27;:&#x27;data:image/png;base64,&#x27;+base64.b64encode(buffer.getvalue()).decode(),</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                    &#x27;status&#x27;:self.state,&#x27;expires_in&#x27;:300}</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code></code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    async def login_status(self, ident, verification_code=None):</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        self.channels._local_only()</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        async with self.lock:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            if not self.login or self.login[&#x27;id&#x27;] != ident or time.time()-self.login[&#x27;created&#x27;]&gt;300:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                self.state = &#x27;login_expired&#x27;</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                if self.login_client:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                    await self.login_client.close()</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                    self.login_client = None</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                self.login = None</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                return {&#x27;status&#x27;:self.state}</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            value = await self.login_client.login_status(self.login[&#x27;qrcode&#x27;], verification_code=verification_code)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            status = value.get(&#x27;status&#x27;,&#x27;wait&#x27;)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            if status==&#x27;scaned_but_redirect&#x27;:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                # Validate before forwarding any QR session identifier; never trust an arbitrary URL.</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                self.login_client.base_url = official_url(&#x27;https://&#x27;+value[&#x27;redirect_host&#x27;])</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                self.state = &#x27;waiting_confirmation&#x27;</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            elif status==&#x27;confirmed&#x27;:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                config = self.config()</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                if not all(value.get(k) for k in (&#x27;bot_token&#x27;,&#x27;ilink_bot_id&#x27;,&#x27;ilink_user_id&#x27;)):</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                    raise ILinkError(&#x27;wechat_invalid_login&#x27;)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                config.base_url = official_url(value.get(&#x27;baseurl&#x27;) or BASE)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                same_bot = config.bot_id == value[&#x27;ilink_bot_id&#x27;]</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                config.bot_id = value[&#x27;ilink_bot_id&#x27;]</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                config.allowed_users = sorted(set([*(config.allowed_users if same_bot else []),value[&#x27;ilink_user_id&#x27;]]))</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                config.secret_ref = self.service.credentials.set_service_secret(self.service.tenant_id,</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                    &#x27;wechat:&#x27;+config.name, config.base_url, value[&#x27;bot_token&#x27;])</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                # Binding is not permission to receive/execute; explicit enable remains separate.</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                self._save(config)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                self.login = None</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                await self.login_client.close()</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                self.login_client = None</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                self.state = &#x27;bound&#x27;</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                self.start()</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            elif status==&#x27;binded_redirect&#x27;:</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                self.state = &#x27;bound&#x27; if self.config().secret_ref else &#x27;rebind_required&#x27;</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            else:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                self.state = {&#x27;wait&#x27;:&#x27;waiting_scan&#x27;,&#x27;scaned&#x27;:&#x27;waiting_confirmation&#x27;,&#x27;expired&#x27;:&#x27;login_expired&#x27;,</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                              &#x27;need_verifycode&#x27;:&#x27;verification_code_required&#x27;,&#x27;verify_code_blocked&#x27;:&#x27;verification_blocked&#x27;}.get(status,&#x27;login_unavailable&#x27;)</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            return self.status()</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code></code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    def start(self):</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        config = self.config()</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        if config.enabled and config.secret_ref and not self.channels.closed and (self.poller is None or self.poller.done()):</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>            self.poller = asyncio.create_task(self._poll())</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            self.poller.add_done_callback(self._poll_done)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code></code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    def _poll_done(self, task):</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        if task.cancelled():</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            return</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        error = task.exception()</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        if error:</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            self.state = &#x27;connection_failed&#x27;</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            self.error = str(getattr(error,&#x27;code&#x27;,type(error).__name__))</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code></code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    async def _poll(self):</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        config = self.config()</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        token = self.service.credentials.resolve_service_secret(config.secret_ref,self.service.tenant_id,config.base_url)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        self.client = self.client_factory(base_url=config.base_url,token=token)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        delay = 1</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        try:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            while True:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                try:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                    cursor = self.channels.db.execute(&#x27;SELECT value FROM channel_state WHERE key=?&#x27;,(&#x27;wechat:&#x27;+config.name,)).fetchone()</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                    result = await self.client.updates(cursor[&#x27;value&#x27;] if cursor else &#x27;&#x27;)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                    # Persist every accepted message before acknowledging the opaque cursor.</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                    for message in result.get(&#x27;msgs&#x27;) or []:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                        await self._receive(config,message)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>                    with self.channels.db:</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                        self.channels.db.execute(&#x27;INSERT OR REPLACE INTO channel_state(key,value) VALUES(?,?)&#x27;,</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>                            (&#x27;wechat:&#x27;+config.name,str(result.get(&#x27;get_updates_buf&#x27;) or (cursor[&#x27;value&#x27;] if cursor else &#x27;&#x27;))))</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                    self.state, self.error, delay = &#x27;receiving&#x27;, None, 1</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                    if not result.get(&#x27;msgs&#x27;):</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                        await asyncio.sleep(0.25)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                except ILinkError as exc:</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                    self.error = exc.code</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                    if exc.code==&#x27;wechat_session_expired&#x27;:</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>                        self.state = &#x27;rebind_required&#x27;</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>                        return</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                    self.state = &#x27;reconnecting&#x27;</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                    await asyncio.sleep(delay)</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                    delay = min(delay*2,30)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                except (httpx.HTTPError, ValueError, KeyError) as exc:</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                    self.state, self.error = &#x27;reconnecting&#x27;, type(exc).__name__</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>                    await asyncio.sleep(delay)</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                    delay = min(delay*2,30)</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                except Exception as exc:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                    self.state = &#x27;backpressure&#x27;</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                    self.error = str(getattr(exc,&#x27;code&#x27;,type(exc).__name__))</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                    return  # Keep the cursor unacknowledged; require operator recovery.</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        finally:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            await self.client.close()</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>            self.client = None</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code></code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    async def _receive(self, config, message):</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        if message.get(&#x27;message_type&#x27;) != 1 or message.get(&#x27;group_id&#x27;):</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>            return</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        user = message.get(&#x27;from_user_id&#x27;)</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        if user not in config.allowed_users or message.get(&#x27;to_user_id&#x27;) != config.bot_id:</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>            return</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        text = &#x27;\n&#x27;.join(str(item.get(&#x27;text_item&#x27;,{}).get(&#x27;text&#x27;,&#x27;&#x27;)) for item in message.get(&#x27;item_list&#x27;,[]) if item.get(&#x27;type&#x27;)==1).strip()</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        if not text or len(text)&gt;32000 or not message.get(&#x27;context_token&#x27;) or not message.get(&#x27;message_id&#x27;):</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>            return</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        name = &#x27;wechat:&#x27;+config.name</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        ident = hashlib.sha256((name+&#x27;\0&#x27;+str(message[&#x27;message_id&#x27;])).encode()).hexdigest()</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        owner = hashlib.sha256((name+&#x27;\0&#x27;+user).encode()).hexdigest()</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        context = self.service.credentials.set_service_secret(self.service.tenant_id,</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>            &#x27;wechat_context:&#x27;+ident,config.base_url,message[&#x27;context_token&#x27;])</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        self.channels.enqueue(ident,name,owner,str(message[&#x27;message_id&#x27;]),text,</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                              json.dumps({&#x27;user&#x27;:user,&#x27;context_ref&#x27;:context}))</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        self.last_received = time.time()</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code></code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>    async def reply(self, row):</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        if not self.client:</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>            raise ILinkError(&#x27;wechat_not_receiving&#x27;)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        config = self.config()</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        context = json.loads(row[&#x27;context&#x27;])</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        if context[&#x27;user&#x27;] not in config.allowed_users:</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>            raise ILinkError(&#x27;wechat_recipient_not_authorized&#x27;)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        value = self.service.credentials.resolve_service_secret(context[&#x27;context_ref&#x27;],self.service.tenant_id,config.base_url)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        await self.client.send(context[&#x27;user&#x27;],value,row[&#x27;reply&#x27;],&#x27;pyharness-&#x27;+row[&#x27;id&#x27;])</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        self.last_sent = time.time()</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code></code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>    async def stop(self):</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        if self.poller:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>            self.poller.cancel()</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            await asyncio.gather(self.poller,return_exceptions=True)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>            self.poller = None</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        if self.client:</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>            await self.client.close()</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            self.client = None</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        self.state = &#x27;bound&#x27; if self.config().secret_ref else &#x27;not_bound&#x27;</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code></code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    async def close(self):</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        await self.stop()</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        if self.login_client:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>            await self.login_client.close()</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>            self.login_client = None</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        self.login = None</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

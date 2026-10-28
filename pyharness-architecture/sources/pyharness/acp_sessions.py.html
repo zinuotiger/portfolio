@@ -1,0 +1,159 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/acp_sessions.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/acp_sessions.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 159 行</span></nav><main class="wrap source-page"><h1>pyharness/acp_sessions.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：90b33aae0ab1a1cc5549d13aa7a58ad6975af27f<br>SHA-256（内容校验）：741cd5c0d5df3917f9b3205f207cadfd3b7aec38530976669115845dc8399e23</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 13 个类、函数与方法</summary><ul><li><a href="#L9">_maybe_await（异步函数） · L9–L13</a></li><li><a href="#L15">_create_session（异步函数） · L15–L30</a></li><li><a href="#L32">_open_session（异步函数） · L32–L49</a></li><li><a href="#L51">_ensure_bound（异步函数） · L51–L65</a></li><li><a href="#L67">_closed_of（函数） · L67–L75</a></li><li><a href="#L77">_last_seq_of（函数） · L77–L88</a></li><li><a href="#L90">_iter_log（函数） · L90–L95</a></li><li><a href="#L97">_env_dict（函数） · L97–L106</a></li><li><a href="#L108">_ensure_repaired（异步函数） · L108–L117</a></li><li><a href="#L119">_set_channel（函数） · L119–L128</a></li><li><a href="#L130">_engine_model（函数） · L130–L135</a></li><li><a href="#L137">_task_enqueued_seq（函数） · L137–L142</a></li><li><a href="#L145">close_owned_runtimes（异步函数） · L145–L159</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Acp sessions: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import inspect</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.acp_protocol import AcpState, log</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>async def _maybe_await(res: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    &quot;&quot;&quot;同步/异步兼容调用(引擎各面注入形状不一,commands.py/task_queue.py 同款先例)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    if inspect.isawaitable(res):</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>        return await res</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>    return res</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>async def _create_session(ctx: Any) -&gt; str:</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    &quot;&quot;&quot;新建会话(initialize 无 sessionId 路径):委托 ctx.session.create()。</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    门面缺 create(如 ctx.session 即已绑定日志)→ EVT-106 明确报错(偏离 1:</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    绝不静默自建,防伪造会话状态)。</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    mgr = getattr(ctx, &quot;session&quot;, None)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    fn = getattr(mgr, &quot;create&quot;, None)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    if not callable(fn):</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        raise_code(&quot;EVT-106&quot;, hint=&quot;会话门面未装配 create(桥无法新建会话);&quot;</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>                   &quot;显式传 sessionId 绑定既有会话&quot;)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    sid = await _maybe_await(fn())</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    if not isinstance(sid, str) or not sid.strip():</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        raise_code(&quot;EVT-106&quot;, session_id=sid,</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>                   hint=&quot;会话门面 create 返回非法 sid(须非空字符串)&quot;)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    return sid</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code></code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>async def _open_session(ctx: Any, sid: str) -&gt; Any:</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    &quot;&quot;&quot;绑定既有会话(重放重建):委托 ctx.session.open_session(sid)。</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code></code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    两种注入形状(偏离 1):(a) 门面 open_session → 委托;(b) ctx.session 即已绑定</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    会话日志且 sid 匹配 → 直用;均不可达 → EVT-106(先 initialize 或注入门面)。</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    mgr = getattr(ctx, &quot;session&quot;, None)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    if mgr is None:</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        raise_code(&quot;EVT-106&quot;, session_id=sid,</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>                   hint=&quot;会话未装配(ctx.session=None);先 initialize&quot;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    fn = getattr(mgr, &quot;open_session&quot;, None)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    if callable(fn):</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        return await _maybe_await(fn(sid))</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    if getattr(mgr, &quot;sid&quot;, None) == sid:   # ctx.session 即当前会话日志</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        return mgr</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    raise_code(&quot;EVT-106&quot;, session_id=sid,</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>               hint=&quot;会话门面未装配 open_session 且 ctx.session 未绑定该 sid;&quot;</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>                    &quot;先 initialize 或注入门面&quot;)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>async def _ensure_bound(ctx: Any, st: AcpState,</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                        sid_param: Any) -&gt; tuple[Any, str]:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    &quot;&quot;&quot;解析当前操作会话:同柄复用,异柄重开;未初始化/无参数 → EVT-106。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    sid = sid_param if sid_param is not None else st.session_id</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    if not sid:</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        raise_code(&quot;EVT-106&quot;, hint=&quot;会话未就绪:先 initialize&quot;</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                   &quot;(或请求带 sessionId)&quot;)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    if not isinstance(sid, str) or not sid.strip():</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        raise_code(&quot;EVT-100&quot;, field=&quot;sessionId&quot;, session_id=sid,</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>                   hint=&quot;sessionId 须非空字符串&quot;)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    log_ = st._bound_log                     # 同柄缓存(INV-03,偏离 10)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    if log_ is None or getattr(log_, &quot;sid&quot;, None) != sid:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        log_ = await _open_session(ctx, sid)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        st._bound_log = log_</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    return log_, sid</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>def _closed_of(log_: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    &quot;&quot;&quot;会话是否终态:stats()[&quot;closed&quot;] 权威;缺 stats 面回退私有位(纯只读判读)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    stats = getattr(log_, &quot;stats&quot;, None)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    if callable(stats):</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        try:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            return bool(stats().get(&quot;closed&quot;, False))</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        except Exception:                    # noqa: BLE001 门面异常 → 视为未终态</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            pass</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    return bool(getattr(log_, &quot;_closed&quot;, False))</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>def _last_seq_of(log_: Any) -&gt; int:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    &quot;&quot;&quot;会话当前最大 seq(seq_range 上界;stats 缺面回退尾事件遍历)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    stats = getattr(log_, &quot;stats&quot;, None)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    if callable(stats):</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        try:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            return int(stats().get(&quot;seq&quot;, 0) or 0)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        except Exception:                    # noqa: BLE001</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            pass</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    last = 0</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    for env in _iter_log(log_):</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        last = env.seq</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    return last</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code></code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>def _iter_log(log_: Any):</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    &quot;&quot;&quot;会话事件迭代(events_after(0) 全量;门面无该面时为空)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    ea = getattr(log_, &quot;events_after&quot;, None)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    if callable(ea):</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        yield from ea(0)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    return</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>def _env_dict(env: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    &quot;&quot;&quot;Envelope → 协议事件 dict(偏离 6:model_dump 序列化,十字段全量)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    dump = getattr(env, &quot;model_dump&quot;, None)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    if callable(dump):</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        return dump(exclude_none=True)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    # 兜底:手工投影(非 pydantic 信封的注入替身)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    return {k: getattr(env, k) for k in</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            (&quot;seq&quot;, &quot;ts&quot;, &quot;type&quot;, &quot;session_id&quot;, &quot;actor&quot;, &quot;origin&quot;,</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>             &quot;task_id&quot;, &quot;payload&quot;, &quot;trace&quot;)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            if getattr(env, k, None) is not None}</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>async def _ensure_repaired(ctx: Any, sid: str) -&gt; None:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    &quot;&quot;&quot;启动/绑定会话的 repair 前置(F060;偏离 8:pyharness.repair 未落地)。</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    装配方注入 ctx.repair.ensure_repaired(sid) 后自动生效(损坏先修再 open);</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    未装配 = 跳过——PERS-201 坏行仍由 open_session 回放记跳隔离,不阻断启动。</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    repair = getattr(ctx, &quot;repair&quot;, None)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    fn = getattr(repair, &quot;ensure_repaired&quot;, None)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    if callable(fn):</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        await _maybe_await(fn(sid))</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code></code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>def _set_channel(ctx: Any, st: AcpState) -&gt; None:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    &quot;&quot;&quot;ctx.channel = &quot;acp:&lt;client_id&gt;&quot;:桥即人类审批通道(非 headless)。</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    命令面/审批面据此判定交互通道存在(R8/APR-501);仅当 ctx 允许赋值时生效</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    (未装配/只读 ctx 静默跳过,装配层语义由 bootstrap 保证)。</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    try:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        ctx.channel = f&quot;acp:{st.client_id}&quot;</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    except Exception:                        # noqa: BLE001 只读门面:跳过</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        log.debug(&quot;ctx.channel 赋值失败(只读门面?),bridge=%s&quot;, st.client_id)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code></code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>def _engine_model(ctx: Any) -&gt; str:</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    &quot;&quot;&quot;能力清单 model:ctx.config.llm.model(未装配配置 → 空串,不阻塞协商)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    cfg = getattr(ctx, &quot;config&quot;, None)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>    llm = getattr(cfg, &quot;llm&quot;, None)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    model = getattr(llm, &quot;model&quot;, None)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    return str(model) if model else &quot;&quot;</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code></code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>def _task_enqueued_seq(log_: Any, task_id: str) -&gt; Optional[int]:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    &quot;&quot;&quot;submit 后定位本任务 task.enqueued 的 seq(chat seq_range 下界)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    for env in _iter_log(log_):</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        if env.type == &quot;task.enqueued&quot; and env.payload.get(&quot;task_id&quot;) == task_id:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            return env.seq</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    return None                              # 队列异会话(偏离 10)→ 未知下界</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code></code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>async def close_owned_runtimes(ctx):</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    runtimes = getattr(ctx, &#x27;_acp_runtimes&#x27;, {})</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    errors = []</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    for sid, runtime in list(runtimes.items()):</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        try:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>            await runtime.engine_spine.close()</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        except BaseException as exc:</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            errors.append(exc)</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        else:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>            runtimes.pop(sid, None)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    if getattr(ctx, &#x27;_acp_owns_llm&#x27;, False):</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        try: await ctx.llm_runtime.aclose()</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        except BaseException as exc: errors.append(exc)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    if errors:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        raise BaseExceptionGroup(&#x27;ACP runtime cleanup failed&#x27;, errors)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

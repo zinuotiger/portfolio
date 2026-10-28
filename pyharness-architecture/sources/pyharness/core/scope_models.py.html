@@ -1,0 +1,131 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/scope_models.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/scope_models.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 131 行</span></nav><main class="wrap source-page"><h1>pyharness/core/scope_models.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：6aab8b4964ed64c682f64a159e58da7e703d1ad8<br>SHA-256（内容校验）：362ee2964d0efd76fbce6934b74504df613c86a619ac5bc65007b69982074a82</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 8 个类、函数与方法</summary><ul><li><a href="#L36">BudgetLimits（类） · L36–L67</a><ul><li><a href="#L49">BudgetLimits.from_cfg（方法） · L49–L60</a></li><li><a href="#L62">BudgetLimits.model_dump（方法） · L62–L67</a></li></ul></li><li><a href="#L69">ScopePolicy（类） · L69–L98</a><ul><li><a href="#L89">ScopePolicy.model_dump（方法） · L89–L98</a></li></ul></li><li><a href="#L100">ScopeSnapshot（类） · L100–L112</a></li><li><a href="#L114">BudgetExhausted（类） · L114–L125</a><ul><li><a href="#L122">BudgetExhausted.__init__（方法） · L122–L125</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Scope models: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import logging</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>log = logging.getLogger(&quot;pyharness.scope&quot;)</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>DEFAULT_WINDOW_TOKENS: int = 64_000</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>DEFAULT_WINDOW_RATIO: float = 0.75</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>DEFAULT_WARN_RATIO: float = 0.8</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>DEFAULT_ROLE: str = &quot;user&quot;</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>WORKSPACE_DOMAINS: frozenset = frozenset({&quot;fs&quot;, &quot;workspace&quot;, &quot;storage&quot;})</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>ALLOWLIST_DOMAINS: frozenset = frozenset({&quot;web&quot;, &quot;net&quot;})</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>SELF_DOMAINS: frozenset = frozenset({&quot;goal&quot;, &quot;todo&quot;, &quot;plan&quot;, &quot;util&quot;, &quot;user&quot;,</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>                                     &quot;skill&quot;, &quot;session&quot;, &quot;schedule&quot;,</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>                                     &quot;subagent&quot;})</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>RESTRICTED_DOMAINS: frozenset = frozenset({&quot;exec&quot;, &quot;proc&quot;})</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>DEFAULT_DANGER_MARKS: tuple[dict[str, str], ...] = (</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    {&quot;pattern&quot;: &quot;fs.delete_file&quot;, &quot;level&quot;: &quot;critical&quot;},</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    {&quot;pattern&quot;: &quot;exec.*&quot;, &quot;level&quot;: &quot;high&quot;},</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    {&quot;pattern&quot;: &quot;net.*&quot;, &quot;level&quot;: &quot;high&quot;},</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>_DANGER_RANK: dict[str, int] = {&quot;none&quot;: 0, &quot;low&quot;: 1, &quot;high&quot;: 2, &quot;critical&quot;: 3}</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>@dataclass</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>class BudgetLimits:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    &quot;&quot;&quot;预算硬闸上限(F032/CFG budget.task 编译;warn_ratio 为告警比例)。</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code></code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    字段名对齐 config.py BudgetTaskCfg 权威键面(见偏离 5);值全部来自 config,</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    启动编译后运行期只读(预算键禁热更 → 无漂移,CFG-608 语义)。</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    max_in_tokens: int = 2_000_000     # 输入 ≤200 万 token</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    max_out_tokens: int = 50_000       # 输出 ≤5 万 token(硬闸主判据)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    max_cost_yuan: float = 1.0         # 估算成本 ≤¥1(F032 默认,CONSTRAINTS-07 C-01)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    warn_ratio: float = DEFAULT_WARN_RATIO   # 80% 提醒,只提醒不拦</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    @classmethod</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    def from_cfg(cls, cfg: Any) -&gt; &quot;BudgetLimits&quot;:</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        &quot;&quot;&quot;从 Settings 编译(L1 缺省必可加载;键缺省回落默认值)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        t = getattr(cfg, &quot;budget&quot;, None).task if getattr(cfg, &quot;budget&quot;, None) else None</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        if t is None:</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            return cls()</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        return cls(</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>            max_in_tokens=int(getattr(t, &quot;max_in_tokens&quot;, 2_000_000)),</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            max_out_tokens=int(getattr(t, &quot;max_out_tokens&quot;, 50_000)),</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            max_cost_yuan=float(getattr(t, &quot;max_cost_yuan&quot;, 1.0)),</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            warn_ratio=float(getattr(cfg.budget, &quot;warn_ratio&quot;, DEFAULT_WARN_RATIO)),</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        )</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    def model_dump(self) -&gt; dict:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        &quot;&quot;&quot;值拷贝序列化(快照/审计用;与 pydantic model_dump 同名同语义)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        return {&quot;max_in_tokens&quot;: self.max_in_tokens,</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                &quot;max_out_tokens&quot;: self.max_out_tokens,</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                &quot;max_cost_yuan&quot;: self.max_cost_yuan,</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                &quot;warn_ratio&quot;: self.warn_ratio}</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code></code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>@dataclass</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>class ScopePolicy:</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    &quot;&quot;&quot;会话策略(role/deny/危险分级/域名 allowlist/workspace 根/沙箱级别)。</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    从 config+会话编译(最小权限);fork 经 ScopeSnapshot 值拷贝继承(F059)。</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    deny_tools 是策略显式禁令(只增,运行期经 tighten 追加);danger_marks 是</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    分级查表(critical → can_use 终局 False);两者互为防线(见偏离 2)。</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    role: str = DEFAULT_ROLE                       # 会话角色(提示词变量源)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    deny_tools: set[str] = field(default_factory=set)       # 显式禁止表</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    danger_marks: list[dict[str, str]] = field(default_factory=list)  # 分级规则</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    allowed_domains: set[str] = field(default_factory=set)  # 域名 allowlist</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    workspace_root: str = &quot;&quot;                       # workspace 根(F055)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    # workspace 外**只读**例外目录(A2/R24 接线 `security.policy.read_extra_dirs`):</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    # 仅对**读类**工具放行,写类一律仍拒;两层(g3 与 provider)同判。默认为空 = 无例外。</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    read_extra_dirs: list[str] = field(default_factory=list)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    sandbox_level: str = &quot;strict&quot;                  # strict/basic/off(F054)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    allowed_tools: Optional[set[str]] = None        # None inherits; empty permits none</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code></code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    def model_dump(self) -&gt; dict:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        &quot;&quot;&quot;值拷贝序列化(ScopePolicy(**model_dump()) 可逆;快照/继承用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        return {&quot;role&quot;: self.role,</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                &quot;deny_tools&quot;: set(self.deny_tools),</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                &quot;allowed_tools&quot;: None if self.allowed_tools is None else set(self.allowed_tools),</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                &quot;danger_marks&quot;: [dict(m) for m in self.danger_marks],</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                &quot;allowed_domains&quot;: set(self.allowed_domains),</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                &quot;workspace_root&quot;: self.workspace_root,</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                &quot;read_extra_dirs&quot;: list(self.read_extra_dirs),</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                &quot;sandbox_level&quot;: self.sandbox_level}</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code></code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>class ScopeSnapshot:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    &quot;&quot;&quot;全策略只读快照(fork/审批复核/审计用)。</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code></code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    frozen=True:任何顶层字段赋值 → FrozenInstanceError(结构不可变);</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    内嵌 policy/limits 均为值拷贝——快照不随原 scope 后续 tighten 变化。</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    policy: ScopePolicy</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    limits: BudgetLimits</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    window_tokens: int = DEFAULT_WINDOW_TOKENS</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    window_ratio: float = DEFAULT_WINDOW_RATIO</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    taken_at: str = &quot;&quot;                             # 审计时间戳(ISO 8601)</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>class BudgetExhausted(Exception):</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    &quot;&quot;&quot;F032 预算硬闸信号:scope.check_budget() 超限抛出 → agent-loop 终态 reason=budget。</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code></code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    不继承 PyHError:不得被 agent_loop 的 PyHError 域捕获逻辑吞掉(本地定义注</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    明 scope.py 落地后改 import,见偏离 8)。预算事件预算本由 budget_state 落</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    budget.paused,本异常只作循环控制信号。</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    def __init__(self, message=&#x27;Budget exhausted&#x27;, *, diagnostics=None):</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        super().__init__(message)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        from pyharness.core.budget_diagnostics import public_budget</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        self.diagnostics = public_budget(diagnostics)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>BudgetLimits.__module__ = &#x27;pyharness.core.scope&#x27;</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>ScopePolicy.__module__ = &#x27;pyharness.core.scope&#x27;</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>ScopeSnapshot.__module__ = &#x27;pyharness.core.scope&#x27;</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>BudgetExhausted.__module__ = &#x27;pyharness.core.scope&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

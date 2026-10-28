@@ -1,0 +1,153 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/experiment_store.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/experiment_store.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 153 行</span></nav><main class="wrap source-page"><h1>pyharness/application/experiment_store.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：3e1504fca595b1b9bc7cff3ac8d98f464787c1df<br>SHA-256（内容校验）：b2c0018c8daf57784a609d91de29cdec54422a1242cce8ce6980af4a412b1a01</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 11 个类、函数与方法</summary><ul><li><a href="#L16">ExperimentStore（类） · L16–L153</a><ul><li><a href="#L17">ExperimentStore._validate_experiment_record（方法） · L17–L18</a></li><li><a href="#L20">ExperimentStore._experiment_lookup（方法） · L20–L21</a></li><li><a href="#L23">ExperimentStore._experiment_current_plan（方法） · L23–L49</a></li><li><a href="#L51">ExperimentStore.experiment_preparation_preview（异步方法） · L51–L55</a></li><li><a href="#L57">ExperimentStore.ensure_experiment_preparation（异步方法） · L57–L79</a></li><li><a href="#L81">ExperimentStore.experiment_existing_task（异步方法） · L81–L91</a></li><li><a href="#L93">ExperimentStore._experiment_check_definition（方法） · L93–L103</a></li><li><a href="#L105">ExperimentStore.finish_experiment（异步方法） · L105–L125</a></li><li><a href="#L127">ExperimentStore.experiment_record（异步方法） · L127–L132</a></li><li><a href="#L134">ExperimentStore.experiment_submission（异步方法） · L134–L153</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Prepared experiments share the original capture owner, history and poisoned writer.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import time</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.experiment_contracts import ConfirmExperimentPreparation</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.experiment_records import ExperimentPreparation,ExperimentRevision</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.experiment_plan import (preparation_plan,preparation_identity,</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>    experiment_request,experiment_ref,experiment_summary)</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.experiment_support import (fixed_sources,finish_key,finish_request,</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>    check_definition_plan,validate_experiment_record)</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.application.regression_contracts import current_regression_content</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.errors import PyHError,raise_code</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.application.experiment_run_store import ExperimentRunStore</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.application.experiment_report_store import ExperimentReportStore</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pyharness.application.experiment_directory_store import ExperimentDirectoryStore</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>class ExperimentStore(ExperimentRunStore,ExperimentReportStore,ExperimentDirectoryStore):</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    def _validate_experiment_record(self,definition,resources,previous,event,kind,history):</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        validate_experiment_record(self,definition,resources,previous,event,kind,history)</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    def _experiment_lookup(self,resources,project,actor):</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        return lambda kind,ident,revision:self._s05_history(resources,project,ident,revision,kind,actor)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    def _experiment_current_plan(self,resources,project,selection,actor,authorize,started,projects,*,check_revision):</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        self._context_project(resources,project,selection.project_revision);current_regression_content(selection,reading=not check_revision)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        if check_revision:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>            old=resources.get(selection.experiment_id)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>            if old:self._context_owned(resources,selection.experiment_id,&#x27;experiment_definition&#x27;,project,actor)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>            if (old[&#x27;experiment_definition&#x27;][&#x27;revision&#x27;] if old else 0)!=selection.expected_revision:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>                raise_code(&#x27;EVT-101&#x27;,reason=&#x27;stale_revision&#x27;)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        dataset,cases,attempts=fixed_sources(self,resources,project,selection,actor,self._experiment_lookup(resources,project,actor))</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        self._regression_check_record(resources,dataset,&#x27;regression_dataset&#x27;,actor,authorize,started,projects)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        plan=preparation_plan(self,project,selection,dataset,cases,attempts,actor)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        for side in (&#x27;left&#x27;,&#x27;right&#x27;):</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            reference=getattr(selection,side+&#x27;_agent_ref&#x27;)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            if check_revision:projects._graph_agent_version(reference)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            else:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                # Historical observation proves an immutable published snapshot;</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>                # retirement limits new bindings, not still-authorized evidence.</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>                version=projects.service.platform.version(reference.agent_id,reference.version)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                if version[&#x27;sha256&#x27;]!=reference.sha256 or version[&#x27;snapshot&#x27;].get(&#x27;status&#x27;)!=&#x27;published&#x27;:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>                    raise_code(&#x27;EVT-101&#x27;,reason=&#x27;experiment_agent_version_reference&#x27;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        for task in plan[&#x27;tasks&#x27;]:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>            value=dict(task[&#x27;command&#x27;],project_id=project)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>            wi=self._task_bound_input(resources,value,actor)[&#x27;workspace_input&#x27;]</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            self._input_gate(resources,wi,actor,authorize,started)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        for draft in plan[&#x27;node_drafts&#x27;]:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            context={k:draft[k] for k in (&#x27;schema_version&#x27;,&#x27;document_refs&#x27;,&#x27;citation_refs&#x27;,&#x27;delivery_ref&#x27;)}</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>            self._handoff_context_binding(resources,project,context,actor,draft[&#x27;agent_ref&#x27;])</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        self._context_finish(authorize,actor,resources);return plan</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    async def experiment_preparation_preview(self,project,selection,*,authorize,projects):</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            actor=authorize();resources,_,_=await self._execution_read_state()</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>            return self._experiment_current_plan(resources,project,selection,actor,authorize,started,projects,check_revision=True)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    async def ensure_experiment_preparation(self,project,selection,*,command_id,authorize,projects):</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            actor=authorize();await self._open(initialize=False);resources,commands=self._grant_state()</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            request=experiment_request(project,selection);ident=preparation_identity(self.tenant_id,actor,project,command_id)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            self._context_envelope(&#x27;experiment_preparation&#x27;,ident,1,command_id,actor,request)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            if old:=commands.get((actor,command_id)):</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                if old[0]!=request or &#x27;experiment_preparation&#x27; not in old[1]:raise_code(&#x27;EVT-100&#x27;,reason=&#x27;idempotency_conflict&#x27;)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                return experiment_ref(old[1],&#x27;experiment_preparation&#x27;)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            def gate():</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                fresh,_=self._grant_state()</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>                plan=self._experiment_current_plan(fresh,project,selection,actor,authorize,started,projects,check_revision=True)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                if plan[&#x27;confirmation_digest&#x27;]!=selection.confirmation_digest:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;experiment_plan_changed&#x27;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                for row in fresh.values():</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>                    value=row.get(&#x27;experiment_preparation&#x27;)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                    if value and value[&#x27;project_id&#x27;]==project and value[&#x27;selection&#x27;][&#x27;experiment_id&#x27;]==selection.experiment_id and value[&#x27;selection&#x27;][&#x27;expected_revision&#x27;]==selection.expected_revision:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                        raise_code(&#x27;EVT-101&#x27;,reason=&#x27;experiment_preparation_original_key_required&#x27;)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                self._context_quota(fresh,&#x27;experiment_preparation&#x27;,project)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            gate()</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            definition=ExperimentPreparation(preparation_id=ident,project_id=project,project_revision=selection.project_revision,</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                created_by=actor,submission_key=command_id,selection=selection,plan_digest=selection.confirmation_digest)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            _,row=await self._append_context(definition,&#x27;experiment_preparation&#x27;,ident,command_id,actor,request,gate)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            return experiment_ref(row,&#x27;experiment_preparation&#x27;)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    async def experiment_existing_task(self,project,command,*,authorize):</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            actor=authorize();resources,_,_=await self._execution_read_state();row=resources.get(command[&#x27;product_task_id&#x27;])</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            if row is None:return None</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            value=self._context_owned(resources,command[&#x27;product_task_id&#x27;],&#x27;product_task&#x27;,project,actor)[&#x27;product_task&#x27;]</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            if value[&#x27;revision&#x27;]!=1 or {k:value[k] for k in command if k!=&#x27;expected_revision&#x27;}!={k:v for k,v in command.items() if k!=&#x27;expected_revision&#x27;}:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                raise_code(&#x27;EVT-101&#x27;,reason=&#x27;experiment_prepared_task_changed&#x27;)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            reasons=self._task_access(resources,row,actor,authorize,started)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            if reasons:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;experiment_prepared_task_stale&#x27;)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            return self._s05_ref(row,&#x27;product_task_id&#x27;,&#x27;product_task&#x27;)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    def _experiment_check_definition(self,resources,row,actor,authorize,started,projects):</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        value=row[&#x27;experiment_definition&#x27;];project=value[&#x27;project_id&#x27;]</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        self._context_owned(resources,value[&#x27;experiment_id&#x27;],&#x27;experiment_definition&#x27;,project,actor)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        selection=ConfirmExperimentPreparation.model_validate(value[&#x27;selection&#x27;])</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        plan=self._experiment_current_plan(resources,project,selection,actor,authorize,started,projects,check_revision=False)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        ref=value[&#x27;preparation_ref&#x27;];prep=self._s05_history(resources,project,ref[&#x27;preparation_id&#x27;],1,&#x27;experiment_preparation&#x27;,actor)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        prep=dict(prep,experiment_preparation=dict(prep[&#x27;experiment_preparation&#x27;],selection_model=selection))</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        check_definition_plan(self,resources,value,prep,plan,self._experiment_lookup(resources,project,actor))</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        graph=self._graph_revision(resources,project,value[&#x27;graph_ref&#x27;][&#x27;graph_id&#x27;],value[&#x27;graph_ref&#x27;][&#x27;revision&#x27;],actor)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        self._graph_summary(resources,graph,actor,authorize,started)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    async def finish_experiment(self,project,selection,preparation_ref,graph_ref,case_nodes,dataset_total,*,authorize,projects):</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        started=time.monotonic();ident=selection.experiment_id;key=finish_key(preparation_ref[&#x27;preparation_id&#x27;])</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            actor=authorize();await self._open(initialize=False);resources,commands=self._grant_state()</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            definition=ExperimentRevision(experiment_id=ident,project_id=project,project_revision=selection.project_revision,</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                revision=selection.expected_revision+1,created_by=actor,submission_key=key,selection=selection,</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                preparation_ref=preparation_ref,graph_ref=graph_ref,case_nodes=case_nodes,dataset_total=dataset_total)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>            request=finish_request(definition);self._context_envelope(&#x27;experiment_definition&#x27;,ident,definition.revision,key,actor,request)</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            if old:=commands.get((actor,key)):</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                if old[0]!=request or &#x27;experiment_definition&#x27; not in old[1]:raise_code(&#x27;EVT-100&#x27;,reason=&#x27;idempotency_conflict&#x27;)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                self._experiment_check_definition(resources,old[1],actor,authorize,started,projects)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                return experiment_summary(old[1])</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            def gate():</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                fresh,_=self._grant_state()</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                self._experiment_current_plan(fresh,project,selection,actor,authorize,started,projects,check_revision=True)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                self._context_quota(fresh,&#x27;experiment_definition&#x27;,project)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                self._experiment_check_definition(dict(fresh,**{ident:dict(experiment_definition=definition.model_dump())}),</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                    dict(experiment_definition=definition.model_dump()),actor,authorize,started,projects)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            gate()</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            resources,row=await self._append_context(definition,&#x27;experiment_definition&#x27;,ident,key,actor,request,gate)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            self._experiment_check_definition(resources,row,actor,authorize,started,projects);return experiment_summary(row)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    async def experiment_record(self,project,ident,revision,*,authorize,projects):</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            actor=authorize();resources,_,_=await self._execution_read_state()</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            row=self._s05_history(resources,project,ident,revision,&#x27;experiment_definition&#x27;,actor) if revision is not None else self._context_owned(resources,ident,&#x27;experiment_definition&#x27;,project,actor)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            self._experiment_check_definition(resources,row,actor,authorize,started,projects);return experiment_summary(row)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    async def experiment_submission(self,project,key,*,authorize,projects):</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        started=time.monotonic()</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        async with self._workspace_capture_lock(started):</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            actor=authorize();resources,commands,_=await self._execution_read_state();self._context_project(resources,project)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            old=commands.get((actor,key));prep=old[1] if old else None;receipt=None;status=&#x27;not_found&#x27;</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            if prep:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                if &#x27;experiment_preparation&#x27; not in prep or prep[&#x27;experiment_preparation&#x27;][&#x27;project_id&#x27;]!=project:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                    raise_code(&#x27;GRD-403&#x27;,reason=&#x27;experiment_submission_unavailable&#x27;)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                value=prep[&#x27;experiment_preparation&#x27;];sel=ConfirmExperimentPreparation.model_validate(value[&#x27;selection&#x27;])</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                self._experiment_current_plan(resources,project,sel,actor,authorize,started,projects,check_revision=False)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                status=&#x27;preparing&#x27;</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                latest=resources.get(sel.experiment_id,{}).get(&#x27;experiment_definition&#x27;)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                if latest and latest[&#x27;revision&#x27;]&gt;=sel.expected_revision+1:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                    row=self._s05_history(resources,project,sel.experiment_id,sel.expected_revision+1,&#x27;experiment_definition&#x27;,actor)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                    if row[&#x27;experiment_definition&#x27;][&#x27;preparation_ref&#x27;]==experiment_ref(prep,&#x27;experiment_preparation&#x27;):</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                        self._experiment_check_definition(resources,row,actor,authorize,started,projects)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                        receipt=experiment_summary(row);status=&#x27;committed&#x27;</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>            self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            return dict(schema_version=1,project_id=project,submission_key=key,status=status,receipt=receipt,</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>                preparation=prep[&#x27;experiment_preparation&#x27;] if prep else None,writer_requires_reopen=self._failed,execution_authorized=False)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

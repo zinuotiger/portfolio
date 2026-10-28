@@ -1,0 +1,43 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/platform_store.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/platform_store.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 43 行</span></nav><main class="wrap source-page"><h1>pyharness/application/platform_store.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：c51d2c0eefa3f8d2bb6afd49a5bede0815ecd1d9<br>SHA-256（内容校验）：5ba9afd4908093bdfd839ff72489fd2de5b538edbca9740d4072123731612ee2</p><p><a href="../../../architecture-detailed.html?node=platform_store">PlatformConfigurationStore（平台配置存储）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 4 个类、函数与方法</summary><ul><li><a href="#L13">PlatformStore（类） · L13–L43</a><ul><li><a href="#L14">PlatformStore.__init__（方法） · L14–L16</a></li><li><a href="#L18">PlatformStore.transaction（方法） · L18–L39</a></li><li><a href="#L41">PlatformStore.read（方法） · L41–L43</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Atomic platform configuration only; never a second execution event store.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from contextlib import contextmanager</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import copy</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import json</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import threading</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.persistence import _FileLock</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.core.tenant_settings import TenantSettingsStore</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.core.sandbox import fail</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>class PlatformStore:</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    def __init__(self, root: Path):</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        self.root = root</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        self.lock = threading.RLock()</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    @contextmanager</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    def transaction(self):</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        with self.lock:</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>            self.root.mkdir(parents=True, exist_ok=True)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>            lock = _FileLock(self.root / &#x27;.platform.lock&#x27;)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>            if not lock.try_acquire():</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>                fail(&#x27;platform_busy&#x27;)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>            try:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>                path = self.root / &#x27;configuration.json&#x27;</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>                data = json.loads(path.read_text(&#x27;utf-8&#x27;)) if path.exists() else {</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>                    &#x27;platform_format_version&#x27;: 1, &#x27;agents&#x27;: {}, &#x27;versions&#x27;: {}, &#x27;knowledge&#x27;: {}, &#x27;connections&#x27;: {}}</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>                if data.get(&#x27;platform_format_version&#x27;) != 1:</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>                    fail(&#x27;platform_schema_unsupported&#x27;)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>                # Additive migration: old configuration remains readable.</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>                for key in (&#x27;session_preferences&#x27;, &#x27;deprecated_versions&#x27;, &#x27;preferences&#x27;):</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>                    data.setdefault(key, {})</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                previous = copy.deepcopy(data)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                yield data</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>                if data != previous:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                    TenantSettingsStore._atomic_write(path, json.dumps(data, ensure_ascii=False).encode(&#x27;utf-8&#x27;))</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            finally:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>                lock.release()</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    def read(self):</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        with self.transaction() as data:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>            return copy.deepcopy(data)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

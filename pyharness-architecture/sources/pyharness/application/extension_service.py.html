@@ -1,0 +1,304 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/extension_service.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/extension_service.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 304 行</span></nav><main class="wrap source-page"><h1>pyharness/application/extension_service.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：9e4dfa4d9e8da0a5eb00309a42f43b91b30b0181<br>SHA-256（内容校验）：878dec775369705afb8fd75e0d20b9117777e2366348d9c8bdb173d8c808673b</p><p><a href="../../../architecture-detailed.html?node=extension_workbench">ExtensionWorkbench（扩展与诊断工作台）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 18 个类、函数与方法</summary><ul><li><a href="#L16">ExtensionService（类） · L16–L303</a><ul><li><a href="#L19">ExtensionService.budget_dashboard（异步方法） · L19–L54</a></li><li><a href="#L56">ExtensionService.plugin_roots（方法） · L56–L67</a></li><li><a href="#L69">ExtensionService._plug_ctx_for（方法） · L69–L72</a></li><li><a href="#L74">ExtensionService.list_plugins（异步方法） · L74–L90</a></li><li><a href="#L92">ExtensionService.plugin_action（异步方法） · L92–L152</a></li><li><a href="#L154">ExtensionService._reset_preset_state（方法） · L154–L159</a></li><li><a href="#L161">ExtensionService.set_preset（异步方法） · L161–L181</a></li><li><a href="#L183">ExtensionService.skill_installer（方法） · L183–L193</a></li><li><a href="#L195">ExtensionService.search_skills（异步方法） · L195–L206</a></li><li><a href="#L208">ExtensionService.install_skill（异步方法） · L208–L229</a></li><li><a href="#L231">ExtensionService.remove_skill（异步方法） · L231–L242</a></li><li><a href="#L244">ExtensionService.rollback_skill（异步方法） · L244–L256</a></li><li><a href="#L258">ExtensionService.skill_versions（方法） · L258–L259</a></li><li><a href="#L261">ExtensionService.skills_mgr（方法） · L261–L276</a></li><li><a href="#L278">ExtensionService.list_skills（异步方法） · L278–L282</a></li><li><a href="#L284">ExtensionService.skill_detail（异步方法） · L284–L289</a></li><li><a href="#L291">ExtensionService.reload_skills（异步方法） · L291–L303</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;ExtensionService operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from typing import TYPE_CHECKING</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import inspect</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from typing import Any</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.session_access import _session_module</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>if TYPE_CHECKING:</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    pass</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.core.skill import SkillManager</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pyharness.core.url_policy import validate_service_url as _validate_registry_url</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from pyharness.core.lifecycle import admitted</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>class ExtensionService:</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    &quot;&quot;&quot;ExtensionService responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    @admitted</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    async def budget_dashboard(self, sid: str) -&gt; dict:</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        log_ = await self.require_session(sid)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        usages = [e for e in log_.events_after() if e.type == &quot;llm.usage&quot;]</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        used_in = sum(int(u.payload.get(&quot;in_tokens&quot;, 0)) for u in usages)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        used_out = sum(int(u.payload.get(&quot;out_tokens&quot;, 0)) for u in usages)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        base = {&quot;sid&quot;: sid, &quot;used_in_tokens&quot;: used_in,</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>                &quot;used_out_tokens&quot;: used_out,</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>                &quot;recent&quot;: [dict(u.payload) for u in usages[-20:]]}</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        budget = None</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        try:                                       # 优先本会话自己装配的预算门面</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>            spine, _log2 = await self.public_spine_for(sid)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            budget = getattr(spine, &quot;budget&quot;, None)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        except Exception:                          # noqa: BLE001 读面降级到 ctx</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            budget = None</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        if budget is None:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            # 共享 ctx.budget 作 fallback:owner 为空(外部单会话注入)或确属本会话</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            # 才用;owner 指向别的会话(多会话最后装配者)→ 拒用,防串场。</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>            owner = getattr(self.ctx, &quot;_budget_owner_sid&quot;, None)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            if owner is None or owner == sid:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>                budget = getattr(self.ctx, &quot;budget&quot;, None)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        snap = getattr(budget, &quot;snapshot&quot;, None)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        if not callable(snap):</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            return {**base, &quot;disabled&quot;: True,</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>                    &quot;reason&quot;: &quot;budget-gate-unassembled&quot;, &quot;limit_cny&quot;: None,</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>                    &quot;used_cny&quot;: None, &quot;warned&quot;: False, &quot;ratio&quot;: 0.0}</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        st = snap(sid)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        if inspect.isawaitable(st):</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            st = await st</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        limit = float(getattr(st, &quot;limit_cny&quot;, 0) or 0)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        used = float(getattr(st, &quot;used_cny&quot;, 0) or 0)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        ratio = (used / limit) if limit else 0.0</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        cfg = _session_module()._cfg_of(self.ctx)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        warn = float(getattr(getattr(cfg, &quot;budget&quot;, None), &quot;warn_ratio&quot;, 0.8))</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        return {**base, &quot;disabled&quot;: False, &quot;limit_cny&quot;: limit, &quot;used_cny&quot;: used,</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                &quot;warned&quot;: ratio &gt;= warn, &quot;ratio&quot;: round(ratio, 4)}</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    def plugin_roots(self) -&gt; list[Path]:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        roots = ([Path(__file__).resolve().parents[2] / &quot;examples&quot; / &quot;plugins&quot;]</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                 if self.tenant_id == &quot;default&quot; else [self.tenant_root() / &quot;plugins&quot;])</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        if self.tenant_id == &quot;default&quot;:</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            cfg = _session_module()._cfg_of(self.ctx)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            try:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                extra = getattr(getattr(cfg, &quot;plugins&quot;, None), &quot;dir&quot;, None)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>                if extra:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                    roots.append(Path(str(extra)).expanduser())</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            except Exception:                          # noqa: BLE001</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                pass</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        return roots</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code></code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    def _plug_ctx_for(spine: Any) -&gt; Any:</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        return SimpleNamespace(session=getattr(spine, &quot;session&quot;, None),</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                               bus=getattr(spine, &quot;bus&quot;, None))</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    @admitted</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    async def list_plugins(self) -&gt; dict:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        out: list[dict] = []</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        for sid, spine in self._engines.items():</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            mgr = getattr(spine, &quot;plugins&quot;, None)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            if mgr is None:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                continue</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            for pid, rec in dict(getattr(spine, &quot;plugin_state&quot;, {})).items():</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                spec = rec.get(&quot;spec&quot;)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                out.append({</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                    &quot;id&quot;: pid,</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                    &quot;state&quot;: mgr.state(pid),</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                    &quot;version&quot;: getattr(spec, &quot;manifest&quot;, {}).get(&quot;version&quot;, &quot;?&quot;),</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                    &quot;tools&quot;: list(rec.get(&quot;tool_names&quot;, ())),</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                    &quot;session&quot;: str(sid),</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                })</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        return {&quot;plugins&quot;: out, &quot;count&quot;: len(out)}</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    @admitted</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    async def plugin_action(self, kind: str, body: dict) -&gt; dict:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        self._ensure_open()</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        pid = str((body or {}).get(&quot;id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        if not pid:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            return {&quot;ok&quot;: False, &quot;error&quot;: &quot;缺插件 id&quot;}</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        if not self._engines:</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            return {&quot;ok&quot;: False, &quot;error&quot;: &quot;无活动会话(先新建/打开会话)&quot;}</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        from pyharness.core import plugin_loader as _pl</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        from pyharness.application.session_store import _plugin_within</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        pdir = ((Path(__file__).resolve().parents[2] / &quot;examples&quot; / &quot;plugins&quot;)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                if self.tenant_id == &quot;default&quot; else (self.tenant_root() / &quot;plugins&quot;)) / pid</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        results: list[dict] = []</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        for sid, spine in list(self._engines.items()):</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            if getattr(spine, &#x27;platform_runtime&#x27;, None) is not None:</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                results.append({&#x27;session&#x27;: str(sid), &#x27;ok&#x27;: False,</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                                &#x27;error&#x27;: &#x27;Platform Agent 禁止宿主插件生命周期操作&#x27;})</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                continue</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            mgr = spine.plugins</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            try:</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                if kind == &quot;load&quot;:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                    d = Path(str(body.get(&quot;dir&quot;) or pdir)).expanduser().resolve()</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                    if not d.exists():</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                        return {&quot;ok&quot;: False, &quot;error&quot;: f&quot;插件目录不存在:{d}&quot;}</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                    if not any(_plugin_within(d, r) for r in self.plugin_roots()):</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                        return {&quot;ok&quot;: False,</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                                &quot;error&quot;: &quot;插件目录必须在配置的插件根目录内&quot;}</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                    spec = _pl.load_spec(d)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                    await _pl.load_plugin(mgr, spec, self._plug_ctx_for(spine),</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                                          spine.tool_registry,</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                                          state=spine.plugin_state)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                elif kind == &quot;unload&quot;:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                    rec = spine.plugin_state.get(pid)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                    if rec is None:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                        results.append({&quot;session&quot;: str(sid), &quot;ok&quot;: False,</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                                        &quot;error&quot;: &quot;未安装&quot;})</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>                        continue</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>                    await _pl.unload_plugin(mgr, rec[&quot;spec&quot;],</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                                            self._plug_ctx_for(spine),</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                                            spine.tool_registry,</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                                            state=spine.plugin_state)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                elif kind == &quot;reload&quot;:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                    rec = spine.plugin_state.get(pid)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                    if rec is None:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                        results.append({&quot;session&quot;: str(sid), &quot;ok&quot;: False,</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                                        &quot;error&quot;: &quot;未安装&quot;})</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                        continue</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                    await _pl.reload_plugin(</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                        mgr, rec[&quot;spec&quot;], self._plug_ctx_for(spine),</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                        spine.tool_registry, state=spine.plugin_state,</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                        pkg_dir=Path(rec.get(&quot;path&quot;, &quot;&quot;)).parent or pdir)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                else:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                    return {&quot;ok&quot;: False, &quot;error&quot;: f&quot;未知操作:{kind}&quot;}</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                results.append({&quot;session&quot;: str(sid), &quot;ok&quot;: True,</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                                &quot;state&quot;: mgr.state(pid)})</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            except Exception as e:                     # noqa: BLE001</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                results.append({&quot;session&quot;: str(sid), &quot;ok&quot;: False,</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                                &quot;error&quot;: f&quot;{type(e).__name__}:{e}&quot;[:200]})</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        ok_all = all(r.get(&quot;ok&quot;) for r in results) and bool(results)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        return {&quot;ok&quot;: ok_all, &quot;results&quot;: results,</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                &quot;hint&quot;: &quot;新会话(重启程序)自动预载 examples/plugins/ 全部插件&quot;}</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code></code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    def _reset_preset_state(spine: Any) -&gt; None:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        from pyharness import engine as _eng</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        cfg, policy = _eng.compile_preset(spine, &#x27;strict&#x27;)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        spine.settings.security = cfg.security</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        spine.scope.policy = policy</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code></code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    @admitted</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    async def set_preset(self, body: dict) -&gt; dict:</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        self._ensure_open()</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        preset = str((body or {}).get(&#x27;preset&#x27;) or &#x27;&#x27;)</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        valid = (&#x27;strict&#x27;, &#x27;standard&#x27;, &#x27;readonly&#x27;, &#x27;locked&#x27;)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        if preset not in valid:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            return {&#x27;ok&#x27;:False,&#x27;error&#x27;:&#x27;invalid_preset&#x27;,&#x27;valid&#x27;:list(valid)}</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        if not self._engines:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            return {&#x27;ok&#x27;:False,&#x27;error&#x27;:&#x27;no_active_sessions&#x27;}</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        from pyharness import engine as _eng</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        # Validate every setter against detached copies first. A failed reset</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        # must never partially clear the live deny set or claim success.</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        try:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            prepared=[(spine,*_eng.compile_preset(spine,preset)) for spine in self._engines.values()]</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        except Exception:</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            return {&#x27;ok&#x27;:False,&#x27;error&#x27;:&#x27;preset_configuration_failed&#x27;}</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        for spine,cfg,policy in prepared:</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            spine.settings.security=cfg.security</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>            spine.scope.policy=policy</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        return {&#x27;ok&#x27;:True,&#x27;preset&#x27;:preset,&#x27;sessions&#x27;:len(prepared),</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                &#x27;hint&#x27;:&#x27;exec.* 等危险工具仍由治理与审批约束&#x27;}</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code></code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>    def skill_installer(self) -&gt; Any:</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        from pyharness.core.skill_registry import SkillInstaller</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        cfg = _session_module()._cfg_of(self.ctx)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        sk = getattr(cfg, &quot;skills&quot;, None)</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        root = (Path(str(getattr(sk, &quot;dir&quot;, &quot;~/.pyharness/skills&quot;))).expanduser()</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                if self.tenant_id == &quot;default&quot;</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                else self.tenant_root() / &quot;skills&quot;)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        return SkillInstaller(</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>            root,</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            max_package_bytes=int(getattr(sk, &quot;max_package_bytes&quot;, 5 * 1024 * 1024)),</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            max_files=int(getattr(sk, &quot;max_files&quot;, 200)))</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code></code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>    @admitted</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>    async def search_skills(self, query: str,</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>                            registry_url: str = &quot;&quot;) -&gt; dict:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        cfg = _session_module()._cfg_of(self.ctx)</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        url = str(registry_url or getattr(getattr(cfg, &quot;skills&quot;, None),</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>                                          &quot;registry_url&quot;, &quot;&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        if not url:</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            raise_code(&quot;CFG-601&quot;, field=&quot;skills.registry_url&quot;,</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>                       advice=&quot;未配置 Skill Registry URL&quot;)</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        url = _validate_registry_url(url)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        rows = await self.skill_installer().search(query, url)</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        return {&quot;registry_url&quot;: url, &quot;skills&quot;: rows, &quot;count&quot;: len(rows)}</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code></code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>    @admitted</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>    async def install_skill(self, sid: str, name: str, *, version: str = &quot;&quot;,</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                            registry_url: str = &quot;&quot;,</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>                            approved_by: str = &quot;user&quot;) -&gt; dict:</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        self._ensure_open()</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        cfg = _session_module()._cfg_of(self.ctx)</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        url = str(registry_url or getattr(getattr(cfg, &quot;skills&quot;, None),</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>                                          &quot;registry_url&quot;, &quot;&quot;) or &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        if not url:</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            raise_code(&quot;CFG-601&quot;, field=&quot;skills.registry_url&quot;,</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>                       advice=&quot;未配置 Skill Registry URL&quot;)</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        url = _validate_registry_url(url)</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        result = await self.skill_installer().install(</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>            name, registry_url=url, version=version or None,</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>            approved_by=approved_by)</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        log_ = await self.require_session(sid)</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        await log_.append(&quot;skill.installed&quot;, {</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>            &quot;name&quot;: result[&quot;name&quot;], &quot;version&quot;: result[&quot;version&quot;],</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>            &quot;sha256&quot;: result[&quot;sha256&quot;], &quot;source&quot;: result[&quot;source&quot;],</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>            &quot;approved_by&quot;: approved_by}, actor=&quot;user&quot;, sync=True)</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        self.skills_mgr().scan()</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        return result</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code></code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    @admitted</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>    async def remove_skill(self, sid: str, name: str, *,</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                           approved_by: str = &quot;user&quot;) -&gt; dict:</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        self._ensure_open()</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        result = self.skill_installer().remove(name, approved_by=approved_by)</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        if result.get(&quot;removed&quot;):</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>            log_ = await self.require_session(sid)</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>            await log_.append(&quot;skill.removed&quot;, {</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                &quot;name&quot;: name, &quot;version&quot;: result.get(&quot;version&quot;, &quot;&quot;),</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                &quot;approved_by&quot;: approved_by}, actor=&quot;user&quot;, sync=True)</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>            self.skills_mgr().scan()</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        return result</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code></code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>    @admitted</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>    async def rollback_skill(self, sid: str, name: str, version: str, *,</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                             approved_by: str = &quot;user&quot;) -&gt; dict:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        self._ensure_open()</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        result = self.skill_installer().rollback(</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>            name, version, approved_by=approved_by)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        log_ = await self.require_session(sid)</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        await log_.append(&quot;skill.rollback&quot;, {</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>            &quot;name&quot;: name, &quot;from_version&quot;: result.get(&quot;from_version&quot;, &quot;&quot;),</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>            &quot;to_version&quot;: version, &quot;approved_by&quot;: approved_by},</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>            actor=&quot;user&quot;, sync=True)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        self.skills_mgr().scan()</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        return result</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code></code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>    def skill_versions(self, name: str) -&gt; list[str]:</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        return self.skill_installer().versions(name)</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code></code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>    def skills_mgr(self) -&gt; SkillManager:</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        for spine in self._engines.values():</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            mgr = getattr(spine, &quot;skills&quot;, None)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            if mgr is not None and getattr(spine, &#x27;platform_runtime&#x27;, None) is None:</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>                return mgr</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        if self.tenant_id != &quot;default&quot;:</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>            return SkillManager([self.tenant_root() / &quot;skills&quot;])</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        roots = [Path(__file__).resolve().parents[2] / &quot;skills&quot;]</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        cfg = _session_module()._cfg_of(self.ctx)</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        try:</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            extra = getattr(getattr(cfg, &quot;skills&quot;, None), &quot;dir&quot;, None)</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>            if extra:</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>                roots.append(Path(str(extra)).expanduser())</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        except Exception:                              # noqa: BLE001</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>            pass</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>        return SkillManager(roots)</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code></code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>    @admitted</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>    async def list_skills(self) -&gt; dict:</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        mgr = self.skills_mgr()</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        rows = mgr.list()</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        return {&quot;skills&quot;: rows, &quot;count&quot;: len(rows), &quot;catalog&quot;: mgr.render_catalog()}</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code></code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>    @admitted</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>    async def skill_detail(self, name: str) -&gt; dict:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        data = self.skills_mgr().load(str(name))</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        return {&quot;ok&quot;: True, &quot;name&quot;: data[&quot;name&quot;],</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>                &quot;description&quot;: data[&quot;description&quot;], &quot;dir&quot;: data[&quot;dir&quot;],</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>                &quot;body&quot;: data[&quot;body&quot;]}</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code></code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>    @admitted</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>    async def reload_skills(self) -&gt; dict:</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>        counts = []</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>        for spine in self._engines.values():</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>            mgr = getattr(spine, &quot;skills&quot;, None)</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>            if mgr is not None:</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>                counts.append({&quot;session&quot;: str(getattr(</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                    getattr(spine, &quot;session&quot;, None), &quot;sid&quot;, &quot;?&quot;)),</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                    &quot;count&quot;: mgr.scan(), &quot;frozen&quot;: bool(getattr(mgr, &#x27;_frozen&#x27;, False))})</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        if not counts:</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>            counts.append({&quot;direct&quot;: True, &quot;count&quot;: self.skills_mgr().scan()})</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        return {&quot;ok&quot;: True, &quot;results&quot;: counts,</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>                &quot;hint&quot;: &quot;经典会话已显式刷新；正式平台任务保留其装配时固定技能，新任务使用新快照&quot;}</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

@@ -1,0 +1,116 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/continuation_runtime.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/continuation_runtime.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 116 行</span></nav><main class="wrap source-page"><h1>pyharness/application/continuation_runtime.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：47a8bfbd7d729482d4bd1fd71f9bc4aee5fabb1c<br>SHA-256（内容校验）：a6163523350f2c0844bafae54648b23dfe500722a61244683f1d240fb2b897c1</p><p><a href="../../../architecture-detailed.html?node=continuation">ExecutionContinuation（重新授权续行）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 18 个类、函数与方法</summary><ul><li><a href="#L15">ContinuationInputPreparation（类） · L15–L16</a></li><li><a href="#L19">write_identity（函数） · L19–L26</a></li><li><a href="#L29">ContinuationEffectRecorder（类） · L29–L42</a><ul><li><a href="#L30">ContinuationEffectRecorder.__init__（方法） · L30–L36</a></li><li><a href="#L38">ContinuationEffectRecorder._binding（方法） · L38–L42</a></li></ul></li><li><a href="#L45">ProductContinuationBoundary（类） · L45–L111</a><ul><li><a href="#L46">ProductContinuationBoundary.__init__（方法） · L46–L51</a></li><li><a href="#L53">ProductContinuationBoundary.checked（方法） · L53–L56</a></li><li><a href="#L58">ProductContinuationBoundary.timeout_for_task（方法） · L58–L58</a></li><li><a href="#L60">ProductContinuationBoundary._run_task（异步方法） · L60–L69</a></li><li><a href="#L71">ProductContinuationBoundary.continuation_messages（方法） · L71–L79</a></li><li><a href="#L81">ProductContinuationBoundary.configure_continuation_baseline（方法） · L81–L84</a></li><li><a href="#L86">ProductContinuationBoundary.create_sandbox（异步方法） · L86–L111</a><ul><li><a href="#L90">ProductContinuationBoundary.create_sandbox.gate（方法） · L90–L93</a></li><li><a href="#L94">ProductContinuationBoundary.create_sandbox.destination（方法） · L94–L98</a></li><li><a href="#L99">ProductContinuationBoundary.create_sandbox.verify（方法） · L99–L101</a></li><li><a href="#L102">ProductContinuationBoundary.create_sandbox.populate（方法） · L102–L106</a></li></ul></li></ul></li><li><a href="#L114">product_execution_boundary（函数） · L114–L116</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;One newly authorized root restores private state through the original runner.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from pathlib import PurePosixPath</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.execution_boundary import ProductExecutionBoundary</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.execution_effects import EffectRecorder</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.execution_delegation import normalized</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.execution_workspace import execution_prompt</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.continuation_workspace import derive_continuation_workspace</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.execution_state_restore import restore_state_workspace,verify_restored_workspace,root_identity</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.core.sandbox import WorkspaceInputPreparation</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.core.scope import BudgetLimits</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>class ContinuationInputPreparation(WorkspaceInputPreparation):</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    preserve_directory_modes=True</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>def write_identity(tool,args):</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    tool={&#x27;file.write&#x27;:&#x27;fs.write_file&#x27;,&#x27;file.patch&#x27;:&#x27;fs.patch&#x27;}.get(tool,tool)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    if tool==&#x27;fs.write_file&#x27;:</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        args=dict(path=PurePosixPath(args[&#x27;path&#x27;]).as_posix().casefold(),content=args[&#x27;content&#x27;],mode=&#x27;append&#x27; if args.get(&#x27;mode&#x27;)==&#x27;append&#x27; else &#x27;overwrite&#x27;)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    elif tool==&#x27;fs.patch&#x27;:args=dict(path=PurePosixPath(args[&#x27;path&#x27;]).as_posix().casefold(),old=args[&#x27;old&#x27;],new=args[&#x27;new&#x27;])</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    elif tool==&#x27;storage.kv&#x27; and args.get(&#x27;op&#x27;) not in (&#x27;get&#x27;,&#x27;list&#x27;):args=dict(args)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    else:return None</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    return digest_of(canonical(dict(tool=tool,args=args)))</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>class ContinuationEffectRecorder(EffectRecorder):</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    def __init__(self,boundary):</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        super().__init__(boundary.receipt[&#x27;execution_id&#x27;],boundary.receipt[&#x27;digest&#x27;],boundary.authorize)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        self.completed=set();events=boundary.context[&#x27;replay_events&#x27;];byseq={(e.session_id,e.seq):e for e in events}</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        for event in events:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            if event.type!=&#x27;execution.effect&#x27; or event.payload[&#x27;phase&#x27;]!=&#x27;returned&#x27;:continue</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            call=byseq[(event.session_id,event.payload[&#x27;tool_call_seq&#x27;])];key=write_identity(call.payload[&#x27;name&#x27;],call.payload[&#x27;args&#x27;])</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            if key is not None:self.completed.add(key)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    def _binding(self,ctx,binding,events):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        decision=super()._binding(ctx,binding,events);call=next(e for e in events if e.seq==binding.tool_call_seq)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        if write_identity(call.payload[&#x27;name&#x27;],call.payload[&#x27;args&#x27;]) in self.completed:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            raise_code(&#x27;GRD-402&#x27;,reason=&#x27;continuation_completed_action_replay_blocked&#x27;)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        return decision</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>class ProductContinuationBoundary(ProductExecutionBoundary):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    def __init__(self,projects,receipt,materials,context):</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        super().__init__(projects,receipt,materials);self.context=context</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        self.authorization=context[&#x27;authorization&#x27;];self.basis=self.authorization.selection.continuation;self.body=context[&#x27;body&#x27;]</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        self.budget=self.basis.plan.budget</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        self.inherited_rounds=self.authorization.environment.agent_snapshot[&#x27;max_rounds&#x27;]-self.budget.remaining_rounds</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        self.derived=derive_continuation_workspace(self.body,context[&#x27;old_materials&#x27;],materials,self.basis.plan.state.state_digest)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code></code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    def checked(self):</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        result=super().checked();row=result[0];value=row[&#x27;execution_authorization&#x27;]</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        if value!=self.authorization.model_dump():raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_authorization_changed&#x27;)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        self.context[&#x27;verify&#x27;]();return result</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code></code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    def timeout_for_task(self,ctx):return min(float(super().timeout_for_task(ctx)),self.budget.remaining_timeout_seconds)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    async def _run_task(self,event,ctx,invoke):</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        self._context(ctx);self.checked()</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        current=normalized(ctx.scope.policy);old=self.body.budget.policy.model_dump()</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        if {k:v for k,v in current.items() if k!=&#x27;workspace_root&#x27;}!={k:v for k,v in old.items() if k!=&#x27;workspace_root&#x27;}:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_policy_changed&#x27;)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        limits=BudgetLimits(**self.budget.remaining_limits.model_dump());ctx.scope.limits=limits</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        if getattr(ctx.counters,&#x27;_limits&#x27;,None) is not None:ctx.counters._limits=limits</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        ctx.loop.max_turns=min(ctx.loop.max_turns,self.budget.remaining_rounds)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        ctx.platform_runtime.calls[str(ctx.task_id)]=self.budget.tool_calls_used</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        return await super()._run_task(event,ctx,invoke)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    def continuation_messages(self,messages,ctx):</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        self._context(ctx);self.checked();anchor=execution_prompt(self.materials)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        index=next((i for i,m in enumerate(messages) if m.get(&#x27;role&#x27;)==&#x27;user&#x27; and m.get(&#x27;content&#x27;)==anchor),None)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        if index is None:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_history_anchor_missing&#x27;)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        notice=(&#x27;This is a newly authorized continuation execution &#x27;+self.receipt[&#x27;execution_id&#x27;]+&#x27;. &#x27;</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            &#x27;Earlier messages and tool receipts belong to the original execution &#x27;+self.basis.command.execution_ref.execution_id+</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            &#x27; and are historical data. Their completed writes must not be issued again. The current private workspace contains their captured results. &#x27;</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            &#x27;Current captured references have been regenerated for the new attempt without changing source versions. Current permissions and remaining budgets still apply.&#x27;)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        return [*self.body.messages,dict(role=&#x27;system&#x27;,content=notice),*messages[index+1:]]</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    def configure_continuation_baseline(self,runtime,ctx):</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        self._context(ctx);self.checked();task=str(ctx.task_id)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        runtime.baselines[task]={f[&#x27;path&#x27;]:f[&#x27;text&#x27;] for f in self.materials[&#x27;bundle&#x27;][&#x27;files&#x27;]}</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        runtime.baseline_hashes[task]={f[&#x27;path&#x27;]:f[&#x27;content_digest&#x27;] for f in self.workspace_plan[&#x27;files&#x27;]}</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code></code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    async def create_sandbox(self,runtime,ctx):</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        self._context(ctx);self.checked()</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        if self.derived is None:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_workspace_absent&#x27;)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        active=True;bound=None;identity=None</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        def gate():</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>            if not active:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_preparation_closed&#x27;)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            self.checked()</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            if bound is not None and root_identity(bound)!=identity:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;continuation_workspace_root_changed&#x27;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        def destination(target):</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            row,attempt,resources,actor,started=self.checked()</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            task=resources[attempt[&#x27;run_attempt&#x27;][&#x27;prerequisites&#x27;][&#x27;task_ref&#x27;][&#x27;product_task_id&#x27;]][&#x27;product_task&#x27;]</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            wi=self.projects.store._task_bound_input(resources,task,actor)[&#x27;workspace_input&#x27;]</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            self.projects.store._input_destination(target,resources,wi);gate()</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        def verify():</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            gate()</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            if bound is not None:verify_restored_workspace(bound,self.derived,gate)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        def populate(target):</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            nonlocal bound,identity</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            if bound is not None:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;continuation_preparation_already_used&#x27;)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>            destination(target);bound=target;identity=root_identity(bound)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            restore_state_workspace(bound,self.derived,gate);verify()</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        preparation=ContinuationInputPreparation(self.derived.digest,populate,verify,destination)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        try:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            return await runtime.platform.sandboxes.create_for_attempt(ctx.session.sid+&#x27;~&#x27;+str(ctx.task_id),runtime.definition.sandbox_profile,</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                preparation,authorize=self.authorize)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        finally:active=False</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>def product_execution_boundary(projects,receipt,materials):</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    context=getattr(projects.service,&#x27;_continuation_launches&#x27;,{}).get(receipt[&#x27;execution_id&#x27;])</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    return ProductContinuationBoundary(projects,receipt,materials,context) if context is not None else ProductExecutionBoundary(projects,receipt,materials)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

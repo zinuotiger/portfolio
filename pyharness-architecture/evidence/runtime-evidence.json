@@ -1,0 +1,3955 @@
+{
+  "snapshot": {
+    "repository": "https://github.com/zinuotiger/pyharness",
+    "commit": "f29863a664a78862b3bdf4e8f1224f36e8e5d67e",
+    "sourceRoot": "[local validation path omitted]"
+  },
+  "methodology": {
+    "scope": "Read-only source analysis of verified remote snapshot: engine*, core/*, governance/*, bus/*, events/*, persistence*.",
+    "verification": "Source bodies and exact line ranges read. No application execution and no behavioral test claims. Relationship direction denotes caller/event producer/derived data source; assembly does not imply execution.",
+    "layerLegend": {
+      "4": "装配服务",
+      "5": "运行时与治理",
+      "6": "持久化与执行后端"
+    },
+    "stageLegend": {
+      "1": "输入",
+      "2": "受理",
+      "3": "排队",
+      "4": "模型循环",
+      "5": "工具授权",
+      "6": "执行反馈",
+      "7": "持久化展示",
+      "8": "交付恢复"
+    }
+  },
+  "nodes": [
+    {
+      "id": "engine",
+      "layer": 4,
+      "name": "Engine Assembly（会话引擎装配）",
+      "purpose": "从配置与已有会话对象组装模型、工具、权限、治理、编排与持久化挂载。",
+      "inputs": [
+        "Settings 配置",
+        "SessionLog 会话",
+        "EventBus 总线",
+        "SessionStore 存储"
+      ],
+      "outputs": [
+        "EngineSpine 组件束",
+        "EngineRunner 运行器"
+      ],
+      "boundary": "生产 CLI/ACP 使用 attach_engine_to_ctx；应用服务使用 build_runner_components 复用存储。assemble_real_engine 为演示与探针入口。",
+      "tags": [
+        "main",
+        "config",
+        "deployment"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine.py",
+          "start": 305,
+          "end": 348,
+          "symbol": "attach_engine_to_ctx"
+        },
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 65,
+          "end": 108,
+          "symbol": "build_runner_components"
+        },
+        {
+          "path": "pyharness/engine.py",
+          "start": 254,
+          "end": 278,
+          "symbol": "assemble_real_engine"
+        }
+      ]
+    },
+    {
+      "id": "agent",
+      "layer": 5,
+      "name": "Agent Lifecycle（代理生命周期）",
+      "purpose": "拥有会话级上下文、激活注册、能力挂载与关闭清理。",
+      "inputs": [
+        "会话标识",
+        "EngineSpine",
+        "用户文本"
+      ],
+      "outputs": [
+        "Agent.ctx 上下文",
+        "session.created 事件",
+        "循环唤醒结果"
+      ],
+      "boundary": "Agent.submit 存在直接唤醒入口；生产任务队列运行器主要复用 Agent.ctx，不能将两条入口画成必经串行。",
+      "tags": [
+        "main",
+        "loop"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/agent.py",
+          "start": 212,
+          "end": 245,
+          "symbol": "Agent.enter"
+        },
+        {
+          "path": "pyharness/core/agent.py",
+          "start": 267,
+          "end": 298,
+          "symbol": "Agent.submit"
+        },
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 284,
+          "end": 299,
+          "symbol": "_agent_ctx_of"
+        }
+      ]
+    },
+    {
+      "id": "agent_loop",
+      "layer": 5,
+      "name": "Agent Loop（模型与工具循环）",
+      "purpose": "按单次输入重复派生历史、调用模型与逐工具执行；检查预算、轮数、取消和空转终态。",
+      "inputs": [
+        "已落盘 user.message",
+        "Agent.ctx",
+        "模型响应"
+      ],
+      "outputs": [
+        "RunResult 终态",
+        "agent.message",
+        "工具调用请求"
+      ],
+      "boundary": "一轮可含多个顺序工具步骤；工具反馈进入下一轮历史。纯文本完成、预算不足、错误、空转或取消均结束当前输入。",
+      "tags": [
+        "main",
+        "loop"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 156,
+          "end": 218,
+          "symbol": "AgentLoop.run"
+        },
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 251,
+          "end": 342,
+          "symbol": "AgentLoop.run_turn"
+        },
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 447,
+          "end": 486,
+          "symbol": "AgentLoop.wake"
+        }
+      ]
+    },
+    {
+      "id": "task_runner",
+      "layer": 4,
+      "name": "Task Runner Adapter（任务运行适配器）",
+      "purpose": "按任务入队窗口关联日志输入，懒装载能力并将任务交给循环或注入的任务生命周期。",
+      "inputs": [
+        "Task 队列条目",
+        "EngineSpine"
+      ],
+      "outputs": [
+        "RunResult",
+        "task_id 上下文",
+        "本轮来源"
+      ],
+      "boundary": "纯意图任务缺配套消息时补写 user.message；只在 complete 后尝试自动命名；段关闭后的证据另由订阅触发。",
+      "tags": [
+        "main",
+        "orchestration",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 16,
+          "end": 40,
+          "symbol": "_owned_task_message"
+        },
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 42,
+          "end": 151,
+          "symbol": "make_runner"
+        },
+        {
+          "path": "pyharness/core/task_runner.py",
+          "start": 12,
+          "end": 28,
+          "symbol": "TaskRunner / TaskLifecycle"
+        }
+      ]
+    },
+    {
+      "id": "task_queue",
+      "layer": 5,
+      "name": "Task Queue（会话任务队列）",
+      "purpose": "使用 FIFO 单飞泵接管已入队任务，维护任务终态、段锚、暂停与取消。",
+      "inputs": [
+        "任务意图",
+        "meta 来源",
+        "运行器"
+      ],
+      "outputs": [
+        "task.enqueued/started/completed/failed",
+        "segment.start/end",
+        "等待结果"
+      ],
+      "boundary": "每会话同一时间仅一个 running；队列满或关闭拒新；暂停只停止消费，不删除等待任务。",
+      "tags": [
+        "main",
+        "orchestration",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/task_queue.py",
+          "start": 167,
+          "end": 258,
+          "symbol": "TaskQueue.submit / _pump"
+        },
+        {
+          "path": "pyharness/core/task_queue.py",
+          "start": 261,
+          "end": 320,
+          "symbol": "TaskQueue._run_task"
+        }
+      ]
+    },
+    {
+      "id": "llm",
+      "layer": 5,
+      "name": "Model Client and Adapters（模型客户端与适配器）",
+      "purpose": "统一模型请求、流式响应、参数归一、出网预算检查、连接隔离与计量留痕。",
+      "inputs": [
+        "messages 上下文",
+        "可见工具 schema",
+        "连接配置"
+      ],
+      "outputs": [
+        "LLMResponse 文本和工具调用",
+        "llm.request/response/usage",
+        "临时 llm.chunk"
+      ],
+      "boundary": "模型请求不是 ToolCall，不走工具审批治理；生产客户端汇点有预算检查；模型连接采用秘密引用。",
+      "tags": [
+        "main",
+        "loop",
+        "config",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/llm.py",
+          "start": 95,
+          "end": 143,
+          "symbol": "LLMClient"
+        },
+        {
+          "path": "pyharness/core/llm.py",
+          "start": 145,
+          "end": 202,
+          "symbol": "LLMClient._egress_guard"
+        },
+        {
+          "path": "pyharness/core/llm_requests.py",
+          "start": 69,
+          "end": 139,
+          "symbol": "ModelRequests._budgeted_request / _chat"
+        },
+        {
+          "path": "pyharness/engine.py",
+          "start": 105,
+          "end": 163,
+          "symbol": "register_default_llm"
+        }
+      ]
+    },
+    {
+      "id": "llm_fallback",
+      "layer": 5,
+      "name": "Model Retry and Recovery（模型重试与恢复）",
+      "purpose": "对允许的错误退避重试、沿备用模型链降级，并用健康探针驱动主模型回切。",
+      "inputs": [
+        "模型链",
+        "请求",
+        "预算与重试配置"
+      ],
+      "outputs": [
+        "响应或 LLM-310",
+        "llm.retry",
+        "降级及恢复事件"
+      ],
+      "boundary": "LLM-304 业务错误不降级；重试与退避有上限；探针不计模型 token 用量。",
+      "tags": [
+        "loop",
+        "config"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/llm_fallback.py",
+          "start": 207,
+          "end": 294,
+          "symbol": "FallbackChain.chat_with_fallback / _retry_adapter"
+        },
+        {
+          "path": "pyharness/core/llm_fallback.py",
+          "start": 338,
+          "end": 381,
+          "symbol": "FallbackChain.probe_loop"
+        }
+      ]
+    },
+    {
+      "id": "tools_executor",
+      "layer": 5,
+      "name": "Tool Executor（工具执行管道）",
+      "purpose": "串联定义及参数校验、治理授权、条件审批、Provider 执行、输出校验及结果留痕。",
+      "inputs": [
+        "ToolCall",
+        "Agent.ctx",
+        "工具定义与 Provider"
+      ],
+      "outputs": [
+        "ExecResult",
+        "tool.call/result/error",
+        "执行副作用"
+      ],
+      "boundary": "拒绝或审批失败不执行 Provider；超时取消只能停止等待或协作取消，已经发生的副作用不假装回滚。",
+      "tags": [
+        "main",
+        "loop",
+        "governance"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tools_executor.py",
+          "start": 336,
+          "end": 454,
+          "symbol": "ToolExecutor.execute"
+        },
+        {
+          "path": "pyharness/core/tool_invocation.py",
+          "start": 19,
+          "end": 54,
+          "symbol": "ToolInvocation._run_provider"
+        },
+        {
+          "path": "pyharness/core/tool_invocation.py",
+          "start": 126,
+          "end": 168,
+          "symbol": "ToolInvocation._finalize"
+        }
+      ]
+    },
+    {
+      "id": "tool_registry",
+      "layer": 4,
+      "name": "Tool Registry（工具定义与实现注册表）",
+      "purpose": "校验并登记工具契约、编译参数模型、绑定 Provider，并按 Scope 输出可见 schema。",
+      "inputs": [
+        "ToolDefinition",
+        "Provider",
+        "Scope"
+      ],
+      "outputs": [
+        "工具查找",
+        "已校验参数",
+        "可见 schema"
+      ],
+      "boundary": "登记与绑定不执行工具；实际运行由 ToolExecutor 解析 Provider 后负责。",
+      "tags": [
+        "config",
+        "loop",
+        "mcp"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tools_registry.py",
+          "start": 154,
+          "end": 215,
+          "symbol": "ToolRegistry.register_tool"
+        },
+        {
+          "path": "pyharness/core/tools_registry.py",
+          "start": 342,
+          "end": 379,
+          "symbol": "ToolRegistry.validate_args / schemas_for"
+        }
+      ]
+    },
+    {
+      "id": "registry",
+      "layer": 4,
+      "name": "Capability Registry（能力索引注册表）",
+      "purpose": "维护 plugin、tool、capability 三类索引与保留名、查重和卸载纪律。",
+      "inputs": [
+        "能力对象与类别",
+        "名字"
+      ],
+      "outputs": [
+        "按名字寻址对象",
+        "瞬时 registry.updated"
+      ],
+      "boundary": "它与 core ToolRegistry 是两种不同职责的注册表；registry.updated 仅在内存总线上，不是工具执行证明。",
+      "tags": [
+        "config",
+        "orchestration"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/bus/registry.py",
+          "start": 38,
+          "end": 86,
+          "symbol": "Registry"
+        }
+      ]
+    },
+    {
+      "id": "event_bus",
+      "layer": 4,
+      "name": "Event Bus（进程内事件分发总线）",
+      "purpose": "按精确或通配订阅分发事件，支持顺序、瀑布、并行与发送方 FIFO 背压。",
+      "inputs": [
+        "已注册类型",
+        "事件信封或临时载荷",
+        "订阅者"
+      ],
+      "outputs": [
+        "订阅回调",
+        "瞬时流式通知"
+      ],
+      "boundary": "总线只中转，不校验业务 payload、不直接持久化；强同步事件顺序分发，订阅者异常隔离。",
+      "tags": [
+        "main",
+        "trace",
+        "deployment"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/bus/event_bus.py",
+          "start": 1,
+          "end": 12,
+          "symbol": "EventBus boundary"
+        },
+        {
+          "path": "pyharness/bus/event_bus.py",
+          "start": 155,
+          "end": 176,
+          "symbol": "EventBus.subscribe"
+        },
+        {
+          "path": "pyharness/bus/event_bus.py",
+          "start": 200,
+          "end": 255,
+          "symbol": "EventBus._dispatch"
+        },
+        {
+          "path": "pyharness/bus/event_bus.py",
+          "start": 320,
+          "end": 365,
+          "symbol": "EventBus.emit_ordered"
+        }
+      ]
+    },
+    {
+      "id": "event_contract",
+      "layer": 4,
+      "name": "Event Contract（事件信封与词表契约）",
+      "purpose": "统一信封字段、类型和 payload 校验、会话状态及连续序号分配。",
+      "inputs": [
+        "事件类别",
+        "payload",
+        "会话归属",
+        "SeqState"
+      ],
+      "outputs": [
+        "已校验 Envelope"
+      ],
+      "boundary": "seq、ts 与 tenant_id 由框架提供；临时类型不能写入会话日志。",
+      "tags": [
+        "trace",
+        "governance"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/events/envelope.py",
+          "start": 33,
+          "end": 99,
+          "symbol": "Envelope / validate_envelope"
+        },
+        {
+          "path": "pyharness/core/session.py",
+          "start": 338,
+          "end": 409,
+          "symbol": "SessionLog.append"
+        }
+      ]
+    },
+    {
+      "id": "session",
+      "layer": 6,
+      "name": "Session Event Log（会话事件日志与历史投影）",
+      "purpose": "提供唯一事件追加入口，并从日志重放、编辑事件和压缩声明派生模型历史。",
+      "inputs": [
+        "结构化事件",
+        "持久化重放",
+        "窗口预算"
+      ],
+      "outputs": [
+        "有序 Envelope",
+        "derive_messages",
+        "事件范围查询"
+      ],
+      "boundary": "持久化事件追加后分发总线，强同步 flush 成功才返回；模型历史是投影，不能另造可变真源。",
+      "tags": [
+        "main",
+        "loop",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/session.py",
+          "start": 167,
+          "end": 176,
+          "symbol": "SessionLog._dispatch / _flush"
+        },
+        {
+          "path": "pyharness/core/session.py",
+          "start": 338,
+          "end": 449,
+          "symbol": "SessionLog.append / derive_messages"
+        }
+      ]
+    },
+    {
+      "id": "knowledge",
+      "layer": 6,
+      "name": "Knowledge Retrieval Providers（知识检索提供器）",
+      "purpose": "默认逐行精确关键词检索；可选显式远程 RAG 查询，并校验返回引文属于授权的当前文档。",
+      "inputs": [
+        "查询文本",
+        "授权文档与版本",
+        "可选端点和秘密引用"
+      ],
+      "outputs": [
+        "最多 10 条来源行号引文",
+        "answer_allowed",
+        "无可靠证据原因"
+      ],
+      "boundary": "没有内置 embedding 模型或向量数据库；远程端点不隐式补缺或回退，健康探测结果不能作为回答证据。",
+      "tags": [
+        "rag",
+        "inputs"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/knowledge.py",
+          "start": 29,
+          "end": 70,
+          "symbol": "ExactKeywordKnowledgeProvider / RemoteRagKnowledgeProvider"
+        },
+        {
+          "path": "pyharness/core/knowledge.py",
+          "start": 120,
+          "end": 169,
+          "symbol": "RemoteRagKnowledgeProvider.probe / query"
+        }
+      ]
+    },
+    {
+      "id": "mcp",
+      "layer": 6,
+      "name": "Model Context Protocol Client（外部工具协议客户端）",
+      "purpose": "使用 stdio 传输完成握手、发现工具、桥接定义和 Provider，并执行 tools/call。",
+      "inputs": [
+        "配置的服务器命令",
+        "允许工具名单",
+        "工具实参"
+      ],
+      "outputs": [
+        "mcp.server.tool 定义",
+        "远端文本结果"
+      ],
+      "boundary": "tools/list 只发现并登记；tools/call 才是远程执行。桥接工具 danger=high，进入现有授权与审批管道。",
+      "tags": [
+        "mcp",
+        "governance",
+        "deployment"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/mcp.py",
+          "start": 52,
+          "end": 88,
+          "symbol": "StdioTransport"
+        },
+        {
+          "path": "pyharness/core/mcp.py",
+          "start": 216,
+          "end": 316,
+          "symbol": "McpClient / _McpProvider"
+        },
+        {
+          "path": "pyharness/engine_plugins.py",
+          "start": 41,
+          "end": 60,
+          "symbol": "_preload_mcp"
+        }
+      ]
+    },
+    {
+      "id": "guard",
+      "layer": 5,
+      "name": "Guard Chain（权限守卫链）",
+      "purpose": "先检查 Scope 可见性，再按注册顺序评估 schema、路径、凭据、执行、覆写、网络与危险等级规则。",
+      "inputs": [
+        "ToolCall",
+        "Scope",
+        "配置规则"
+      ],
+      "outputs": [
+        "allow/reject/approval",
+        "guard.evaluated",
+        "guard.rejected"
+      ],
+      "boundary": "首个非 allow 短路；critical 不可审批；守卫只裁决，不执行 Provider。与 PolicyEngine 共享同一条链。",
+      "tags": [
+        "governance",
+        "loop"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tools_guard.py",
+          "start": 216,
+          "end": 311,
+          "symbol": "GuardChain._evaluate_full"
+        },
+        {
+          "path": "pyharness/core/guard_builtin.py",
+          "start": 8,
+          "end": 47,
+          "symbol": "build_builtin_chain"
+        },
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 22,
+          "end": 63,
+          "symbol": "_build_governance"
+        }
+      ]
+    },
+    {
+      "id": "policy",
+      "layer": 5,
+      "name": "Governance Authorization（策略与治理授权）",
+      "purpose": "将同一次守卫求值与当前策略指纹、主体身份、调用摘要组成决策，并写入决策和凭证。",
+      "inputs": [
+        "ToolCall",
+        "Policy",
+        "Principal",
+        "输入摘要",
+        "可选 prior 与审批引用"
+      ],
+      "outputs": [
+        "Decision",
+        "decision.issued",
+        "凭证触发"
+      ],
+      "boundary": "治理层没有工具执行权。未声明驱动通道会 fail-closed；审批后新决策 supersedes 先前决策。",
+      "tags": [
+        "governance",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/governance/context.py",
+          "start": 60,
+          "end": 156,
+          "symbol": "GovernanceContext.principal_of / authorize"
+        },
+        {
+          "path": "pyharness/governance/policy.py",
+          "start": 144,
+          "end": 205,
+          "symbol": "Policy"
+        },
+        {
+          "path": "pyharness/governance/decision.py",
+          "start": 297,
+          "end": 339,
+          "symbol": "DecisionEngine.decide"
+        }
+      ]
+    },
+    {
+      "id": "approval",
+      "layer": 5,
+      "name": "Approval Lifecycle（审批请求与裁决）",
+      "purpose": "挂起待批工具调用，记录审批身份与参数绑定，处理人工裁决、期限、会话信任和队列暂停恢复。",
+      "inputs": [
+        "调用及参数摘要",
+        "通道",
+        "裁决",
+        "期限"
+      ],
+      "outputs": [
+        "granted/denied/timeout",
+        "approval 事件",
+        "队列暂停恢复"
+      ],
+      "boundary": "批准不等于执行；执行器重新授权并校验绑定。无通道拒绝，不自动当作批准；用户询问是另一个组件。",
+      "tags": [
+        "governance",
+        "orchestration"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/approval.py",
+          "start": 181,
+          "end": 245,
+          "symbol": "ApprovalProvider.request"
+        },
+        {
+          "path": "pyharness/core/approval.py",
+          "start": 341,
+          "end": 366,
+          "symbol": "queue pause/resume"
+        },
+        {
+          "path": "pyharness/core/tool_approval.py",
+          "start": 11,
+          "end": 80,
+          "symbol": "ToolApproval._approval_round"
+        }
+      ]
+    },
+    {
+      "id": "receipt",
+      "layer": 5,
+      "name": "Decision Receipts（决策凭证完整性链）",
+      "purpose": "从已发生的治理决策生成带内容哈希及前序哈希的离线核验凭证。",
+      "inputs": [
+        "Decision",
+        "会话日志前序凭证"
+      ],
+      "outputs": [
+        "receipt.emitted",
+        "DecisionReceipt"
+      ],
+      "boundary": "D1 的待审批中间决策不产凭证，审批后 D2 才产 approval 凭证；signature 字段为空，不能宣称公钥签名。",
+      "tags": [
+        "governance",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/governance/receipt.py",
+          "start": 61,
+          "end": 104,
+          "symbol": "receipt_kind_of / content_hash_for"
+        },
+        {
+          "path": "pyharness/governance/receipt.py",
+          "start": 107,
+          "end": 159,
+          "symbol": "DecisionReceipt"
+        }
+      ]
+    },
+    {
+      "id": "persistence",
+      "layer": 6,
+      "name": "JSON Lines Persistence（追加日志持久化与恢复）",
+      "purpose": "单写者写入 JSONL，普通事件攒批、关键事件同步，保留失败重试队列并支持重放和修复。",
+      "inputs": [
+        "Envelope",
+        "flush 请求",
+        "会话存储目录"
+      ],
+      "outputs": [
+        "JSONL 文件",
+        "重放事件",
+        "修复报告"
+      ],
+      "boundary": "物理存储真源，进程锁防第二写者；间隔 flush 任务由 EngineSpine 持有；失败拒新而保留旧缓冲。",
+      "tags": [
+        "trace",
+        "deployment"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/persistence.py",
+          "start": 263,
+          "end": 303,
+          "symbol": "SessionStore"
+        },
+        {
+          "path": "pyharness/persistence.py",
+          "start": 490,
+          "end": 508,
+          "symbol": "session_recorder"
+        },
+        {
+          "path": "pyharness/persistence.py",
+          "start": 529,
+          "end": 567,
+          "symbol": "open_store"
+        },
+        {
+          "path": "pyharness/persistence_writer.py",
+          "start": 16,
+          "end": 87,
+          "symbol": "PersistenceWriter.append"
+        }
+      ]
+    },
+    {
+      "id": "sandbox",
+      "layer": 6,
+      "name": "Sandbox Backends（执行工作区与沙箱后端）",
+      "purpose": "创建受控工作区并路由 disabled、host_approved、isolated Docker 或配置的 remote 后端。",
+      "inputs": [
+        "SandboxProfile",
+        "run_id",
+        "可信输入准备",
+        "命令或文件操作"
+      ],
+      "outputs": [
+        "SandboxRecord",
+        "隔离工作区",
+        "执行结果与快照"
+      ],
+      "boundary": "host_approved 明确不保证操作系统、网络和内存隔离；Docker 使用无网络、降权与资源限制；远程断连不回退本机。",
+      "tags": [
+        "deployment",
+        "governance",
+        "inputs"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/sandbox.py",
+          "start": 201,
+          "end": 238,
+          "symbol": "SandboxBackend / HostApprovedSandboxBackend"
+        },
+        {
+          "path": "pyharness/core/sandbox.py",
+          "start": 294,
+          "end": 327,
+          "symbol": "DockerSandboxBackend"
+        },
+        {
+          "path": "pyharness/core/sandbox.py",
+          "start": 416,
+          "end": 483,
+          "symbol": "SandboxManager"
+        },
+        {
+          "path": "pyharness/core/remote_sandbox.py",
+          "start": 27,
+          "end": 69,
+          "symbol": "RemoteSandboxBackend"
+        }
+      ]
+    },
+    {
+      "id": "subagent",
+      "layer": 5,
+      "name": "Subagent Orchestration（子代理委派与回收）",
+      "purpose": "校验深度、并发、工具子集和预算后建立独立子会话，执行并提供 join、cancel 和状态。",
+      "inputs": [
+        "SubagentSpec",
+        "父 Scope",
+        "父任务锚"
+      ],
+      "outputs": [
+        "sub_id",
+        "独立日志",
+        "子代理结果或失败"
+      ],
+      "boundary": "子 Scope 只收窄；独立日志、总线、审批提供器与工作区；正常循环停止不自动算成功，必须 reason=complete。",
+      "tags": [
+        "orchestration",
+        "loop",
+        "governance"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/subagent_execution.py",
+          "start": 15,
+          "end": 104,
+          "symbol": "SubagentExecution.spawn"
+        },
+        {
+          "path": "pyharness/core/subagent_context.py",
+          "start": 63,
+          "end": 111,
+          "symbol": "_default_child_scope"
+        },
+        {
+          "path": "pyharness/core/orchestration.py",
+          "start": 215,
+          "end": 254,
+          "symbol": "EngineSubagentRunner.child_session"
+        },
+        {
+          "path": "pyharness/core/orchestration.py",
+          "start": 291,
+          "end": 353,
+          "symbol": "EngineSubagentRunner.run_child"
+        }
+      ]
+    },
+    {
+      "id": "workflow",
+      "layer": 5,
+      "name": "Workflow Runner（顺序工作流运行器）",
+      "purpose": "依次提交步骤意图并等待真实任务结果，记录每一步 started、done 或 failed。",
+      "inputs": [
+        "步骤意图序列",
+        "submit 适配器",
+        "stop_on_fail"
+      ],
+      "outputs": [
+        "步骤结果集合",
+        "workflow.step"
+      ],
+      "boundary": "核心 WorkflowRunner 为顺序执行；其失败策略可选继续或首败停止，不是通用并行依赖图调度器。",
+      "tags": [
+        "orchestration",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/workflow.py",
+          "start": 20,
+          "end": 88,
+          "symbol": "queue_submit_adapter / WorkflowRunner"
+        }
+      ]
+    },
+    {
+      "id": "schedule",
+      "layer": 5,
+      "name": "Scheduler（定时任务调度）",
+      "purpose": "管理已登记时间规则，到点先记录触发及用户消息，再向真实任务队列提交模板意图。",
+      "inputs": [
+        "定时规则",
+        "意图模板",
+        "时钟",
+        "TaskQueue"
+      ],
+      "outputs": [
+        "schedule.trigger",
+        "user.message",
+        "队列任务"
+      ],
+      "boundary": "触发复用原工具治理和预算；未接队列明确失败，入队失败写 system.error，不假装执行成功。",
+      "tags": [
+        "orchestration",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/schedule.py",
+          "start": 192,
+          "end": 225,
+          "symbol": "Scheduler.register"
+        },
+        {
+          "path": "pyharness/core/schedule.py",
+          "start": 327,
+          "end": 353,
+          "symbol": "Scheduler._fire"
+        },
+        {
+          "path": "pyharness/engine.py",
+          "start": 221,
+          "end": 243,
+          "symbol": "activate_orchestration"
+        }
+      ]
+    },
+    {
+      "id": "compaction",
+      "layer": 5,
+      "name": "Context Compaction（上下文任务段压缩）",
+      "purpose": "在请求边界选择历史任务段生成摘要，并追加压缩声明改变后续历史投影。",
+      "inputs": [
+        "旧任务段",
+        "窗口需求",
+        "摘要模型"
+      ],
+      "outputs": [
+        "context.compacted",
+        "CompactReport"
+      ],
+      "boundary": "不删除或重写原 JSONL；仅请求边界运行。受保护段、重叠区间和降级摘要规则约束可压缩内容。",
+      "tags": [
+        "loop",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/compaction.py",
+          "start": 340,
+          "end": 443,
+          "symbol": "Compactor._summarize_segment / compact"
+        },
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 477,
+          "end": 485,
+          "symbol": "AgentLoop.wake compaction hook"
+        }
+      ]
+    },
+    {
+      "id": "system_prompt",
+      "layer": 5,
+      "name": "System Prompt Assembly（系统提示与上下文窗口装配）",
+      "purpose": "从受控配置和 Scope 生成系统段、能力目录、目标与技能段，预留护栏段并裁剪旧历史。",
+      "inputs": [
+        "derive_messages",
+        "Scope",
+        "工具 schema",
+        "目标和技能目录"
+      ],
+      "outputs": [
+        "模型 messages",
+        "裁剪与压缩提示事件"
+      ],
+      "boundary": "角色和权限变量不从工具结果或模型文本采集；护栏缺失拒发本次模型请求。",
+      "tags": [
+        "loop",
+        "config",
+        "inputs"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/system_prompt.py",
+          "start": 408,
+          "end": 458,
+          "symbol": "SystemPromptAssembler._vars"
+        },
+        {
+          "path": "pyharness/core/system_prompt.py",
+          "start": 526,
+          "end": 566,
+          "symbol": "SystemPromptAssembler.assemble"
+        }
+      ]
+    },
+    {
+      "id": "budget",
+      "layer": 5,
+      "name": "Usage and Budget View（用量预算与观测）",
+      "purpose": "将共享用量计数器及限制投影为任务预算状态，模型请求前预留与结束后结算用量。",
+      "inputs": [
+        "UsageCounters",
+        "BudgetLimits",
+        "Scope"
+      ],
+      "outputs": [
+        "BudgetSnapshot",
+        "ok/warn/exhausted",
+        "用量账本"
+      ],
+      "boundary": "BudgetGate 为读取门面；真正阻断由 Scope 与模型请求预算闸执行，不能把仪表盘读取画成执行入口。",
+      "tags": [
+        "loop",
+        "governance",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/budget.py",
+          "start": 56,
+          "end": 120,
+          "symbol": "BudgetGate"
+        },
+        {
+          "path": "pyharness/core/llm_requests.py",
+          "start": 69,
+          "end": 89,
+          "symbol": "ModelRequests._budgeted_request"
+        },
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 95,
+          "end": 108,
+          "symbol": "shared counters wiring"
+        }
+      ]
+    },
+    {
+      "id": "scope",
+      "layer": 5,
+      "name": "Session Scope（会话权限与预算边界）",
+      "purpose": "限定工具集合、拒绝列表、工作区、网络和任务预算，并支持只收紧的权限更新。",
+      "inputs": [
+        "ScopePolicy",
+        "BudgetLimits",
+        "共享用量计数器"
+      ],
+      "outputs": [
+        "工具可见性",
+        "权限快照",
+        "预算终态信号"
+      ],
+      "boundary": "strict 只开放允许域；critical 不可审批；子任务继承预算祖先限制，不能通过派生子代理绕过父预算。",
+      "tags": [
+        "governance",
+        "loop",
+        "inputs"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/scope.py",
+          "start": 202,
+          "end": 235,
+          "symbol": "Scope.can_use / tighten"
+        },
+        {
+          "path": "pyharness/core/scope.py",
+          "start": 257,
+          "end": 304,
+          "symbol": "Scope.budget_state / check_budget"
+        }
+      ]
+    },
+    {
+      "id": "goals_todos",
+      "layer": 5,
+      "name": "Goals and Todos（目标核对与待办管理）",
+      "purpose": "以事件维护目标、检查项、待办与关联任务，提供目标段给系统提示。",
+      "inputs": [
+        "目标与检查项",
+        "待办操作",
+        "task_id",
+        "任务失败事实"
+      ],
+      "outputs": [
+        "goal 事件",
+        "todo.updated",
+        "活动目标与完成核对"
+      ],
+      "boundary": "目标完成需进度、检查项与关联任务验证；待办被勾选只是其自己的状态，不等同实际交付验收。",
+      "tags": [
+        "orchestration",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/goal.py",
+          "start": 227,
+          "end": 251,
+          "symbol": "GoalManager.goal_create"
+        },
+        {
+          "path": "pyharness/core/goal.py",
+          "start": 337,
+          "end": 364,
+          "symbol": "GoalManager.verify_completion"
+        },
+        {
+          "path": "pyharness/core/todo.py",
+          "start": 52,
+          "end": 107,
+          "symbol": "TodoManager.apply_op"
+        }
+      ]
+    },
+    {
+      "id": "skills",
+      "layer": 4,
+      "name": "Skill Catalog（技能目录与内容装载）",
+      "purpose": "扫描 SKILL.md 与元数据，保留源哈希，提供目录、快照和按名装载。",
+      "inputs": [
+        "仓库及用户技能目录",
+        "技能名"
+      ],
+      "outputs": [
+        "技能目录",
+        "技能正文",
+        "冻结快照"
+      ],
+      "boundary": "技能装载返回文本，不直接执行代码；正文具有工具输出长度上限。",
+      "tags": [
+        "config",
+        "orchestration"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/skill.py",
+          "start": 63,
+          "end": 103,
+          "symbol": "SkillManager.scan"
+        },
+        {
+          "path": "pyharness/core/skill.py",
+          "start": 149,
+          "end": 178,
+          "symbol": "SkillManager.load / render_catalog"
+        }
+      ]
+    },
+    {
+      "id": "plugins",
+      "layer": 4,
+      "name": "Plugin Lifecycle（插件生命周期与工具桥接）",
+      "purpose": "发现插件包并安装、激活、桥接工具，失败回滚已登记状态。",
+      "inputs": [
+        "插件目录与 manifest",
+        "PluginManager",
+        "ToolRegistry"
+      ],
+      "outputs": [
+        "激活能力",
+        "注册工具",
+        "插件状态"
+      ],
+      "boundary": "预载是装配行为，不是用户工具执行；单个预载失败隔离告警。",
+      "tags": [
+        "config",
+        "deployment"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_plugins.py",
+          "start": 11,
+          "end": 39,
+          "symbol": "_preload_plugins"
+        },
+        {
+          "path": "pyharness/core/plugin_loader.py",
+          "start": 87,
+          "end": 126,
+          "symbol": "load_plugin"
+        }
+      ]
+    },
+    {
+      "id": "ask",
+      "layer": 5,
+      "name": "User Question Provider（用户反问与答复）",
+      "purpose": "将问题和候选项写为 user.question，等待用户选择或自由文本再返回工具结果。",
+      "inputs": [
+        "question",
+        "options",
+        "答复",
+        "期限"
+      ],
+      "outputs": [
+        "问题事件",
+        "答复文本",
+        "超时说明"
+      ],
+      "boundary": "反问获取信息，不代表工具权限审批；没有用户答复会返回超时说明。",
+      "tags": [
+        "inputs",
+        "orchestration"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/user_ask.py",
+          "start": 35,
+          "end": 65,
+          "symbol": "AskProvider.request"
+        },
+        {
+          "path": "pyharness/core/tool_ask.py",
+          "start": 16,
+          "end": 29,
+          "symbol": "_AskHandle.handle"
+        }
+      ]
+    },
+    {
+      "id": "spill_kv",
+      "layer": 6,
+      "name": "Session Spill and Key Value Storage（会话长输出与键值存储）",
+      "purpose": "将长工具输出保存到会话私有文件并回传引用，另提供会话键值 JSON 存储。",
+      "inputs": [
+        "长文本及类型",
+        "键值操作",
+        "会话目录"
+      ],
+      "outputs": [
+        "spill 文件与摘要引用",
+        "会话 kv.json"
+      ],
+      "boundary": "长输出有单文件与会话容量闸及脱敏；KV 是独立数据附件，不是事件日志事实替代品。",
+      "tags": [
+        "loop",
+        "trace",
+        "deployment"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/spill.py",
+          "start": 138,
+          "end": 192,
+          "symbol": "spill.put"
+        },
+        {
+          "path": "pyharness/core/kv.py",
+          "start": 32,
+          "end": 77,
+          "symbol": "SessionKV"
+        },
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 301,
+          "end": 333,
+          "symbol": "_activate_storage_caps"
+        }
+      ]
+    },
+    {
+      "id": "session_query",
+      "layer": 6,
+      "name": "Session Full Text Index（会话全文派生索引）",
+      "purpose": "将日志事件投影到 SQLite FTS5，提供查询、批量更新、重建与删除会话索引。",
+      "inputs": [
+        "可重放会话",
+        "总线事件",
+        "查询"
+      ],
+      "outputs": [
+        "全文检索结果",
+        "可重建 SQLite 索引"
+      ],
+      "boundary": "索引不是日志真源；不能写回 JSONL，能整体重建。与文档 Knowledge 检索是不同模块。",
+      "tags": [
+        "trace",
+        "rag"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/session_query.py",
+          "start": 136,
+          "end": 152,
+          "symbol": "SessionQueryIndex"
+        },
+        {
+          "path": "pyharness/core/query_lifecycle.py",
+          "start": 15,
+          "end": 79,
+          "symbol": "QueryLifecycle.enter"
+        }
+      ]
+    },
+    {
+      "id": "process_backend",
+      "layer": 6,
+      "name": "Process and Terminal Tools（进程与终端工具后端）",
+      "purpose": "提供一次性 shell、Python、真终端及受会话归属约束的后台进程生命周期。",
+      "inputs": [
+        "命令或代码",
+        "工作区",
+        "时限",
+        "会话身份"
+      ],
+      "outputs": [
+        "stdout/stderr/exit code",
+        "进程令牌",
+        "终端输出"
+      ],
+      "boundary": "严格策略下 exec 工具不可用；本机进程执行不是 Docker 隔离本身，平台运行时可拦截路由至沙箱。",
+      "tags": [
+        "loop",
+        "deployment",
+        "governance"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tool_exec.py",
+          "start": 60,
+          "end": 150,
+          "symbol": "exec_shell / exec_python / exec_pty / proc_start"
+        },
+        {
+          "path": "pyharness/core/tool_invocation.py",
+          "start": 19,
+          "end": 36,
+          "symbol": "platform runtime interception"
+        }
+      ]
+    },
+    {
+      "id": "web_tools",
+      "layer": 6,
+      "name": "Web Retrieval Tools（受限网络搜索与抓取）",
+      "purpose": "调用显式搜索后端或按逐跳域名许可抓取网页，限制次数、大小与重定向。",
+      "inputs": [
+        "查询或 URL",
+        "允许域名",
+        "搜索后端"
+      ],
+      "outputs": [
+        "搜索摘要",
+        "网页文本",
+        "可选长输出引用"
+      ],
+      "boundary": "无配置后端明确失败；抓取每次重定向重新检查目标域名，HTTP 失败不自动机械重试。",
+      "tags": [
+        "inputs",
+        "governance"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tool_web.py",
+          "start": 172,
+          "end": 212,
+          "symbol": "web_search"
+        },
+        {
+          "path": "pyharness/core/tool_web.py",
+          "start": 465,
+          "end": 491,
+          "symbol": "http_get"
+        },
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 246,
+          "end": 265,
+          "symbol": "search backend assembly"
+        }
+      ]
+    },
+    {
+      "id": "filesystem",
+      "layer": 6,
+      "name": "Workspace File Tools（工作区文件工具）",
+      "purpose": "提供受工作区边界约束的读写、列目录和删除，并再次校验路径与凭据读。",
+      "inputs": [
+        "文件路径",
+        "内容",
+        "Scope 工作区"
+      ],
+      "outputs": [
+        "文件内容或写入结果",
+        "目录项"
+      ],
+      "boundary": "路径词法、规范化和符号链接目标均需合法；只读例外不扩展写权限。平台运行时可对文件工具另行路由。",
+      "tags": [
+        "inputs",
+        "governance"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tool_fs.py",
+          "start": 208,
+          "end": 245,
+          "symbol": "resolve_in_workspace"
+        },
+        {
+          "path": "pyharness/core/tool_fs.py",
+          "start": 307,
+          "end": 391,
+          "symbol": "read_file / write_file"
+        }
+      ]
+    },
+    {
+      "id": "audit",
+      "layer": 5,
+      "name": "Governance Audit（治理因果重放审计）",
+      "purpose": "由事件重建调用、策略、决策、审批、凭证与执行的因果链，报告缺失和拒绝。",
+      "inputs": [
+        "decision_id",
+        "会话日志",
+        "可选对账请求"
+      ],
+      "outputs": [
+        "因果链",
+        "denied_report",
+        "missing 项"
+      ],
+      "boundary": "默认只读重放，不订阅或缓存业务状态；只有显式 reconcile(emit=True) 可发已有 syscheck.fail。",
+      "tags": [
+        "governance",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/governance/audit.py",
+          "start": 82,
+          "end": 135,
+          "symbol": "AuditSystem.causal_chain"
+        },
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 291,
+          "end": 296,
+          "symbol": "AuditSystem assembly"
+        }
+      ]
+    },
+    {
+      "id": "evidence",
+      "layer": 5,
+      "name": "Governance Evidence（治理证据引用归档）",
+      "purpose": "核验真实日志锚点，将任务段决策与凭证引用组成证据工件并建立派生索引。",
+      "inputs": [
+        "claim",
+        "真实引用",
+        "segment.end",
+        "决策与凭证事件"
+      ],
+      "outputs": [
+        "evidence.archived",
+        "collect_for_task 结果"
+      ],
+      "boundary": "只存引用，不复制事件；无治理决策的任务段不造证据。索引可从原日志重建。",
+      "tags": [
+        "governance",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/governance/evidence.py",
+          "start": 159,
+          "end": 201,
+          "symbol": "EvidenceCollector.archive"
+        },
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 153,
+          "end": 217,
+          "symbol": "archive_task_evidence"
+        },
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 263,
+          "end": 270,
+          "symbol": "_evidence_producer"
+        }
+      ]
+    },
+    {
+      "id": "plan",
+      "layer": 5,
+      "name": "Plan Approval and Execution（计划批准与逐步执行）",
+      "purpose": "管理候选计划及批准，将每一步意图经队列执行，并在失败时请求跳过、重试或中止。",
+      "inputs": [
+        "计划目标与步骤",
+        "人工批准",
+        "步骤结果"
+      ],
+      "outputs": [
+        "plan.exec.step",
+        "plan.done/aborted",
+        "队列任务"
+      ],
+      "boundary": "计划批准只确定方向，不代替每个工具的审批；步骤重试次数有限，无裁决通道自动中止。",
+      "tags": [
+        "orchestration",
+        "governance"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/plan_mode.py",
+          "start": 159,
+          "end": 177,
+          "symbol": "PlanManager._user_choice"
+        },
+        {
+          "path": "pyharness/core/plan_mode.py",
+          "start": 389,
+          "end": 443,
+          "symbol": "PlanManager.plan_execute"
+        }
+      ]
+    },
+    {
+      "id": "jobs",
+      "layer": 5,
+      "name": "Background Jobs（后台任务与属主控制）",
+      "purpose": "登记有属主的后台任务，维护并发上限、执行协程、日志查询、取消及崩溃事件恢复。",
+      "inputs": [
+        "任务意图",
+        "owner 身份",
+        "注入 runner"
+      ],
+      "outputs": [
+        "job_id",
+        "job.started/failed",
+        "任务结果"
+      ],
+      "boundary": "后台管理协程可并发，生产 EngineIntentRunner 仍优先提交同一会话单飞队列；登记成功不等于执行完成。",
+      "tags": [
+        "orchestration",
+        "trace"
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/jobs.py",
+          "start": 299,
+          "end": 345,
+          "symbol": "JobManager.start"
+        },
+        {
+          "path": "pyharness/core/jobs.py",
+          "start": 406,
+          "end": 424,
+          "symbol": "JobManager._run_runner"
+        },
+        {
+          "path": "pyharness/core/orchestration.py",
+          "start": 155,
+          "end": 197,
+          "symbol": "EngineIntentRunner.run"
+        }
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "source": "application_service",
+      "target": "engine",
+      "label": "按会话构建生产引擎",
+      "kind": "assembly",
+      "note": "复用已有 log/store，attach_persistence=False，避免重复持久化订阅。",
+      "topics": [
+        "main",
+        "config"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/application/service.py",
+          "start": 179,
+          "end": 198,
+          "symbol": "make_runner assembly"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "agent_loop",
+      "label": "构造会话循环",
+      "kind": "assembly",
+      "note": "组件装配，不表示已经运行。",
+      "topics": [
+        "main",
+        "loop"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 88,
+          "end": 101,
+          "symbol": "build_runner_components"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "scope",
+      "label": "注入策略与共享预算",
+      "kind": "assembly",
+      "note": "每会话 Scope 默认 strict，复用同一 counters。",
+      "topics": [
+        "governance",
+        "config"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 95,
+          "end": 108,
+          "symbol": "scope wiring"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "tools_executor",
+      "label": "装配工具执行器",
+      "kind": "assembly",
+      "note": "注册内置定义后提供执行管道。",
+      "topics": [
+        "config",
+        "loop"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 113,
+          "end": 127,
+          "symbol": "tools assembly"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "policy",
+      "label": "装配治理上下文",
+      "kind": "assembly",
+      "note": "策略、决策、凭证、证据及审计注入同一上下文。",
+      "topics": [
+        "governance",
+        "config"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 298,
+          "end": 317,
+          "symbol": "EngineSpine governance"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "approval",
+      "label": "装配通道与队列联动",
+      "kind": "assembly",
+      "note": "通道身份显式注入，队列通过惰性 getter 取得。",
+      "topics": [
+        "governance",
+        "config"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 140,
+          "end": 147,
+          "symbol": "approval assembly"
+        },
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 344,
+          "end": 350,
+          "symbol": "approval queue wiring"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "llm",
+      "label": "注册模型及客户端",
+      "kind": "assembly",
+      "note": "模型注册使用运行时本地连接注册表。",
+      "topics": [
+        "config",
+        "loop"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 175,
+          "end": 182,
+          "symbol": "llm assembly"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "llm_fallback",
+      "label": "条件挂载降级探针",
+      "kind": "assembly",
+      "note": "只有 fallback_models 配置非空才建立链；有事件循环才启动探针。",
+      "topics": [
+        "config",
+        "loop"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 179,
+          "end": 195,
+          "symbol": "fallback and probe assembly"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "registry",
+      "label": "创建能力索引",
+      "kind": "assembly",
+      "note": "能力索引与 ToolRegistry 分开。",
+      "topics": [
+        "config"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 110,
+          "end": 122,
+          "symbol": "registries assembly"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "subagent",
+      "label": "装配真实子代理运行器",
+      "kind": "assembly",
+      "note": "EngineSubagentRunner 与 child_session 工厂实际注入。",
+      "topics": [
+        "orchestration"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 321,
+          "end": 335,
+          "symbol": "orchestration assembly"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "jobs",
+      "label": "装配后台运行适配器",
+      "kind": "assembly",
+      "note": "注入 EngineIntentRunner。",
+      "topics": [
+        "orchestration"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 324,
+          "end": 329,
+          "symbol": "JobManager assembly"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "schedule",
+      "label": "恢复定时器与队列绑定",
+      "kind": "assembly",
+      "note": "只有获得队列后才按会话幂等恢复调度。",
+      "topics": [
+        "orchestration"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine.py",
+          "start": 221,
+          "end": 243,
+          "symbol": "activate_orchestration"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "plugins",
+      "label": "预载插件和外部工具",
+      "kind": "assembly",
+      "note": "预载失败隔离告警，登记不等于执行。",
+      "topics": [
+        "config",
+        "mcp"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_plugins.py",
+          "start": 11,
+          "end": 39,
+          "symbol": "_preload_plugins"
+        }
+      ]
+    },
+    {
+      "source": "plugins",
+      "target": "tool_registry",
+      "label": "桥接插件定义及 Provider",
+      "kind": "assembly",
+      "note": "安装和激活后 register_tools 只改变注册状态。",
+      "topics": [
+        "config"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/plugin_loader.py",
+          "start": 87,
+          "end": 110,
+          "symbol": "load_plugin"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "mcp",
+      "label": "连接配置的标准输入输出服务器",
+      "kind": "assembly",
+      "note": "initialize、tools/list 与 register_into。",
+      "topics": [
+        "mcp",
+        "config"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_plugins.py",
+          "start": 41,
+          "end": 56,
+          "symbol": "_preload_mcp"
+        }
+      ]
+    },
+    {
+      "source": "mcp",
+      "target": "tool_registry",
+      "label": "注册高危险等级外部工具",
+      "kind": "assembly",
+      "note": "发现的工具按允许名单筛选，danger=high，绑定 _McpProvider。",
+      "topics": [
+        "mcp",
+        "governance"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/mcp.py",
+          "start": 249,
+          "end": 285,
+          "symbol": "McpClient.register_into"
+        }
+      ]
+    },
+    {
+      "source": "task_queue",
+      "target": "task_runner",
+      "label": "消费队首任务",
+      "kind": "call",
+      "note": "单飞泵执行 runner 并等待终态。",
+      "topics": [
+        "main",
+        "orchestration"
+      ],
+      "stages": [
+        3,
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/task_queue.py",
+          "start": 261,
+          "end": 292,
+          "symbol": "TaskQueue._run_task"
+        },
+        {
+          "path": "pyharness/core/task_queue.py",
+          "start": 385,
+          "end": 402,
+          "symbol": "TaskQueue._run_runner"
+        }
+      ]
+    },
+    {
+      "source": "task_runner",
+      "target": "task_queue",
+      "label": "返回真实运行终态",
+      "kind": "return",
+      "note": "只有 reason=complete 或显式 ok 视为成功。",
+      "topics": [
+        "main",
+        "trace"
+      ],
+      "stages": [
+        6,
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 123,
+          "end": 143,
+          "symbol": "make_runner.run_for_task"
+        },
+        {
+          "path": "pyharness/core/task_queue.py",
+          "start": 292,
+          "end": 306,
+          "symbol": "terminal interpretation"
+        }
+      ]
+    },
+    {
+      "source": "task_runner",
+      "target": "session",
+      "label": "定位或补写任务输入",
+      "kind": "call",
+      "note": "严格使用相邻 task.enqueued 窗口，纯意图补写 system user.message。",
+      "topics": [
+        "main",
+        "inputs",
+        "trace"
+      ],
+      "stages": [
+        3,
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 16,
+          "end": 40,
+          "symbol": "_owned_task_message"
+        },
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 94,
+          "end": 104,
+          "symbol": "run_for_task input"
+        }
+      ]
+    },
+    {
+      "source": "task_runner",
+      "target": "agent",
+      "label": "获取或创建代理上下文",
+      "kind": "call",
+      "note": "复用 active_agents，不意味着每个任务重新 enter。",
+      "topics": [
+        "main"
+      ],
+      "stages": [
+        3,
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 284,
+          "end": 299,
+          "symbol": "_agent_ctx_of"
+        }
+      ]
+    },
+    {
+      "source": "task_runner",
+      "target": "agent_loop",
+      "label": "唤醒真实模型循环",
+      "kind": "call",
+      "note": "无 task_lifecycle 时直接 wake；存在时交由其包裹同一回调。",
+      "topics": [
+        "main",
+        "loop"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 122,
+          "end": 130,
+          "symbol": "run_for_task lifecycle"
+        }
+      ]
+    },
+    {
+      "source": "agent",
+      "target": "registry",
+      "label": "注册代理句柄",
+      "kind": "assembly",
+      "note": "enter 时登记 plugin 类别，用于寻址，不是工具执行。",
+      "topics": [
+        "config"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/agent.py",
+          "start": 233,
+          "end": 238,
+          "symbol": "Agent.enter"
+        }
+      ]
+    },
+    {
+      "source": "agent",
+      "target": "session",
+      "label": "追加用户输入",
+      "kind": "event",
+      "note": "Agent.submit 的直接入口先强同步写 user.message。",
+      "topics": [
+        "inputs",
+        "main"
+      ],
+      "stages": [
+        2
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/agent.py",
+          "start": 287,
+          "end": 290,
+          "symbol": "Agent.submit"
+        }
+      ]
+    },
+    {
+      "source": "agent",
+      "target": "agent_loop",
+      "label": "直接提交入口唤醒",
+      "kind": "call",
+      "note": "这是 Agent.submit 的存在路径，不能与生产 TaskQueue 路径强串。",
+      "topics": [
+        "loop"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/agent.py",
+          "start": 287,
+          "end": 293,
+          "symbol": "Agent.submit"
+        }
+      ]
+    },
+    {
+      "source": "agent_loop",
+      "target": "session",
+      "label": "每轮读取事件历史投影",
+      "kind": "call",
+      "note": "derive_messages 现读日志，下一轮自然包含工具反馈。",
+      "topics": [
+        "main",
+        "loop",
+        "trace"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 258,
+          "end": 271,
+          "symbol": "AgentLoop.run_turn context"
+        }
+      ]
+    },
+    {
+      "source": "agent_loop",
+      "target": "system_prompt",
+      "label": "装配模型系统与历史消息",
+      "kind": "call",
+      "note": "受控配置、能力与护栏段在发请求前构建。",
+      "topics": [
+        "loop",
+        "inputs"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 266,
+          "end": 275,
+          "symbol": "run_turn prompt assembly"
+        }
+      ]
+    },
+    {
+      "source": "agent_loop",
+      "target": "platform_runtime",
+      "label": "准备轮上下文并物化消息",
+      "kind": "call",
+      "note": "可选平台运行时 hooks，在模型调用前参与上下文。",
+      "topics": [
+        "main",
+        "inputs",
+        "rag"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 258,
+          "end": 275,
+          "symbol": "before_round_context / materialize_messages"
+        }
+      ]
+    },
+    {
+      "source": "agent_loop",
+      "target": "llm",
+      "label": "请求模型响应",
+      "kind": "call",
+      "note": "根据 streaming 选 chat 或 chat_stream；带图像输入时工具列表为空。",
+      "topics": [
+        "main",
+        "loop"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 276,
+          "end": 287,
+          "symbol": "chat invocation"
+        }
+      ]
+    },
+    {
+      "source": "llm",
+      "target": "agent_loop",
+      "label": "返回文本或工具调用",
+      "kind": "return",
+      "note": "无工具调用进入答案校验与完成分支；有工具调用进入逐步执行。",
+      "topics": [
+        "main",
+        "loop"
+      ],
+      "stages": [
+        4,
+        6
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/llm_requests.py",
+          "start": 127,
+          "end": 139,
+          "symbol": "LLMResponse"
+        },
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 289,
+          "end": 311,
+          "symbol": "response routing"
+        }
+      ]
+    },
+    {
+      "source": "agent_loop",
+      "target": "tools_executor",
+      "label": "逐个执行模型工具调用",
+      "kind": "call",
+      "note": "同轮按顺序执行，失败次数可封顶；不是无限并发调用。",
+      "topics": [
+        "main",
+        "loop",
+        "governance"
+      ],
+      "stages": [
+        5,
+        6
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 306,
+          "end": 337,
+          "symbol": "AgentLoop.run_step"
+        }
+      ]
+    },
+    {
+      "source": "tools_executor",
+      "target": "agent_loop",
+      "label": "返回工具摘要与成功标记",
+      "kind": "return",
+      "note": "返回 ExecResult 供连败与空转判定；完整反馈已作为事件写入历史。",
+      "topics": [
+        "main",
+        "loop"
+      ],
+      "stages": [
+        6
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tool_invocation.py",
+          "start": 162,
+          "end": 168,
+          "symbol": "ToolInvocation._finalize"
+        },
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 310,
+          "end": 320,
+          "symbol": "loop continuation"
+        }
+      ]
+    },
+    {
+      "source": "tools_executor",
+      "target": "tool_registry",
+      "label": "查定义并验证实参",
+      "kind": "call",
+      "note": "所有授权和 Provider 运行之前先查契约。",
+      "topics": [
+        "governance",
+        "loop"
+      ],
+      "stages": [
+        5
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tools_executor.py",
+          "start": 349,
+          "end": 374,
+          "symbol": "ToolExecutor.execute validation"
+        }
+      ]
+    },
+    {
+      "source": "tools_executor",
+      "target": "policy",
+      "label": "请求唯一治理授权",
+      "kind": "call",
+      "note": "传入一次计算的输入摘要，执行器不独立重算 Scope 或守卫决策。",
+      "topics": [
+        "governance"
+      ],
+      "stages": [
+        5
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tools_executor.py",
+          "start": 382,
+          "end": 394,
+          "symbol": "authorization gate"
+        }
+      ]
+    },
+    {
+      "source": "policy",
+      "target": "guard",
+      "label": "评估同一守卫链",
+      "kind": "call",
+      "note": "返回 verdict 与证据引用来自同一次求值。",
+      "topics": [
+        "governance"
+      ],
+      "stages": [
+        5
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/governance/context.py",
+          "start": 128,
+          "end": 147,
+          "symbol": "GovernanceContext.authorize"
+        }
+      ]
+    },
+    {
+      "source": "guard",
+      "target": "scope",
+      "label": "检查工具可见性",
+      "kind": "call",
+      "note": "不可见立即拒绝，后续规则不运行。",
+      "topics": [
+        "governance"
+      ],
+      "stages": [
+        5
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tools_guard.py",
+          "start": 245,
+          "end": 255,
+          "symbol": "scope gate"
+        }
+      ]
+    },
+    {
+      "source": "guard",
+      "target": "policy",
+      "label": "返回裁决及命中规则",
+      "kind": "return",
+      "note": "allow、reject 或 approval；没有执行权。",
+      "topics": [
+        "governance"
+      ],
+      "stages": [
+        5
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tools_guard.py",
+          "start": 292,
+          "end": 311,
+          "symbol": "GuardChain.evaluate_detailed"
+        }
+      ]
+    },
+    {
+      "source": "policy",
+      "target": "tools_executor",
+      "label": "返回授权决策",
+      "kind": "return",
+      "note": "执行器根据 reject/approval/allow 选择后续分支。",
+      "topics": [
+        "governance"
+      ],
+      "stages": [
+        5
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/governance/context.py",
+          "start": 141,
+          "end": 156,
+          "symbol": "GovernanceContext.authorize"
+        },
+        {
+          "path": "pyharness/core/tools_executor.py",
+          "start": 391,
+          "end": 400,
+          "symbol": "decision routing"
+        }
+      ]
+    },
+    {
+      "source": "tools_executor",
+      "target": "approval",
+      "label": "仅对待批裁决申请审批",
+      "kind": "call",
+      "note": "请求参数摘要和绑定，等待真实裁决。",
+      "topics": [
+        "governance"
+      ],
+      "stages": [
+        5
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tool_approval.py",
+          "start": 30,
+          "end": 56,
+          "symbol": "ToolApproval._approval_round"
+        }
+      ]
+    },
+    {
+      "source": "approval",
+      "target": "task_queue",
+      "label": "暂停或恢复会话消费",
+      "kind": "call",
+      "note": "由审批生命周期实际 pause/resume，不只是写状态事件。",
+      "topics": [
+        "governance",
+        "orchestration"
+      ],
+      "stages": [
+        5
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/approval.py",
+          "start": 341,
+          "end": 366,
+          "symbol": "_pause_queue_or_record / _resume_queue_or_record_async"
+        }
+      ]
+    },
+    {
+      "source": "approval",
+      "target": "tools_executor",
+      "label": "返回批准拒绝或超时",
+      "kind": "return",
+      "note": "granted 后仍须重入治理；denied/timeout 不执行。",
+      "topics": [
+        "governance"
+      ],
+      "stages": [
+        5
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tool_approval.py",
+          "start": 38,
+          "end": 80,
+          "symbol": "approval result and reauthorization"
+        }
+      ]
+    },
+    {
+      "source": "tools_executor",
+      "target": "policy",
+      "label": "批准后重新授权与绑定核验",
+      "kind": "call",
+      "note": "产生 D2，策略收紧可再次拒绝；绑定不匹配同样不执行。",
+      "topics": [
+        "governance"
+      ],
+      "stages": [
+        5
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tool_approval.py",
+          "start": 57,
+          "end": 80,
+          "symbol": "approval re-entry"
+        }
+      ]
+    },
+    {
+      "source": "policy",
+      "target": "receipt",
+      "label": "按决策类型生成凭证",
+      "kind": "call",
+      "note": "D1 待审批不产凭证，D2 产 approval 凭证。",
+      "topics": [
+        "governance",
+        "trace"
+      ],
+      "stages": [
+        5,
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/governance/context.py",
+          "start": 148,
+          "end": 156,
+          "symbol": "receipt emission"
+        },
+        {
+          "path": "pyharness/governance/receipt.py",
+          "start": 61,
+          "end": 74,
+          "symbol": "receipt_kind_of"
+        }
+      ]
+    },
+    {
+      "source": "policy",
+      "target": "session",
+      "label": "强同步记录治理决策",
+      "kind": "event",
+      "note": "decision.issued 携带主体、策略指纹、参数摘要及 supersedes。",
+      "topics": [
+        "governance",
+        "trace"
+      ],
+      "stages": [
+        5,
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/governance/context.py",
+          "start": 159,
+          "end": 188,
+          "symbol": "_emit_decision_issued"
+        }
+      ]
+    },
+    {
+      "source": "guard",
+      "target": "session",
+      "label": "记录求值及拒绝事实",
+      "kind": "event",
+      "note": "guard.rejected 为强同步；未成功留痕则不进入 Provider。",
+      "topics": [
+        "governance",
+        "trace"
+      ],
+      "stages": [
+        5,
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tools_guard.py",
+          "start": 250,
+          "end": 280,
+          "symbol": "GuardChain._evaluate_full"
+        }
+      ]
+    },
+    {
+      "source": "tools_executor",
+      "target": "platform_runtime",
+      "label": "路由实际 Provider 执行",
+      "kind": "call",
+      "note": "存在平台运行时则 runtime.execute 包裹 original；无则调用原 Provider。",
+      "topics": [
+        "main",
+        "governance"
+      ],
+      "stages": [
+        6
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tool_invocation.py",
+          "start": 19,
+          "end": 41,
+          "symbol": "ToolInvocation._run_provider"
+        }
+      ]
+    },
+    {
+      "source": "tools_executor",
+      "target": "mcp",
+      "label": "经注册 Provider 调用外部工具",
+      "kind": "call",
+      "note": "授权完成后的 Provider 才执行 tools/call；不直接从发现阶段运行。",
+      "topics": [
+        "mcp",
+        "governance"
+      ],
+      "stages": [
+        6
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tools_executor.py",
+          "start": 401,
+          "end": 419,
+          "symbol": "provider execution"
+        },
+        {
+          "path": "pyharness/core/tools_executor.py",
+          "start": 538,
+          "end": 545,
+          "symbol": "_provider_handle"
+        },
+        {
+          "path": "pyharness/core/mcp.py",
+          "start": 287,
+          "end": 316,
+          "symbol": "_McpProvider.handle"
+        }
+      ]
+    },
+    {
+      "source": "mcp",
+      "target": "tools_executor",
+      "label": "回传远端文本或结构化错误",
+      "kind": "return",
+      "note": "isError 转 TLB-805，多段文本合并后由执行器 finalize。",
+      "topics": [
+        "mcp",
+        "loop"
+      ],
+      "stages": [
+        6
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/mcp.py",
+          "start": 305,
+          "end": 316,
+          "symbol": "_McpProvider.handle"
+        }
+      ]
+    },
+    {
+      "source": "tools_executor",
+      "target": "spill_kv",
+      "label": "保存长结果并回传引用",
+      "kind": "call",
+      "note": "超过 SPILL_THRESHOLD 走会话 spill；写失败作为 tool.error。",
+      "topics": [
+        "loop",
+        "trace"
+      ],
+      "stages": [
+        6,
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tool_invocation.py",
+          "start": 113,
+          "end": 124,
+          "symbol": "_spill_put"
+        },
+        {
+          "path": "pyharness/core/tool_invocation.py",
+          "start": 145,
+          "end": 168,
+          "symbol": "_finalize"
+        }
+      ]
+    },
+    {
+      "source": "tools_executor",
+      "target": "session",
+      "label": "记录调用与执行反馈",
+      "kind": "event",
+      "note": "tool.call 记录模型原始参数和校验后参数；成功 tool.result，错误 tool.error。",
+      "topics": [
+        "main",
+        "loop",
+        "trace"
+      ],
+      "stages": [
+        5,
+        6,
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/tools_executor.py",
+          "start": 376,
+          "end": 381,
+          "symbol": "tool.call"
+        },
+        {
+          "path": "pyharness/core/tool_invocation.py",
+          "start": 162,
+          "end": 168,
+          "symbol": "tool.result"
+        }
+      ]
+    },
+    {
+      "source": "session",
+      "target": "event_contract",
+      "label": "校验并分配事件信封",
+      "kind": "call",
+      "note": "失败则不进入缓存、总线或日志。",
+      "topics": [
+        "trace"
+      ],
+      "stages": [
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/session.py",
+          "start": 393,
+          "end": 406,
+          "symbol": "make_envelope path"
+        },
+        {
+          "path": "pyharness/events/envelope.py",
+          "start": 72,
+          "end": 99,
+          "symbol": "validate_envelope"
+        }
+      ]
+    },
+    {
+      "source": "session",
+      "target": "event_bus",
+      "label": "按顺序分发追加事件",
+      "kind": "event",
+      "note": "持久事件信封分发给订阅者。",
+      "topics": [
+        "main",
+        "trace"
+      ],
+      "stages": [
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/session.py",
+          "start": 167,
+          "end": 170,
+          "symbol": "SessionLog._dispatch"
+        }
+      ]
+    },
+    {
+      "source": "event_bus",
+      "target": "persistence",
+      "label": "存储订阅按会话落盘",
+      "kind": "event",
+      "note": "session_recorder 按 sid 过滤，瞬时字典载荷不入 JSONL。",
+      "topics": [
+        "main",
+        "trace"
+      ],
+      "stages": [
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 267,
+          "end": 278,
+          "symbol": "persistence subscriptions"
+        },
+        {
+          "path": "pyharness/persistence.py",
+          "start": 490,
+          "end": 508,
+          "symbol": "session_recorder"
+        }
+      ]
+    },
+    {
+      "source": "session",
+      "target": "persistence",
+      "label": "等待指定序号持久化",
+      "kind": "call",
+      "note": "强同步 flush 是调用成功条件。",
+      "topics": [
+        "trace"
+      ],
+      "stages": [
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/session.py",
+          "start": 172,
+          "end": 176,
+          "symbol": "SessionLog._flush"
+        },
+        {
+          "path": "pyharness/core/session.py",
+          "start": 405,
+          "end": 409,
+          "symbol": "append strong sync"
+        }
+      ]
+    },
+    {
+      "source": "engine",
+      "target": "persistence",
+      "label": "持有批量刷盘定时器",
+      "kind": "call",
+      "note": "定时器调用同一 store.flush，不创建第二写者。",
+      "topics": [
+        "deployment",
+        "trace"
+      ],
+      "stages": [
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_types.py",
+          "start": 128,
+          "end": 163,
+          "symbol": "EngineSpine.start_flush_ticker"
+        }
+      ]
+    },
+    {
+      "source": "session",
+      "target": "audit",
+      "label": "重放构建治理因果链",
+      "kind": "derived",
+      "note": "审计现读日志并按 decision_id/call_id 关联，不写新业务状态。",
+      "topics": [
+        "governance",
+        "trace"
+      ],
+      "stages": [
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/governance/audit.py",
+          "start": 82,
+          "end": 135,
+          "symbol": "AuditSystem.causal_chain"
+        }
+      ]
+    },
+    {
+      "source": "event_bus",
+      "target": "evidence",
+      "label": "消费治理事件与段结束",
+      "kind": "event",
+      "note": "collector 只维护派生索引；段结束订阅另触发 archive_task_evidence。",
+      "topics": [
+        "governance",
+        "trace"
+      ],
+      "stages": [
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 280,
+          "end": 289,
+          "symbol": "evidence subscription"
+        },
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 336,
+          "end": 342,
+          "symbol": "evidence producer subscription"
+        },
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 263,
+          "end": 270,
+          "symbol": "_evidence_producer"
+        }
+      ]
+    },
+    {
+      "source": "evidence",
+      "target": "session",
+      "label": "写入真实引用集合",
+      "kind": "event",
+      "note": "先校验引用存在，再 append evidence.archived；不是原始事件副本。",
+      "topics": [
+        "governance",
+        "trace"
+      ],
+      "stages": [
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/governance/evidence.py",
+          "start": 181,
+          "end": 201,
+          "symbol": "EvidenceCollector.archive"
+        }
+      ]
+    },
+    {
+      "source": "event_bus",
+      "target": "session_query",
+      "label": "投影持久事件到全文索引",
+      "kind": "event",
+      "note": "订阅指定事件类型；临时 llm.chunk 不参与。",
+      "topics": [
+        "trace"
+      ],
+      "stages": [
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/query_lifecycle.py",
+          "start": 65,
+          "end": 79,
+          "symbol": "FTS subscriptions"
+        }
+      ]
+    },
+    {
+      "source": "task_runner",
+      "target": "spill_kv",
+      "label": "首次上下文激活私有存储",
+      "kind": "assembly",
+      "note": "创建会话 SpillProvider 及 KV 定位器。",
+      "topics": [
+        "config",
+        "trace"
+      ],
+      "stages": [
+        2,
+        3
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 284,
+          "end": 333,
+          "symbol": "_agent_ctx_of / _activate_storage_caps"
+        }
+      ]
+    },
+    {
+      "source": "task_runner",
+      "target": "session_query",
+      "label": "首次上下文激活全文索引",
+      "kind": "assembly",
+      "note": "可选索引失败显式告警，不阻断主任务。",
+      "topics": [
+        "config",
+        "trace"
+      ],
+      "stages": [
+        2,
+        3
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 295,
+          "end": 299,
+          "symbol": "_agent_ctx_of"
+        },
+        {
+          "path": "pyharness/engine_runner.py",
+          "start": 351,
+          "end": 362,
+          "symbol": "_activate_session_caps"
+        }
+      ]
+    },
+    {
+      "source": "agent_loop",
+      "target": "compaction",
+      "label": "请求边界检查压缩需求",
+      "kind": "call",
+      "note": "仅 loop idle 的请求边界，非工具执行中任意压缩。",
+      "topics": [
+        "loop"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 477,
+          "end": 485,
+          "symbol": "AgentLoop.wake"
+        }
+      ]
+    },
+    {
+      "source": "compaction",
+      "target": "llm",
+      "label": "生成历史任务段摘要",
+      "kind": "call",
+      "note": "使用 summarize 出口；失败按实现重试及规则降级。",
+      "topics": [
+        "loop"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/compaction.py",
+          "start": 340,
+          "end": 368,
+          "symbol": "_call_summarize / _summarize_segment"
+        }
+      ]
+    },
+    {
+      "source": "compaction",
+      "target": "session",
+      "label": "追加压缩声明",
+      "kind": "event",
+      "note": "context.compacted 改变投影，原始 JSONL 不删除。",
+      "topics": [
+        "loop",
+        "trace"
+      ],
+      "stages": [
+        4,
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/compaction.py",
+          "start": 372,
+          "end": 404,
+          "symbol": "Compactor._apply / compact"
+        }
+      ]
+    },
+    {
+      "source": "system_prompt",
+      "target": "scope",
+      "label": "读取受控权限与窗口",
+      "kind": "call",
+      "note": "只取配置和 Scope 作为权限变量来源。",
+      "topics": [
+        "loop",
+        "governance"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/system_prompt.py",
+          "start": 408,
+          "end": 458,
+          "symbol": "SystemPromptAssembler._vars"
+        }
+      ]
+    },
+    {
+      "source": "skills",
+      "target": "system_prompt",
+      "label": "提供可用技能目录",
+      "kind": "derived",
+      "note": "目录作为提示段；详细正文由 skill.load 返回。",
+      "topics": [
+        "loop",
+        "config"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/skill.py",
+          "start": 171,
+          "end": 178,
+          "symbol": "render_catalog"
+        },
+        {
+          "path": "pyharness/core/system_prompt.py",
+          "start": 557,
+          "end": 564,
+          "symbol": "skills segment"
+        }
+      ]
+    },
+    {
+      "source": "goals_todos",
+      "target": "system_prompt",
+      "label": "提供活动目标段",
+      "kind": "derived",
+      "note": "当前代码明确注入活动目标段；不宣称所有待办都直接进入该段。",
+      "topics": [
+        "loop",
+        "orchestration"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/system_prompt.py",
+          "start": 557,
+          "end": 564,
+          "symbol": "active goal segment"
+        }
+      ]
+    },
+    {
+      "source": "llm",
+      "target": "scope",
+      "label": "模型请求前预算检查",
+      "kind": "call",
+      "note": "涵盖 chat、stream、mini、summarize、json_chat 的统一客户端汇点。",
+      "topics": [
+        "loop",
+        "governance"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/llm.py",
+          "start": 129,
+          "end": 143,
+          "symbol": "_chat_any"
+        },
+        {
+          "path": "pyharness/core/llm.py",
+          "start": 187,
+          "end": 202,
+          "symbol": "_egress_guard"
+        }
+      ]
+    },
+    {
+      "source": "agent_loop",
+      "target": "scope",
+      "label": "每轮预算硬闸",
+      "kind": "call",
+      "note": "超限终态 reason=budget，当前输入结束。",
+      "topics": [
+        "loop",
+        "governance"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 211,
+          "end": 227,
+          "symbol": "_run_engine budget"
+        }
+      ]
+    },
+    {
+      "source": "budget",
+      "target": "scope",
+      "label": "读取同源预算状态",
+      "kind": "call",
+      "note": "预算视图消费 Scope 状态而非独立决定工具执行。",
+      "topics": [
+        "governance",
+        "trace"
+      ],
+      "stages": [
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/budget.py",
+          "start": 84,
+          "end": 91,
+          "symbol": "BudgetGate.state"
+        }
+      ]
+    },
+    {
+      "source": "llm",
+      "target": "llm_fallback",
+      "label": "条件路由备用模型链",
+      "kind": "call",
+      "note": "未装配 chain 时直接调用主适配器。",
+      "topics": [
+        "loop"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/llm.py",
+          "start": 129,
+          "end": 143,
+          "symbol": "LLMClient._chat_any"
+        }
+      ]
+    },
+    {
+      "source": "llm_fallback",
+      "target": "llm",
+      "label": "返回首个成功模型响应",
+      "kind": "return",
+      "note": "全链失败有明确终态；不是无限切换。",
+      "topics": [
+        "loop"
+      ],
+      "stages": [
+        4
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/llm_fallback.py",
+          "start": 222,
+          "end": 247,
+          "symbol": "chat_with_fallback"
+        }
+      ]
+    },
+    {
+      "source": "llm",
+      "target": "session",
+      "label": "记录模型请求响应与用量",
+      "kind": "event",
+      "note": "流式 chunk 另走总线，聚合响应才形成持久模型响应。",
+      "topics": [
+        "loop",
+        "trace"
+      ],
+      "stages": [
+        4,
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/llm_requests.py",
+          "start": 105,
+          "end": 139,
+          "symbol": "ModelRequests._chat"
+        },
+        {
+          "path": "pyharness/core/llm.py",
+          "start": 199,
+          "end": 202,
+          "symbol": "LLMClient.chat_stream"
+        }
+      ]
+    },
+    {
+      "source": "schedule",
+      "target": "task_queue",
+      "label": "到点将模板意图入队",
+      "kind": "call",
+      "note": "先写触发与 user.message，再 submit；共用原运行与安全管道。",
+      "topics": [
+        "orchestration"
+      ],
+      "stages": [
+        3
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/schedule.py",
+          "start": 327,
+          "end": 345,
+          "symbol": "Scheduler._fire"
+        }
+      ]
+    },
+    {
+      "source": "workflow",
+      "target": "task_queue",
+      "label": "按步骤提交并等待",
+      "kind": "call",
+      "note": "每步结果后推进下一步，可首败停止。",
+      "topics": [
+        "orchestration"
+      ],
+      "stages": [
+        3,
+        6
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/workflow.py",
+          "start": 20,
+          "end": 35,
+          "symbol": "queue_submit_adapter"
+        },
+        {
+          "path": "pyharness/core/workflow.py",
+          "start": 48,
+          "end": 75,
+          "symbol": "WorkflowRunner.run"
+        }
+      ]
+    },
+    {
+      "source": "workflow",
+      "target": "session",
+      "label": "记录工作流进度",
+      "kind": "event",
+      "note": "workflow.step 可绑定真实 task_id。",
+      "topics": [
+        "orchestration",
+        "trace"
+      ],
+      "stages": [
+        3,
+        6,
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/workflow.py",
+          "start": 78,
+          "end": 95,
+          "symbol": "_step_event / record_workflow_task"
+        }
+      ]
+    },
+    {
+      "source": "plan",
+      "target": "task_queue",
+      "label": "批准后逐步入队",
+      "kind": "call",
+      "note": "每个步骤仍走正常 guard 与审批，失败重试须用户裁决。",
+      "topics": [
+        "orchestration",
+        "governance"
+      ],
+      "stages": [
+        3,
+        6
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/plan_mode.py",
+          "start": 389,
+          "end": 443,
+          "symbol": "PlanManager.plan_execute"
+        }
+      ]
+    },
+    {
+      "source": "plan",
+      "target": "approval",
+      "label": "步骤失败请求跳过重试中止",
+      "kind": "call",
+      "note": "无通道或非法选项默认中止。",
+      "topics": [
+        "orchestration",
+        "governance"
+      ],
+      "stages": [
+        5,
+        6
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/plan_mode.py",
+          "start": 159,
+          "end": 177,
+          "symbol": "PlanManager._user_choice"
+        }
+      ]
+    },
+    {
+      "source": "jobs",
+      "target": "task_queue",
+      "label": "通过意图适配器提交后台工作",
+      "kind": "call",
+      "note": "存在生产队列时实际工作仍受单飞队列管理，后台 job 壳并发不代表模型并发。",
+      "topics": [
+        "orchestration"
+      ],
+      "stages": [
+        3
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/jobs.py",
+          "start": 406,
+          "end": 424,
+          "symbol": "_run_runner"
+        },
+        {
+          "path": "pyharness/core/orchestration.py",
+          "start": 155,
+          "end": 192,
+          "symbol": "EngineIntentRunner.run"
+        }
+      ]
+    },
+    {
+      "source": "subagent",
+      "target": "scope",
+      "label": "派生只收窄的子权限与预算",
+      "kind": "assembly",
+      "note": "继承父策略值拷贝，加 deny 与工具子集交集，并计入父预算。",
+      "topics": [
+        "orchestration",
+        "governance"
+      ],
+      "stages": [
+        2,
+        5
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/subagent_execution.py",
+          "start": 44,
+          "end": 68,
+          "symbol": "child restrictions"
+        },
+        {
+          "path": "pyharness/core/subagent_context.py",
+          "start": 63,
+          "end": 111,
+          "symbol": "_default_child_scope"
+        }
+      ]
+    },
+    {
+      "source": "subagent",
+      "target": "session",
+      "label": "建立独立子会话与日志",
+      "kind": "assembly",
+      "note": "独立 seq、store、bus，继承租户归属；父日志仅记录委派事实。",
+      "topics": [
+        "orchestration",
+        "trace"
+      ],
+      "stages": [
+        2,
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/orchestration.py",
+          "start": 215,
+          "end": 254,
+          "symbol": "EngineSubagentRunner.child_session"
+        },
+        {
+          "path": "pyharness/core/subagent_execution.py",
+          "start": 69,
+          "end": 86,
+          "symbol": "spawned fact"
+        }
+      ]
+    },
+    {
+      "source": "subagent",
+      "target": "agent_loop",
+      "label": "使用独立上下文运行子循环",
+      "kind": "call",
+      "note": "run_child 经 _run_on_session 创建新 AgentLoop，并严格核对 complete。",
+      "topics": [
+        "orchestration",
+        "loop"
+      ],
+      "stages": [
+        4,
+        6
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/orchestration.py",
+          "start": 93,
+          "end": 139,
+          "symbol": "_run_on_session"
+        },
+        {
+          "path": "pyharness/core/orchestration.py",
+          "start": 308,
+          "end": 324,
+          "symbol": "run_child"
+        }
+      ]
+    },
+    {
+      "source": "subagent",
+      "target": "approval",
+      "label": "建立每子会话审批提供器",
+      "kind": "assembly",
+      "note": "避免审批序号碰撞，不暂停父任务队列或其他子会话。",
+      "topics": [
+        "orchestration",
+        "governance"
+      ],
+      "stages": [
+        5
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/orchestration.py",
+          "start": 291,
+          "end": 303,
+          "symbol": "run_child local providers"
+        }
+      ]
+    },
+    {
+      "source": "subagent",
+      "target": "platform_runtime",
+      "label": "派生子运行时与生命周期",
+      "kind": "call",
+      "note": "有平台运行时才调用 for_child 与委派生命周期；不是所有运行都存在。",
+      "topics": [
+        "orchestration"
+      ],
+      "stages": [
+        4,
+        8
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/orchestration.py",
+          "start": 107,
+          "end": 134,
+          "symbol": "child runtime routing"
+        }
+      ]
+    },
+    {
+      "source": "ask",
+      "target": "session",
+      "label": "记录用户问题",
+      "kind": "event",
+      "note": "以问题事件 seq 作为 ask_id，答复另行等待。",
+      "topics": [
+        "inputs",
+        "trace"
+      ],
+      "stages": [
+        5,
+        7
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/user_ask.py",
+          "start": 35,
+          "end": 63,
+          "symbol": "AskProvider.request"
+        }
+      ]
+    },
+    {
+      "source": "sandbox",
+      "target": "process_backend",
+      "label": "主机批准后端运行进程",
+      "kind": "call",
+      "note": "仅 host_approved 后端走 proc.wait_result_async，不提供操作系统隔离保证。",
+      "topics": [
+        "deployment"
+      ],
+      "stages": [
+        6
+      ],
+      "evidence": [
+        {
+          "path": "pyharness/core/sandbox.py",
+          "start": 218,
+          "end": 234,
+          "symbol": "HostApprovedSandboxBackend.execute"
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "production_assembly",
+      "title": "生产装配和演示入口不同",
+      "status": "present",
+      "detail": "CLI/ACP 调 attach_engine_to_ctx 并复用 build_runner_components；ApplicationService 按会话懒装配，复用 log/store 且 attach_persistence=False。pyharness 目录检索未找到 assemble_real_engine 的业务调用，仅定义、导出和说明；该函数不能作为所有壳的实际入口。",
+      "evidence": [
+        {
+          "path": "pyharness/engine.py",
+          "start": 254,
+          "end": 278,
+          "symbol": "assemble_real_engine"
+        },
+        {
+          "path": "pyharness/engine.py",
+          "start": 305,
+          "end": 348,
+          "symbol": "attach_engine_to_ctx"
+        },
+        {
+          "path": "pyharness/application/service.py",
+          "start": 179,
+          "end": 211,
+          "symbol": "service runner assembly"
+        }
+      ]
+    },
+    {
+      "id": "alternate_executor",
+      "title": "平台可选择外部 CodexRunner 执行分支",
+      "status": "present",
+      "detail": "ApplicationService 在 platform_definition.executor 为 codex 时不注册模型，并返回外部 CodexRunner；否则返回引擎运行器。具体外部执行生命周期由应用层单独描述。",
+      "evidence": [
+        {
+          "path": "pyharness/application/service.py",
+          "start": 182,
+          "end": 211,
+          "symbol": "executor branch"
+        }
+      ]
+    },
+    {
+      "id": "not_fixed_pipeline",
+      "title": "模型与工具循环不是固定全组件线性链",
+      "status": "present",
+      "detail": "模型可直接完成文本，也可提出多个工具调用，顺序执行后将日志反馈给下一轮；预算、错误、最大轮数、取消、空转均是边界终态。",
+      "evidence": [
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 203,
+          "end": 247,
+          "symbol": "_run_engine"
+        },
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 289,
+          "end": 342,
+          "symbol": "run_turn / run_step"
+        }
+      ]
+    },
+    {
+      "id": "approval_reentry",
+      "title": "批准仍需治理重入与参数绑定核验",
+      "status": "present",
+      "detail": "首次待批 D1 不执行，批准后产生 D2；策略收紧、无通道、超时、拒绝、参数指纹不一致都不会进入 Provider。",
+      "evidence": [
+        {
+          "path": "pyharness/core/tool_approval.py",
+          "start": 11,
+          "end": 80,
+          "symbol": "_approval_round"
+        }
+      ]
+    },
+    {
+      "id": "rag_boundary",
+      "title": "知识检索默认关键词且远程 RAG 显式配置",
+      "status": "present_with_limits",
+      "detail": "ExactKeywordKnowledgeProvider 逐行评分给出行号引文。RemoteRagKnowledgeProvider 提供显式 HTTP /query 与引文真实性校验；该模块没有 embedding 模型、向量索引或隐式远程回退实现。",
+      "evidence": [
+        {
+          "path": "pyharness/core/knowledge.py",
+          "start": 34,
+          "end": 70,
+          "symbol": "providers"
+        },
+        {
+          "path": "pyharness/core/knowledge.py",
+          "start": 127,
+          "end": 169,
+          "symbol": "citation validation"
+        }
+      ]
+    },
+    {
+      "id": "mcp_boundary",
+      "title": "MCP 工具发现与执行被分离",
+      "status": "present",
+      "detail": "配置服务器 stdio 握手和 tools/list 后登记 mcp 前缀的高危险等级工具；只有获准进入 Provider 后才发送 tools/call。",
+      "evidence": [
+        {
+          "path": "pyharness/engine_plugins.py",
+          "start": 41,
+          "end": 56,
+          "symbol": "_preload_mcp"
+        },
+        {
+          "path": "pyharness/core/mcp.py",
+          "start": 230,
+          "end": 316,
+          "symbol": "discovery registration execution"
+        }
+      ]
+    },
+    {
+      "id": "journal_and_indexes",
+      "title": "事件日志与派生索引区别",
+      "status": "present",
+      "detail": "SessionLog 追加事件，SessionStore 物理写入 JSONL。审计、证据索引和 SQLite FTS 是派生读面；registry.updated、llm.chunk 等瞬时事件不能写入 SessionLog。",
+      "evidence": [
+        {
+          "path": "pyharness/core/session.py",
+          "start": 338,
+          "end": 359,
+          "symbol": "append transient rejection"
+        },
+        {
+          "path": "pyharness/persistence.py",
+          "start": 263,
+          "end": 303,
+          "symbol": "SessionStore"
+        },
+        {
+          "path": "pyharness/core/session_query.py",
+          "start": 136,
+          "end": 148,
+          "symbol": "FTS boundary"
+        },
+        {
+          "path": "pyharness/engine_components.py",
+          "start": 280,
+          "end": 296,
+          "symbol": "evidence and audit assembly"
+        }
+      ]
+    },
+    {
+      "id": "subagent_boundary",
+      "title": "子代理有独立会话与只收窄权限",
+      "status": "present",
+      "detail": "子代理持有独立 store、bus、Scope、审批与问答提供器；预算受祖先限制，工具子集与继承集合取交集；返回前强制核对 reason=complete。",
+      "evidence": [
+        {
+          "path": "pyharness/core/subagent_execution.py",
+          "start": 44,
+          "end": 88,
+          "symbol": "spawn"
+        },
+        {
+          "path": "pyharness/core/subagent_context.py",
+          "start": 63,
+          "end": 111,
+          "symbol": "scope inheritance"
+        },
+        {
+          "path": "pyharness/core/orchestration.py",
+          "start": 215,
+          "end": 254,
+          "symbol": "child_session"
+        },
+        {
+          "path": "pyharness/core/orchestration.py",
+          "start": 291,
+          "end": 324,
+          "symbol": "run_child"
+        }
+      ]
+    },
+    {
+      "id": "sandbox_guarantees",
+      "title": "沙箱模式具有不同隔离保证",
+      "status": "present_with_limits",
+      "detail": "disabled 拒绝执行；host_approved 明确没有操作系统、网络或内存隔离保证；isolated Docker 配置无网络、非特权用户、只读根文件系统及资源限制；remote 断连不会回退到本机执行。",
+      "evidence": [
+        {
+          "path": "pyharness/core/sandbox.py",
+          "start": 207,
+          "end": 234,
+          "symbol": "backend guarantees"
+        },
+        {
+          "path": "pyharness/core/sandbox.py",
+          "start": 294,
+          "end": 305,
+          "symbol": "Docker flags"
+        },
+        {
+          "path": "pyharness/core/remote_sandbox.py",
+          "start": 27,
+          "end": 39,
+          "symbol": "no host fallback"
+        }
+      ]
+    },
+    {
+      "id": "receipt_integrity",
+      "title": "凭证是哈希完整性链而非已实现数字签名",
+      "status": "present_with_limits",
+      "detail": "DecisionReceipt 定义 content_hash 与 prev_hash，并从日志重建事实；signature 字段为 Optional 且保持 None，不能将完整性链画成外部信任机构签名。",
+      "evidence": [
+        {
+          "path": "pyharness/governance/receipt.py",
+          "start": 77,
+          "end": 104,
+          "symbol": "protected hash"
+        },
+        {
+          "path": "pyharness/governance/receipt.py",
+          "start": 107,
+          "end": 159,
+          "symbol": "DecisionReceipt"
+        }
+      ]
+    },
+    {
+      "id": "schedule_jobs_workflow",
+      "title": "调度和后台壳不绕过任务队列",
+      "status": "present",
+      "detail": "Scheduler 到点写事件并 submit；WorkflowRunner 顺序 submit/wait；PlanManager 每步再入队并在失败时请求重试裁决；JobManager 的生产 EngineIntentRunner 优先走同一队列。",
+      "evidence": [
+        {
+          "path": "pyharness/core/schedule.py",
+          "start": 327,
+          "end": 345,
+          "symbol": "_fire"
+        },
+        {
+          "path": "pyharness/core/workflow.py",
+          "start": 20,
+          "end": 75,
+          "symbol": "WorkflowRunner"
+        },
+        {
+          "path": "pyharness/core/plan_mode.py",
+          "start": 389,
+          "end": 443,
+          "symbol": "plan_execute"
+        },
+        {
+          "path": "pyharness/core/orchestration.py",
+          "start": 155,
+          "end": 192,
+          "symbol": "EngineIntentRunner.run"
+        }
+      ]
+    },
+    {
+      "id": "compaction_keeps_source",
+      "title": "压缩保留原始事件真源",
+      "status": "present",
+      "detail": "Compactor 仅在请求边界写 context.compacted，改变历史投影，不删除 JSONL 原文；压缩不能画成持久化清除历史。",
+      "evidence": [
+        {
+          "path": "pyharness/core/agent_loop.py",
+          "start": 477,
+          "end": 485,
+          "symbol": "wake boundary"
+        },
+        {
+          "path": "pyharness/core/compaction.py",
+          "start": 372,
+          "end": 404,
+          "symbol": "compaction declaration"
+        }
+      ]
+    },
+    {
+      "id": "cancel_not_rollback",
+      "title": "工具超时和取消不代表撤销副作用",
+      "status": "present_with_limits",
+      "detail": "同步 Provider 在线程池执行，取消/超时驱逐池而不能杀死 Python 线程；执行器会明确写 partial 或可能仍运行的错误摘要。",
+      "evidence": [
+        {
+          "path": "pyharness/core/tool_invocation.py",
+          "start": 19,
+          "end": 54,
+          "symbol": "provider cancellation"
+        },
+        {
+          "path": "pyharness/core/tools_executor.py",
+          "start": 429,
+          "end": 441,
+          "symbol": "partial result"
+        }
+      ]
+    }
+  ],
+  "validation": {
+    "nodeCount": 41,
+    "relationCount": 85,
+    "findingCount": 13,
+    "evidenceRangeCount": 249,
+    "lineBoundsChecked": true,
+    "applicationExecuted": false
+  }
+}

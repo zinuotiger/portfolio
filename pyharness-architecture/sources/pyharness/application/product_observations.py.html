@@ -1,0 +1,98 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/product_observations.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/product_observations.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 98 行</span></nav><main class="wrap source-page"><h1>pyharness/application/product_observations.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：bf4f4179966eda15e882bf9f1846a52583bd3391<br>SHA-256（内容校验）：380ab8112b9ed0bc9c70245eb8aefb96f95227058b0168d181fdda923ef889f3</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 7 个类、函数与方法</summary><ul><li><a href="#L16">confirmation（函数） · L16–L22</a></li><li><a href="#L25">ProductObservations（类） · L25–L98</a><ul><li><a href="#L26">ProductObservations.compare_executions（异步方法） · L26–L36</a><ul><li><a href="#L32">ProductObservations.compare_executions.read（异步方法） · L32–L34</a></li></ul></li><li><a href="#L38">ProductObservations.permission_preview（异步方法） · L38–L62</a></li><li><a href="#L64">ProductObservations.execution_contexts（异步方法） · L64–L98</a><ul><li><a href="#L69">ProductObservations.execution_contexts.read（异步方法） · L69–L97</a></li></ul></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Authenticated projections over original execution facts; no runtime creation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from typing import Annotated</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pydantic import Field</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.workspace_contracts import ProjectId</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.execution_contracts import ExecutionId,ExecutionSessionId</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.product_execution_sessions import read_execution_log</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.execution_child_reader import read_child_log</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.application.execution_child_graph import child_admissions</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.core.lifecycle import admitted</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>ObservationId=Annotated[str,Field(pattern=r&#x27;^co-[0-9a-f]{16}$&#x27;)]</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>def confirmation(events,payload):</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    if payload[&#x27;request_seq&#x27;] is None:return &#x27;unavailable_for_adapter&#x27;</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    for event in events:</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        if event.seq&lt;=payload[&#x27;prefix_seq&#x27;] or event.payload.get(&#x27;request_seq&#x27;)!=payload[&#x27;request_seq&#x27;]:continue</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        if event.type==&#x27;llm.response&#x27;:return &#x27;response_recorded&#x27;</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        if event.type==&#x27;llm.error&#x27;:return &#x27;error_recorded&#x27;</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>    return &#x27;not_confirmed&#x27;</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>class ProductObservations:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    @admitted</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    async def compare_executions(self,project,body):</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        from pyharness.application.observation_contracts import CompareExecutions</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        from pyharness.application.run_observation_comparison import run_view,compare_runs</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        self._authorize(write=True);project=self._workspace_id(project,ProjectId)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        command=CompareExecutions.model_validate(body)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        async def read(views):</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            left=await run_view(self,*views[0]);right=await run_view(self,*views[1])</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            return dict(compare_runs(left,right),project_id=project)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        return await self.store.observe_execution_pair(project,(command.left_execution_id,command.right_execution_id),</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            authorize=lambda:self._authorize(write=True),read=read)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code></code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    @admitted</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    async def permission_preview(self,project,body):</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        from pyharness.application.observation_contracts import PermissionPreview</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        from pyharness.application.execution_contracts import PreviewExecution</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        from pyharness.application.execution_configuration import compiled_configuration,describe_execution</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        from pyharness.application.permission_observation import predict_permission</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        actor=self._authorize(write=True);project=self._workspace_id(project,ProjectId)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        command=PermissionPreview.model_validate(body)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        selection=PreviewExecution.model_validate(command.model_dump(include={&#x27;schema_version&#x27;,&#x27;attempt_ref&#x27;,&#x27;agent_ref&#x27;}))</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        authorize=lambda:self._authorize(write=True)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        snapshot,cfg=compiled_configuration(self,command.agent_ref)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        expected=describe_execution(self,command.agent_ref)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        describe=lambda:describe_execution(self,command.agent_ref)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        materials=await self.store.capture_execution_materials(project,selection,authorize=authorize,describe=describe)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        if describe()!=expected:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;permission_configuration_changed&#x27;)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        result=await predict_permission(snapshot,cfg,materials,command.tool_name,command.arguments)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        # Never hold the original control lock over a Guard await. Re-read and</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        # validate the exact basis after it, including fresh grant/Actor checks.</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        current=await self.store.capture_execution_materials(project,selection,authorize=authorize,describe=describe)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        if authorize()!=actor:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;permission_subject_changed&#x27;)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        if describe()!=expected or current[&#x27;materials_digest&#x27;]!=materials[&#x27;materials_digest&#x27;]:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            raise_code(&#x27;EVT-101&#x27;,reason=&#x27;permission_basis_changed&#x27;)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        return dict(result,project_id=project,attempt_ref=command.attempt_ref.model_dump(),</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            agent_ref=command.agent_ref.model_dump(),materials_digest=materials[&#x27;materials_digest&#x27;],</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            policy_fingerprint=expected[&#x27;model_fingerprint&#x27;],persisted=False)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    @admitted</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    async def execution_contexts(self,project,ident,session_id=None,observation_id=None):</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        self._authorize(write=True);project=self._workspace_id(project,ProjectId);ident=self._workspace_id(ident,ExecutionId)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        if session_id is not None:session_id=self._workspace_id(session_id,ExecutionSessionId)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        if observation_id is not None:observation_id=self._workspace_id(observation_id,ObservationId)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        async def read(row,summary):</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            directory=self.service._tenant_sessions_dir()</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            root=await read_execution_log(directory,row,self.service.tenant_id);root_events=list(root.events_after(0))</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            admissions=child_admissions(root_events,row)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            children=[dict(session_id=sid,depth=event.payload[&#x27;depth&#x27;]) for sid,event in admissions.items()]</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            sid=session_id or root.sid</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            if sid==root.sid:log=root</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            else:</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                if sid not in admissions:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;public_context_session_unavailable&#x27;)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                log=await read_child_log(directory,row,self.service.tenant_id,sid)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            events=list(log.events_after(0));facts=[e for e in events if e.type==&#x27;execution.context&#x27;]</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            common=dict(schema_version=1,project_id=project,execution_id=ident,session_id=sid,</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                attempt_ref=summary[&#x27;attempt_ref&#x27;],agent_ref=summary[&#x27;agent_ref&#x27;],execution_authorized=False)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            if observation_id is not None:</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                fact=next((e for e in facts if e.payload[&#x27;observation_id&#x27;]==observation_id),None)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                if fact is None:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;public_context_observation_unavailable&#x27;)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                return dict(common,**fact.payload,task_id=fact.task_id,source_seq=fact.seq,created_at=fact.ts,</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                    public_view_canonical=canonical(fact.payload[&#x27;public_view&#x27;]).decode(&#x27;utf-8&#x27;),</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                    dispatch_confirmation=confirmation(events,fact.payload),event_digest=digest_of(canonical(fact.model_dump(mode=&#x27;json&#x27;))))</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            items=[]</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            for event in facts[-20:]:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                p=event.payload</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                items.append(dict(observation_id=p[&#x27;observation_id&#x27;],source_seq=event.seq,created_at=event.ts,</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                    layer=p[&#x27;layer&#x27;],model=p[&#x27;model&#x27;],method=p[&#x27;method&#x27;],role=p[&#x27;role&#x27;],attempt=p[&#x27;attempt&#x27;],phase=p[&#x27;phase&#x27;],</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                    counts=p[&#x27;public_view&#x27;][&#x27;counts&#x27;],truncated=p[&#x27;public_view&#x27;][&#x27;truncated&#x27;],withheld=p[&#x27;public_view&#x27;][&#x27;withheld&#x27;],</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                    public_view_digest=p[&#x27;public_view_digest&#x27;],source_content_state=p[&#x27;source_content_state&#x27;],</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                    dispatch_confirmation=confirmation(events,p)))</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            return dict(common,context_status=&#x27;available&#x27; if facts else &#x27;unavailable&#x27;,reason=None if facts else &#x27;no_recorded_context&#x27;,</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                items=items,total=len(facts),truncated=len(facts)&gt;20,child_sessions=children)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        return await self.store.observe_execution(project,ident,authorize=lambda:self._authorize(write=True),read=read)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

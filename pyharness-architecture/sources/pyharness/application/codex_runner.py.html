@@ -1,0 +1,299 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/codex_runner.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/codex_runner.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 299 行</span></nav><main class="wrap source-page"><h1>pyharness/application/codex_runner.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：8ce7b38cef2ddb752add0e5af2727ceca1385072<br>SHA-256（内容校验）：f5f07ae55c608b29844f04fee63bfa786ac891f8ab4db8c85dacc5228a7afe41</p><p><a href="../../../architecture-detailed.html?node=codex_runner">CodexRunner（外部 Codex 执行适配）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 11 个类、函数与方法</summary><ul><li><a href="#L16">CodexResult（类） · L16–L19</a></li><li><a href="#L22">CodexRunner（类） · L22–L299</a><ul><li><a href="#L23">CodexRunner.__init__（方法） · L23–L40</a></li><li><a href="#L42">CodexRunner._approved（异步方法） · L42–L43</a></li><li><a href="#L45">CodexRunner._fact（异步方法） · L45–L47</a></li><li><a href="#L49">CodexRunner._authorize（异步方法） · L49–L52</a></li><li><a href="#L54">CodexRunner.run_for_task（异步方法） · L54–L74</a></li><li><a href="#L76">CodexRunner._invoke（异步方法） · L76–L151</a></li><li><a href="#L153">CodexRunner._stream（异步方法） · L153–L244</a></li><li><a href="#L246">CodexRunner._server_request（异步方法） · L246–L293</a></li><li><a href="#L295">CodexRunner.cancel_current（异步方法） · L295–L299</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Codex TaskRunner inside the existing queue, policy, approval and artifact chain.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code></code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import asyncio</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from dataclasses import dataclass</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from types import SimpleNamespace</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import uuid</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.core.task_queue import Task</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.core.tools_registry import ToolDefinition</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.core.provider_result import ProviderOutcome</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pyharness.integrations.codex_transport import CodexTransport</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>class CodexResult:</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    reason: str</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    error_code: str | None = None</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>class CodexRunner:</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>    def __init__(self, spine, runtime, *, transport_factory=None):</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        self.spine, self.runtime = spine, runtime</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        self.transport_factory = transport_factory or (lambda: CodexTransport(executable=runtime.definition.codex_executable))</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        self.transport = None</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        self.thread_id = self.turn_id = None</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        self.task_id = None</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>        self.result = None</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        self.dynamic_tools = {}</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        # All privileged execution crosses ToolExecutor and its governance re-entry.</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        for name in (&#x27;codex.run&#x27;, &#x27;codex.approve_command&#x27;, &#x27;codex.approve_file&#x27;):</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            spine.tool_registry.register_tool(ToolDefinition(name=name,</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                description=&#x27;Authorize the external Codex operation in the private workspace&#x27;,</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                owner=&#x27;builtin&#x27;, danger=&#x27;high&#x27;, approval=&#x27;always&#x27;, timeout_s=600,</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>                schema={&#x27;type&#x27;:&#x27;object&#x27;,&#x27;properties&#x27;:{&#x27;operation&#x27;:{&#x27;type&#x27;:&#x27;string&#x27;,&#x27;maxLength&#x27;:32000}},</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>                        &#x27;required&#x27;:[&#x27;operation&#x27;],&#x27;additionalProperties&#x27;:False}),</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>                provider=self._invoke if name == &#x27;codex.run&#x27; else self._approved)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            if name in runtime.definition.allowed_tools:</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>                spine.scope.policy.deny_tools.discard(name)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>    async def _approved(self, args, ctx):</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        return &#x27;Authorized once&#x27;</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    async def _fact(self, action, record):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        await self.spine.session.append(&#x27;executor.event&#x27;, {&#x27;executor&#x27;:&#x27;codex&#x27;, &#x27;action&#x27;:action,</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            &#x27;record&#x27;:record}, actor=&#x27;system&#x27;, task_id=self.task_id, sync=True)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    async def _authorize(self, name, operation, ctx, ident=None):</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        call = SimpleNamespace(name=name, raw_args={&#x27;operation&#x27;:operation[:32000]},</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                               call_id=ident or uuid.uuid4().hex)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        return await self.spine.tools.execute(call, ctx)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code></code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    async def run_for_task(self, task: Task) -&gt; CodexResult:</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        from pyharness.engine import agent_context, _owned_task_message</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        event = _owned_task_message(self.spine.session, task)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        if event is None:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            raise PyHError(&#x27;codex_input_missing&#x27;)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        ctx = await agent_context(self.spine, event)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        previous = getattr(ctx, &#x27;task_id&#x27;, None)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        ctx.task_id, self.task_id = task.id, task.id</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        self.result = None</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        try:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            async def invoke():</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                authorized = await self._authorize(&#x27;codex.run&#x27;, task.intent, ctx)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                if self.result is not None:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                    return self.result</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>                if not authorized.ok:</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                    return CodexResult(&#x27;failed&#x27;, &#x27;codex_governance_denied&#x27;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                return self.result or CodexResult(&#x27;failed&#x27;, &#x27;codex_missing_terminal&#x27;)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            return await self.runtime.run_task(event, ctx, invoke)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        finally:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            ctx.task_id = previous</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            self.task_id = None</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    async def _invoke(self, args, ctx):</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        ident = await self.runtime.sandbox(ctx)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        workspace = self.runtime.platform.sandboxes.workspace(ident)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        # Resume the last durable binding on the next explicit task only. A lost turn</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        # is never restarted automatically, because it may already have side effects.</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        previous = [e.payload[&#x27;record&#x27;] for e in ctx.session.events_after(0)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                    if e.type == &#x27;executor.event&#x27; and e.payload[&#x27;action&#x27;] == &#x27;thread_bound&#x27;]</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        thread = previous[-1][&#x27;thread_id&#x27;] if previous else None</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        self.thread_id = self.turn_id = None</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        transport = None</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        try:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            async with self.transport_factory() as transport:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                self.transport = transport</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                delegated = self.runtime.definition.codex_tools == &#x27;harness&#x27;</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                params = {&#x27;cwd&#x27;:str(workspace), &#x27;approvalPolicy&#x27;:&#x27;untrusted&#x27;,</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                          &#x27;sandbox&#x27;:&#x27;read-only&#x27; if delegated else &#x27;workspace-write&#x27;, &#x27;config&#x27;:{&#x27;mcp_servers&#x27;:{}, &#x27;web_search&#x27;:&#x27;disabled&#x27;},</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                          &#x27;developerInstructions&#x27;:self.runtime.definition.system_prompt}</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                if delegated:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                    specs = []</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                    for name in self.runtime.definition.allowed_tools:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                        if name.startswith((&#x27;codex.&#x27;,&#x27;mcp.&#x27;,&#x27;plugin.&#x27;)) or not self.spine.tool_registry.has(name):</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                            continue</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                        key = &#x27;harness_&#x27;+name.replace(&#x27;.&#x27;,&#x27;_&#x27;)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                        if key in self.dynamic_tools and self.dynamic_tools[key]!=name:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                            raise PyHError(&#x27;codex_tool_name_collision&#x27;)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                        self.dynamic_tools[key] = name</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                        definition = self.spine.tool_registry.lookup(name)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                        specs.append({&#x27;type&#x27;:&#x27;function&#x27;,&#x27;name&#x27;:key,&#x27;description&#x27;:definition.description,</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                                      &#x27;inputSchema&#x27;:definition.schema})</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                    params[&#x27;dynamicTools&#x27;] = specs</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                    params[&#x27;developerInstructions&#x27;] += &#x27;\nUse only harness_ client tools for files and commands. They enforce the published permissions and human approvals. Native shell/file tools and MCP are unavailable; do not attempt them. Paths are relative to the private task workspace.&#x27;</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                if self.runtime.definition.codex_model:</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                    params[&#x27;model&#x27;] = self.runtime.definition.codex_model</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                if thread:</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                    params[&#x27;threadId&#x27;] = thread</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                    params.pop(&#x27;dynamicTools&#x27;,None)  # Persisted tool contracts restore on resume.</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                binding = await transport.request(&#x27;thread/resume&#x27; if thread else &#x27;thread/start&#x27;, params)</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                self.thread_id = binding[&#x27;thread&#x27;][&#x27;id&#x27;]</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                old_usage = [e.payload[&#x27;record&#x27;] for e in ctx.session.events_after(0)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                    if e.type==&#x27;executor.event&#x27; and e.payload[&#x27;action&#x27;]==&#x27;usage&#x27;</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                    and e.payload[&#x27;record&#x27;].get(&#x27;thread_id&#x27;)==self.thread_id]</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                self.usage_baseline = old_usage[-1] if old_usage else {}</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                await self._fact(&#x27;thread_bound&#x27;, {&#x27;thread_id&#x27;:self.thread_id, &#x27;resumed&#x27;:bool(thread),</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                    &#x27;client_version&#x27;:getattr(transport,&#x27;client_version&#x27;,None),</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                    &#x27;tools_mode&#x27;:self.runtime.definition.codex_tools,</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                    &#x27;disabled_mcp_count&#x27;:len(getattr(transport,&#x27;disabled_mcp_servers&#x27;,()))})</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                turn = await transport.request(&#x27;turn/start&#x27;, {&#x27;threadId&#x27;:self.thread_id,</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                    &#x27;cwd&#x27;:str(workspace), &#x27;approvalPolicy&#x27;:&#x27;untrusted&#x27;,</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                    &#x27;sandboxPolicy&#x27;:{&#x27;type&#x27;:&#x27;readOnly&#x27;,&#x27;networkAccess&#x27;:False} if delegated else</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                                    {&#x27;type&#x27;:&#x27;workspaceWrite&#x27;,&#x27;writableRoots&#x27;:[str(workspace)],&#x27;networkAccess&#x27;:False},</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                    &#x27;input&#x27;:[{&#x27;type&#x27;:&#x27;text&#x27;,&#x27;text&#x27;:args[&#x27;operation&#x27;]}]})</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                self.turn_id = turn[&#x27;turn&#x27;][&#x27;id&#x27;]</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>                await self._fact(&#x27;turn_started&#x27;, {&#x27;thread_id&#x27;:self.thread_id,&#x27;turn_id&#x27;:self.turn_id})</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>                try:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                    self.result = await self._stream(ctx)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                finally:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                    if self.result is None:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                        try:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                            await asyncio.wait_for(self.cancel_current(), 2)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                        except Exception:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                            pass  # Transport close below terminates the owned process.</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            self.result = CodexResult(&#x27;cancelled&#x27;, &#x27;cancelled&#x27;)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            await self._fact(&#x27;interrupted&#x27;, {&#x27;turn_id&#x27;:self.turn_id})</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            raise</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        except Exception as exc:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            self.result = CodexResult(&#x27;failed&#x27;, &#x27;codex_disconnected&#x27;)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            await self._fact(&#x27;disconnected&#x27;, {&#x27;turn_id&#x27;:self.turn_id,&#x27;error_type&#x27;:type(exc).__name__,</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                &#x27;message&#x27;:getattr(exc,&#x27;public_message&#x27;,None)})</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            raise PyHError(&#x27;codex_disconnected&#x27;) from exc</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        finally:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            self.transport = None</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            if transport is not None:</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                process = getattr(transport,&#x27;process&#x27;,None)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                self.last_process_closed = process is None or process.returncode is not None</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        return ProviderOutcome({&#x27;ok&#x27;:self.result.reason == &#x27;complete&#x27;, &#x27;status&#x27;:self.result.reason})</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code></code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    async def _stream(self, ctx):</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        completed, started, answers, finals = set(), set(), [], []</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        self.server_responses = {}</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        tool_count = output_chars = event_count = 0</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        previous_input = getattr(self,&#x27;usage_baseline&#x27;,{}).get(&#x27;cumulative_input&#x27;,0)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        previous_output = getattr(self,&#x27;usage_baseline&#x27;,{}).get(&#x27;cumulative_output&#x27;,0)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        task_input = task_output = 0</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>        while True:</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            message = await self.transport.next_event()</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>            event_count += 1</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>            if event_count &gt; 10000:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                await self.cancel_current()</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                return CodexResult(&#x27;budget&#x27;,&#x27;codex_event_limit_exceeded&#x27;)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>            method, p = message[&#x27;method&#x27;], message.get(&#x27;params&#x27;, {})</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            if p.get(&#x27;threadId&#x27;) not in (None, self.thread_id) or p.get(&#x27;turnId&#x27;) not in (None, self.turn_id):</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                continue</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            if &#x27;id&#x27; in message:</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>                await self._server_request(message, ctx)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                continue</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            if method == &#x27;turn/completed&#x27; and p.get(&#x27;turn&#x27;, {}).get(&#x27;id&#x27;) == self.turn_id:</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>                status = p[&#x27;turn&#x27;][&#x27;status&#x27;]</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                await self._fact(&#x27;turn_completed&#x27;, {&#x27;turn_id&#x27;:self.turn_id, &#x27;status&#x27;:status})</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                if status == &#x27;completed&#x27;:</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                    if finals or answers:</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>                        await ctx.session.append(&#x27;agent.message&#x27;, {&#x27;content&#x27;:&#x27;\n\n&#x27;.join(finals or answers)},</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                            actor=&#x27;agent&#x27;, task_id=self.task_id, sync=True)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                    return CodexResult(&#x27;complete&#x27;)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>                return CodexResult(&#x27;cancelled&#x27; if status == &#x27;interrupted&#x27; else &#x27;failed&#x27;,</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                                   &#x27;cancelled&#x27; if status == &#x27;interrupted&#x27; else &#x27;codex_turn_failed&#x27;)</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>            if method in (&#x27;item/started&#x27;, &#x27;item/completed&#x27;):</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                item = p.get(&#x27;item&#x27;, {})</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                kind, ident = item.get(&#x27;type&#x27;), item.get(&#x27;id&#x27;)</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                if kind not in {&#x27;agentMessage&#x27;,&#x27;commandExecution&#x27;,&#x27;fileChange&#x27;,&#x27;plan&#x27;,&#x27;mcpToolCall&#x27;,&#x27;webSearch&#x27;,&#x27;dynamicToolCall&#x27;}:</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                    continue</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                if kind in {&#x27;mcpToolCall&#x27;,&#x27;webSearch&#x27;}:</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                    await self._fact(&#x27;capability_rejected&#x27;,{&#x27;type&#x27;:kind,&#x27;server&#x27;:item.get(&#x27;server&#x27;),</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                        &#x27;tool&#x27;:item.get(&#x27;tool&#x27;),&#x27;plugin_id&#x27;:item.get(&#x27;pluginId&#x27;)})</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                    await self.cancel_current()</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                    return CodexResult(&#x27;failed&#x27;,&#x27;codex_external_capability_denied&#x27;)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                if method == &#x27;item/started&#x27;:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                    if ident in started:</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                        continue</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                    started.add(ident)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                    if kind in {&#x27;commandExecution&#x27;,&#x27;fileChange&#x27;,&#x27;mcpToolCall&#x27;,&#x27;webSearch&#x27;}:</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>                        tool_count += 1</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>                        if tool_count &gt; self.runtime.definition.budget.tool_calls:</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>                            await self.cancel_current()</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>                            return CodexResult(&#x27;budget&#x27;, &#x27;codex_tool_budget_exceeded&#x27;)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                else:</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>                    if ident in completed:</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>                        continue</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                    completed.add(ident)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                    if kind == &#x27;agentMessage&#x27;:</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>                        answers.append(str(item.get(&#x27;text&#x27;,&#x27;&#x27;))[:32000])</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                        if item.get(&#x27;phase&#x27;)==&#x27;final&#x27;:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                            finals.append(str(item.get(&#x27;text&#x27;,&#x27;&#x27;))[:32000])</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                    if kind == &#x27;commandExecution&#x27;:</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                        self.runtime.command_results.setdefault(str(self.task_id), []).append({</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>                            &#x27;tool&#x27;:&#x27;codex.command&#x27;,&#x27;exit_code&#x27;:item.get(&#x27;exitCode&#x27;, -1),</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                            &#x27;output&#x27;:str(item.get(&#x27;aggregatedOutput&#x27;,&#x27;&#x27;))[:4000]})</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>                # Explicit whitelist; never retain reasoning items or arbitrary nested data.</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>                public = {k:item[k] for k in (&#x27;id&#x27;,&#x27;type&#x27;,&#x27;status&#x27;,&#x27;command&#x27;,&#x27;exitCode&#x27;,&#x27;durationMs&#x27;,&#x27;text&#x27;,&#x27;changes&#x27;) if k in item}</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>                from pyharness.application.platform_projection import summary</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                if kind==&#x27;commandExecution&#x27; and method==&#x27;item/completed&#x27;:</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>                    public[&#x27;output_summary&#x27;] = summary(item.get(&#x27;aggregatedOutput&#x27;,&#x27;&#x27;),4000)</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>                await self._fact(&#x27;item_started&#x27; if method == &#x27;item/started&#x27; else &#x27;item_completed&#x27;,</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>                                 {&#x27;item_id&#x27;:ident,&#x27;type&#x27;:kind,&#x27;detail&#x27;:summary(public, 12000)})</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>            elif method == &#x27;item/agentMessage/delta&#x27;:</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>                delta = str(p.get(&#x27;delta&#x27;,&#x27;&#x27;))[:4000]</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>                output_chars += len(delta)</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>                if output_chars &gt; min(100000, self.runtime.definition.budget.output_tokens*8):</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>                    await self.cancel_current()</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>                    return CodexResult(&#x27;budget&#x27;,&#x27;codex_output_limit_exceeded&#x27;)</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                if delta:</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                    await self._fact(&#x27;message_delta&#x27;, {&#x27;item_id&#x27;:p.get(&#x27;itemId&#x27;), &#x27;delta&#x27;:delta})</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>            elif method == &#x27;error&#x27;:</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                from pyharness.application.platform_projection import summary</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                error = p.get(&#x27;error&#x27;) or {}</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                await self._fact(&#x27;error&#x27;, {&#x27;message&#x27;:summary(error.get(&#x27;message&#x27;,&#x27;Codex reported an execution error&#x27;),2000)})</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            elif method == &#x27;thread/tokenUsage/updated&#x27;:</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                usage = (p.get(&#x27;tokenUsage&#x27;) or {}).get(&#x27;total&#x27;) or {}</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>                input_tokens, output_tokens = usage.get(&#x27;inputTokens&#x27;,0), usage.get(&#x27;outputTokens&#x27;,0)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                if type(input_tokens) is int and type(output_tokens) is int and input_tokens &gt;= 0 and output_tokens &gt;= 0:</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>                    delta_input,delta_output = max(0,input_tokens-previous_input),max(0,output_tokens-previous_output)</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>                    previous_input,previous_output = input_tokens,output_tokens</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>                    task_input += delta_input</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                    task_output += delta_output</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                    await self._fact(&#x27;usage&#x27;,{&#x27;thread_id&#x27;:self.thread_id,&#x27;input_tokens&#x27;:delta_input,</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                        &#x27;output_tokens&#x27;:delta_output,&#x27;cumulative_input&#x27;:input_tokens,&#x27;cumulative_output&#x27;:output_tokens,&#x27;cost&#x27;:&#x27;unknown&#x27;})</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>                    if task_input &gt; self.runtime.definition.budget.input_tokens or task_output &gt; self.runtime.definition.budget.output_tokens:</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>                        await self.cancel_current()</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>                        return CodexResult(&#x27;budget&#x27;,&#x27;codex_token_budget_exceeded&#x27;)</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code></code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>    async def _server_request(self, message, ctx):</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        method, p = message[&#x27;method&#x27;], message.get(&#x27;params&#x27;, {})</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        import hashlib</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        import json</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        fingerprint = hashlib.sha256(json.dumps({&#x27;method&#x27;:method,&#x27;params&#x27;:p},sort_keys=True).encode()).hexdigest()</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        cached = getattr(self,&#x27;server_responses&#x27;,{}).get(message[&#x27;id&#x27;])</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        if cached:</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>            if cached[0] != fingerprint:</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                raise PyHError(&#x27;codex_conflicting_server_request&#x27;)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>            await self.transport.send(cached[1])</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            return</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        # Do not approve privilege escalation, session-wide amendments, dynamic tools,</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        # user-input prompts or unknown future protocol methods.</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        decision = &#x27;decline&#x27;</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        if method == &#x27;item/tool/call&#x27;:</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>            name = self.dynamic_tools.get(p.get(&#x27;tool&#x27;))</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>            if self.runtime.definition.codex_tools!=&#x27;harness&#x27; or name not in self.runtime.definition.allowed_tools or p.get(&#x27;namespace&#x27;):</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>                result = {&#x27;success&#x27;:False,&#x27;contentItems&#x27;:[{&#x27;type&#x27;:&#x27;inputText&#x27;,&#x27;text&#x27;:&#x27;Tool not authorized&#x27;}]}</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            else:</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>                call = SimpleNamespace(name=name,raw_args=p.get(&#x27;arguments&#x27;),call_id=&#x27;codex-&#x27;+str(p.get(&#x27;callId&#x27;)))</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>                executed = await self.spine.tools.execute(call,ctx)</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>                result = {&#x27;success&#x27;:executed.ok,&#x27;contentItems&#x27;:[{&#x27;type&#x27;:&#x27;inputText&#x27;,&#x27;text&#x27;:executed.summary}]}</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>            response = {&#x27;id&#x27;:message[&#x27;id&#x27;],&#x27;result&#x27;:result}</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>            self.server_responses[message[&#x27;id&#x27;]] = (fingerprint,response)</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>            await self.transport.send(response)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            return</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        if method == &#x27;item/commandExecution/requestApproval&#x27; and self.runtime.definition.codex_tools==&#x27;native&#x27; and not p.get(&#x27;networkApprovalContext&#x27;) and not p.get(&#x27;proposedNetworkPolicyAmendments&#x27;):</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>            # A proposal is advisory. Accept this exact invocation only; never</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>            # return acceptForSession or an execpolicy amendment.</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>            operation = str(p.get(&#x27;command&#x27;) or p.get(&#x27;reason&#x27;) or &#x27;&#x27;)</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>            operation += &#x27;\nWorking directory: &#x27;+str(p.get(&#x27;cwd&#x27;) or &#x27;&#x27;)</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>            result = await self._authorize(&#x27;codex.approve_command&#x27;, operation, ctx)</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>            decision = &#x27;accept&#x27; if result.ok else &#x27;decline&#x27;</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        elif method == &#x27;item/fileChange/requestApproval&#x27; and self.runtime.definition.codex_tools==&#x27;native&#x27; and not p.get(&#x27;grantRoot&#x27;):</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>            result = await self._authorize(&#x27;codex.approve_file&#x27;, str(p.get(&#x27;reason&#x27;) or &#x27;Codex file change&#x27;), ctx)</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>            decision = &#x27;accept&#x27; if result.ok else &#x27;decline&#x27;</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        if method == &#x27;item/permissions/requestApproval&#x27;:</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>            result = {&#x27;permissions&#x27;:{},&#x27;scope&#x27;:&#x27;turn&#x27;}</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        elif method in {&#x27;item/commandExecution/requestApproval&#x27;, &#x27;item/fileChange/requestApproval&#x27;}:</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            result = {&#x27;decision&#x27;:decision}</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        else:</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>            await self.transport.send({&#x27;id&#x27;:message[&#x27;id&#x27;],&#x27;error&#x27;:{&#x27;code&#x27;:-32601,&#x27;message&#x27;:&#x27;Unsupported request&#x27;}})</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            return</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        response = {&#x27;id&#x27;:message[&#x27;id&#x27;],&#x27;result&#x27;:result}</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        if not hasattr(self,&#x27;server_responses&#x27;):</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>            self.server_responses = {}</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>        self.server_responses[message[&#x27;id&#x27;]] = (fingerprint,response)</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>        await self.transport.send(response)</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code></code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>    async def cancel_current(self, task_id: str | None = None):</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        if task_id and task_id != self.task_id:</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>            return</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        if self.transport and self.thread_id and self.turn_id:</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>            await self.transport.request(&#x27;turn/interrupt&#x27;, {&#x27;threadId&#x27;:self.thread_id,&#x27;turnId&#x27;:self.turn_id})</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

@@ -1,0 +1,298 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/approval_decisions.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/approval_decisions.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 298 行</span></nav><main class="wrap source-page"><h1>pyharness/core/approval_decisions.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：1c1c1d30c28e6446ba6dff07476b52a9a07df519<br>SHA-256（内容校验）：f1c13eec27cb4c85d621c2deeee7257a1ffe3795e2aa79ae85f6c522f8e9482a</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 24 个类、函数与方法</summary><ul><li><a href="#L13">ApprovalDecisions（类） · L13–L297</a><ul><li><a href="#L16">ApprovalDecisions.approve（方法） · L16–L23</a></li><li><a href="#L25">ApprovalDecisions.approve_async（异步方法） · L25–L27</a></li><li><a href="#L29">ApprovalDecisions.deny（方法） · L29–L31</a></li><li><a href="#L33">ApprovalDecisions.deny_async（异步方法） · L33–L35</a></li><li><a href="#L37">ApprovalDecisions.user_choice（异步方法） · L37–L57</a></li><li><a href="#L59">ApprovalDecisions._spawn_outcome（方法） · L59–L67</a></li><li><a href="#L69">ApprovalDecisions._decide_async（异步方法） · L69–L75</a></li><li><a href="#L77">ApprovalDecisions._prepare_outcome（方法） · L77–L100</a></li><li><a href="#L102">ApprovalDecisions._review_request（异步方法） · L102–L122</a></li><li><a href="#L124">ApprovalDecisions._emit_outcome（异步方法） · L124–L156</a></li><li><a href="#L158">ApprovalDecisions._release_if_last（异步方法） · L158–L161</a></li><li><a href="#L163">ApprovalDecisions._emit_verdict（异步方法） · L163–L166</a></li><li><a href="#L168">ApprovalDecisions.on_verdict（异步方法） · L168–L189</a></li><li><a href="#L191">ApprovalDecisions._cross_session（方法） · L191–L195</a></li><li><a href="#L197">ApprovalDecisions._note_replay（异步方法） · L197–L209</a></li><li><a href="#L211">ApprovalDecisions._settle（方法） · L211–L238</a></li><li><a href="#L240">ApprovalDecisions._start_ttl（方法） · L240–L250</a></li><li><a href="#L252">ApprovalDecisions._ttl_tick（方法） · L252–L261</a></li><li><a href="#L263">ApprovalDecisions._on_timeout（异步方法） · L263–L269</a></li><li><a href="#L271">ApprovalDecisions._wait_any（异步方法） · L271–L279</a></li><li><a href="#L281">ApprovalDecisions._cancel_request_start（方法） · L281–L287</a></li><li><a href="#L289">ApprovalDecisions._cancel_request（异步方法） · L289–L292</a></li><li><a href="#L294">ApprovalDecisions.cancel_all（方法） · L294–L297</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;ApprovalDecisions operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import asyncio</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import json</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import sys</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import time</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from typing import TYPE_CHECKING, Any, Optional</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.core.approval_models import logger, CHANNELS, VERDICTS, _OUTCOME_EVENTS, ApprovalRequest</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>if TYPE_CHECKING:  # 仅类型标注:executor 传入的 ToolCall 鸭子契约,运行期不依赖</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    pass</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>class ApprovalDecisions:</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    &quot;&quot;&quot;ApprovalDecisions responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    def approve(self, approval_id: int, *, by: str) -&gt; None:</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        &quot;&quot;&quot;人类批准入口(CLI/Web/ACP;外壳层唯一裁决通道,LLM 无权调用)。</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code></code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        by 由框架按通道上下文打(cli:&lt;user&gt;/web:&lt;会话&gt;/acp:&lt;client_id&gt;);身份</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        非法(llm:/tool:/plugin: 前缀)或 id 未知/已消费 → APR-503(防重放)。</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        结果事件强同步落盘后经总线分发 → on_verdict 唤醒等待者。</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        self._spawn_outcome(&quot;granted&quot;, approval_id, by)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    async def approve_async(self, approval_id: int, *, by: str) -&gt; None:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        &quot;&quot;&quot;等待强同步裁决、必要队列恢复及等待者可继续后才返回。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        await self._decide_async(&quot;granted&quot;, approval_id, by)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    def deny(self, approval_id: int, *, by: str) -&gt; None:</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        &quot;&quot;&quot;人类拒绝入口(同 approve:落 approval.denied)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        self._spawn_outcome(&quot;denied&quot;, approval_id, by)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>    async def deny_async(self, approval_id: int, *, by: str) -&gt; None:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        &quot;&quot;&quot;等待拒绝生效及本审批持有的队列暂停解除后才返回。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        await self._decide_async(&quot;denied&quot;, approval_id, by)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    async def user_choice(self, options: list[str],</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>                          *, prompt: str = &quot;选择(输入序号/文字): &quot;) -&gt; str:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        &quot;&quot;&quot;plan 单步失败三选一裁决通道(F046):仅交互 cli 通道可用。</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        headless/desktop 无键盘通道 → APR-501(安全默认由 plan 层中止);</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        输入接受序号或命中选项文字,词表外一律按“中止”安全默认。</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        if self._headless or self._channel != &quot;cli&quot;:</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>            raise_code(&quot;APR-501&quot;, reason=&quot;no-user-choice&quot;,</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>                       hint=&quot;无用户裁决通道(ctx.approval.user_choice 未接线)&quot;,</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>                       advice=&quot;headless/桌面无键盘三选一;单步失败直接中止&quot;)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        for i, opt in enumerate(options, 1):</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            print(f&quot;  {i}. {opt}&quot;, file=sys.stderr)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        try:</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            ans = (await asyncio.to_thread(input, prompt)).strip()</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        except (EOFError, KeyboardInterrupt):</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>            return &quot;中止&quot;</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        if ans.isdigit() and 1 &lt;= int(ans) &lt;= len(options):</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>            return options[int(ans) - 1]</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        hit = next((o for o in options if o in ans), None)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        return hit or &quot;中止&quot;</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    def _spawn_outcome(self, verdict: str, approval_id: int, by: str) -&gt; None:</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        self._require_human(by)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        if approval_id not in self._pending and self.owns_initializing(approval_id):</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            # CLI is a synchronous command sender. Its valid early command must</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            # join registration too; unknown/replayed IDs still fail below.</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            self._own(self._decide_async(verdict, approval_id, by))</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            return</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        req, sess, type_ = self._prepare_outcome(verdict, approval_id, by)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        req.completion = self._own(self._emit_outcome(req, sess, type_, by, actor=&quot;user&quot;))</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code></code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    async def _decide_async(self, verdict: str, approval_id: int, by: str) -&gt; None:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        # A request event may already be visible while registration is awaiting</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        # persistence. Join registration before looking up its ID.</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        async with self._transition_lock:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            req, sess, type_ = self._prepare_outcome(verdict, approval_id, by)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            req.completion = self._own(self._emit_outcome(req, sess, type_, by, actor=&quot;user&quot;))</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        await asyncio.shield(req.completion)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    def _prepare_outcome(self, verdict: str, approval_id: int, by: str, *, reviewed=False) -&gt; tuple:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        &quot;&quot;&quot;同步完成身份与 pending 校验,保证无效裁决立即抛错而不是后台吞掉。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        if not reviewed:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            self._require_human(by)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        elif self._reviewer is None or by != self._reviewer.identity:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>            raise_code(&#x27;APR-503&#x27;, why=&#x27;无独立审核器授权&#x27;)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        if self._detached:</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            raise_code(&quot;APR-503&quot;, why=&quot;审批服务已关闭&quot;)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        req = self._pending.get(int(approval_id))</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        if req is None or req.state != &quot;pending&quot;:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            raise_code(&quot;APR-503&quot;, approval_id=approval_id,</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                       why=&quot;未知或已裁决的 approval_id;同一审批至多一个结果(防重放)&quot;)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        if req.batch_mono and (time.monotonic()-req.batch_mono)*1000 &gt;= req.ttl_ms:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            raise_code(&#x27;APR-503&#x27;, approval_id=approval_id, why=&#x27;审批请求已过期&#x27;)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        if req.decision_inflight is not None:</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            raise_code(&quot;APR-503&quot;, approval_id=approval_id,</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                       why=f&quot;审批正在处理({req.decision_inflight}),拒绝重复裁决&quot;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        sess = req.log or self._session</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        if sess is None:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            raise_code(&quot;CYC-999&quot;, module=&quot;approval&quot;,</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                       hint=&quot;请求无会话日志落点,裁决无法强同步落盘&quot;)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        type_ = _OUTCOME_EVENTS[verdict]</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        req.decision_inflight = verdict</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        return req, sess, type_</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code></code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    async def _review_request(self, req, invocation):</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        &quot;&quot;&quot;Same completion owner as human decisions; guards remain unchanged.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        import hashlib</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        try:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            result = await asyncio.wait_for(self._reviewer.evaluate(invocation), self._reviewer.timeout)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            if not isinstance(result,dict) or result.get(&#x27;decision&#x27;) not in (&#x27;approve&#x27;,&#x27;deny&#x27;,&#x27;manual&#x27;) or not isinstance(result.get(&#x27;reason&#x27;),str):</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                raise ValueError(&#x27;invalid review result&#x27;)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        except Exception:</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            result = {&#x27;decision&#x27;:&#x27;manual&#x27;,&#x27;reason&#x27;:&#x27;自动审核失败或超时，转为人工审批&#x27;}</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        async with self._transition_lock:</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>            if req.state != &#x27;pending&#x27; or req.decision_inflight: return</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            await req.log.append(&#x27;approval.reviewed&#x27;, {&#x27;approval_id&#x27;:req.approval_id,</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>                &#x27;call_id&#x27;:req.call_id,&#x27;reviewer&#x27;:self._reviewer.identity, **result,</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                &#x27;invocation_sha256&#x27;:hashlib.sha256(json.dumps(invocation[&#x27;args&#x27;],sort_keys=True).encode()).hexdigest(),</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                &#x27;context_sha256&#x27;:hashlib.sha256(json.dumps(invocation[&#x27;context&#x27;]).encode()).hexdigest(),</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                &#x27;scope&#x27;:invocation[&#x27;scope&#x27;]}, actor=&#x27;system&#x27;,sync=True)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            if result[&#x27;decision&#x27;] == &#x27;manual&#x27;: return</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            lead, sess, type_ = self._prepare_outcome(&#x27;granted&#x27; if result[&#x27;decision&#x27;]==&#x27;approve&#x27; else &#x27;denied&#x27;,</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                req.approval_id,self._reviewer.identity,reviewed=True)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            lead.completion = self._own(self._emit_outcome(lead,sess,type_,self._reviewer.identity,actor=&#x27;system&#x27;))</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        await asyncio.shield(lead.completion)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code></code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    async def _emit_outcome(self, req: ApprovalRequest, sess: Any, type_: str,</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                            by: str, *, actor: str, emit: bool = True) -&gt; None:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        &quot;&quot;&quot;Only completion owner: durable verdict, queue acknowledgement, waiter.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        async with self._transition_lock:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            verdict = req.decision_inflight</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            if req.is_terminal:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                return</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            resume_attempted = False</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            try:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                if emit:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                    await self._emit_verdict(sess, type_,</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                        {&quot;approval_id&quot;: req.approval_id, &quot;by&quot;: by, &quot;ttl_ms&quot;: req.ttl_ms},</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                        actor=actor)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                resume_attempted = True</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                await self._release_if_last(req)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            except BaseException:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                # No granted waiter/slot on any incomplete commit. Retain the</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                # pending record if its queue transition still needs recovery.</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                released = False</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                if not resume_attempted:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                    try:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                        await self._release_if_last(req)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                        released = True</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                    except Exception:</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                        logger.warning(&quot;approval recovery failed; preserving commit error&quot;,</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                                       exc_info=True)</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                self._settle(req, &quot;denied&quot;, by=&quot;system&quot;, remove=released)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>                raise</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            if (verdict == &quot;granted&quot; and not self._detached</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>                    and self._enabled and req.channel in CHANNELS):</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                req.by = by</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                self._remember(req)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            self._settle(req, verdict, by)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code></code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    async def _release_if_last(self, req: ApprovalRequest) -&gt; None:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>        if self._suspended and not any(w is not req for w in self._pending.values()):</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            await self._resume_queue_or_record_async(req.log)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            self._suspended = False</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code></code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    async def _emit_verdict(self, sess: Any, type_: str, payload: dict, *,</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                            actor: str) -&gt; Any:</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>        return await sess.append(type_, payload, actor=actor, sync=True,</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                                 trace={&quot;kind&quot;: &quot;approval.verdict&quot;})</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code></code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    async def on_verdict(self, type_: str, payload: Any) -&gt; None:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        &quot;&quot;&quot;Legacy external verdict delivery; locally owned events are observations.</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code></code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        Never await our own completion from a SessionLog subscriber: append must</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        finish dispatch and strong flush before completion can proceed.</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        p = payload.payload if hasattr(payload, &quot;payload&quot;) else (payload or {})</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        aid = p.get(&quot;approval_id&quot;) if isinstance(p, dict) else None</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        req = self._pending.get(aid) if isinstance(aid, int) else None</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        if req is None or req.state != &quot;pending&quot; or self._cross_session(payload, req):</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            await self._note_replay(aid)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>            return</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        if req.decision_inflight is not None:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>            return</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        verdict = type_.rsplit(&quot;.&quot;, 1)[-1] if type_ else &quot;&quot;</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        if verdict not in VERDICTS or self._detached:</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>            return</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        by = p.get(&quot;by&quot;) or (&quot;system&quot; if verdict == &quot;timeout&quot; else &quot;&quot;)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        req.decision_inflight = verdict</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        req.completion = self._own(self._emit_outcome(</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            req, req.log, type_, by, actor=&quot;system&quot;, emit=False))</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>        await asyncio.shield(req.completion)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code></code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    def _cross_session(self, payload: Any, req: ApprovalRequest) -&gt; bool:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        &quot;&quot;&quot;信封会话与本请求会话不符 → 异会话串扰过滤(偏离 6;无信封视为同会话)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        if not hasattr(payload, &quot;session_id&quot;):</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            return False</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>        return bool(req.session_id) and payload.session_id != req.session_id</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code></code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    async def _note_replay(self, aid: Optional[int]) -&gt; None:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        &quot;&quot;&quot;重放/未知裁决留痕:system.error(APR-503),不重复执行。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        logger.warning(&quot;APR-503 未知或已处理的裁决 id=%s,已忽略(防重放)&quot;, aid)</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        sess = self._session</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        if sess is None:</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            return</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        try:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>            await sess.append(&quot;system.error&quot;,</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                              {&quot;code&quot;: &quot;APR-503&quot;,</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>                               &quot;hint&quot;: f&quot;未知或已处理的裁决 id={aid},已忽略(防重放)&quot;},</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                              actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>        except Exception as exc:                 # noqa: BLE001 尽力而为</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            logger.warning(&quot;approval system.error 落盘失败: %s&quot;, exc)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    def _settle(self, req: ApprovalRequest, verdict: str, by: str, *,</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                remove: bool = True) -&gt; None:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        &quot;&quot;&quot;终态迁移单点:批内全部 pending 成员迁移 + 取消 TTL + 解决各自 waiter。</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code></code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        幂等:成员已终态跳过(防重复解决);lead 从 _pending 摘除后,同 id 再收</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        裁决即 APR-503(重放闸)。合并等待者各自 waiter 在此级联解决(每个等待者</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>        各自配对裁决结果,granted 后各自独立重入 guard 链)。</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        lead_ref = req.approval_id                   # approval identity(仅 lead 有)</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        for w in list(req.batch):</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>            if w.state != &quot;pending&quot;:</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>                continue</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            w.state = verdict                    # 一次性迁移,终态不再接受裁决</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            w.by = by</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>            w.decision_inflight = None</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>            self._cancel_timer(w)</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>            if verdict == &quot;granted&quot; and w.call_id:</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                # 授权↔执行绑定:executor 重入 approval 决策时按 call_id 取此校验</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                self._grant_slots[w.call_id] = w.binding</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>            if w.call_id and lead_ref is not None:</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                # S4-P1-2:绑定 call_id → approval identity(= approval.requested 的</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                # seq)。merged waiter 自身无 approval_id,按批共享 lead 的 identity;</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                # 不新造 uuid,identity 恒来自真实请求事件。</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>                self._ref_slots[w.call_id] = lead_ref</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>            if not w.waiter.done():</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>                w.waiter.set_result(verdict)     # 唤醒 request() 等待者</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        if remove and req.approval_id is not None and req.approval_id in self._pending:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>            self._pending.pop(req.approval_id, None)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code></code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>    def _start_ttl(self, req: ApprovalRequest) -&gt; None:</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        &quot;&quot;&quot;起 TTL 定时器(仅 lead);到点无人裁决 → _on_timeout(与外部迟到裁决竞争)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        if req.ttl_ms &lt;= 0 or req.is_terminal:</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            return</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        try:</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>            loop = asyncio.get_running_loop()</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        except RuntimeError:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>            logger.warning(&quot;approval 无运行中事件循环,TTL 定时器未启动 id=%s&quot;,</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>                           req.approval_id)</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>            return</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        req.timer = loop.call_later(req.ttl_ms / 1000.0, self._ttl_tick, req)</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code></code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    def _ttl_tick(self, req: ApprovalRequest) -&gt; None:</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        &quot;&quot;&quot;定时器到点回调:转异步 _on_timeout(仍 pending 才落 timeout 事件)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        req.timer = None</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        if req.state != &quot;pending&quot;:</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            return</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        coro = self._on_timeout(req)</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        try:</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>            self._spawn(coro)</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        except Exception as exc:                 # noqa: BLE001 定时器路径不扩散</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>            logger.warning(&quot;approval TTL 触发失败 id=%s: %s&quot;, req.approval_id, exc)</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code></code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>    async def _on_timeout(self, req: ApprovalRequest) -&gt; None:</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        if req.state != &quot;pending&quot; or req.decision_inflight is not None:</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>            return</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        req.decision_inflight = &quot;timeout&quot;</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        req.completion = self._own(self._emit_outcome(</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>            req, req.log, &quot;approval.timeout&quot;, &quot;system&quot;, actor=&quot;system&quot;))</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        await asyncio.shield(req.completion)</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code></code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>    async def _wait_any(self, req: ApprovalRequest) -&gt; str:</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        try:</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>            return await asyncio.shield(req.waiter)</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>        except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>            try:</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>                await self._cancel_request(req)</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>            except Exception:</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>                logger.warning(&quot;approval cancel cleanup failed&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>            raise</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code></code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>    def _cancel_request_start(self, req):</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        lead = req.batch[0]</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        if lead.state == &quot;pending&quot; and lead.decision_inflight is None:</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>            lead.decision_inflight = &quot;denied&quot;</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            lead.completion = self._own(self._emit_outcome(</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                lead, lead.log, &quot;approval.denied&quot;, &quot;system&quot;, actor=&quot;system&quot;, emit=False))</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        return lead.completion</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code></code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>    async def _cancel_request(self, req):</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        completion = self._cancel_request_start(req)</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>        if completion is not None:</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>            await asyncio.shield(completion)</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code></code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>    def cancel_all(self, reason: str = &quot;detach&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>        &quot;&quot;&quot;Reserve denial synchronously; request/aclose join its full completion.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>        for req in list(self._pending.values()):</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>            self._cancel_request_start(req)</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

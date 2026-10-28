@@ -1,0 +1,351 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/engine_components.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/engine_components.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 351 行</span></nav><main class="wrap source-page"><h1>pyharness/engine_components.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：ddeca6ba41fe60f66e7f14e45e8c0669435db1e6<br>SHA-256（内容校验）：ae997c2cff0e63c41bd629db2ffebf51aac35d057aa98e239fbf4f8bdb483efc</p><p><a href="../../architecture-detailed.html?node=engine">Engine Assembly（会话引擎装配）</a> · <a href="../../architecture-detailed.html?node=guard">Guard Chain（权限守卫链）</a> · <a href="../../architecture-detailed.html?node=budget">Usage and Budget View（用量预算与观测）</a> · <a href="../../architecture-detailed.html?node=web_tools">Web Retrieval Tools（受限网络搜索与抓取）</a> · <a href="../../architecture-detailed.html?node=audit">Governance Audit（治理因果重放审计）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 3 个类、函数与方法</summary><ul><li><a href="#L22">_build_governance（函数） · L22–L63</a><ul><li><a href="#L41">_build_governance._guard_factory（方法） · L41–L55</a></li></ul></li><li><a href="#L65">build_runner_components（函数） · L65–L351</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Engine components: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import asyncio</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import copy</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from typing import Any, TYPE_CHECKING</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>if TYPE_CHECKING:</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>    pass</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.bus import EventBus</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.bus.registry import Registry</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>from pyharness.core.agent import CHANNEL_UNDECLARED</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>from pyharness.core.agent_loop import AgentLoop</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pyharness.core import llm as llm_mod</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from pyharness.core.scope import BudgetLimits, Scope, ScopePolicy, session_workspace</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from pyharness.engine_types import EngineSpine, EngineStorage, log</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>from pyharness.engine_policy import _apply_preset, _cfg_max_arg_failures, _cfg_probe_interval, _make_chain</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from pyharness.engine_events import _EVENT_TYPES_OR_ALL, _EVIDENCE_EVENT_TYPES, _sid_of, _tenant_of</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from pyharness.engine_runner import _evidence_producer</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code></code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>def _build_governance(cfg: Any, *, session: Any, bus: Any,</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>                      tool_reg: Any) -&gt; tuple[Any, Any]:</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>    &quot;&quot;&quot;治理层装配(S2-3):返回 ``(PolicyEngine, guard)``。</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    **只一条 GuardChain**:``guard`` 取自 ``policy.chain``(由注入的 chain_factory</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    产出),**禁止**另行直调 ``tools_guard.from_config``——否则 spine.guard 与</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    policy.chain 是两个对象(T-B 断言钉死)。</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    **注入参数同源**:同一份 ``inj`` 同时交给 ``describe_rules``(描述面)与</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    ``chain_factory``(执行面)。两处都把注入参数**烘焙进 guard 闭包**,参数分歧</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    ⇒ 治理层持有的规则与实际执行的链判定分歧(静默)。</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    治理层无执行权(ADR-013 G-4 / INV-G5):运行期关 2 经</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    ``ctx.governance.authorize``(S3-2-2 起),executor 不再直呼 ``ctx.guard.evaluate``。</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    from pyharness.core.tools_guard import describe_rules</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    from pyharness.core.tools_guard import from_config as guard_from_config</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    from pyharness.governance import PolicyEngine</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    def _guard_factory(cfg_, *, session=None, bus=None, validator=None,</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>                       credential_paths=None, path_exists=None,</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>                       link_resolver=None, approval_channel=None):</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        &quot;&quot;&quot;装配层适配:治理层契约参数名 → ``tools_guard.from_config`` 实际形参名。</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        治理层按设计用 ``credential_paths``(S2-1 设计 §3.2 契约);而</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        ``tools_guard.from_config`` 的实际形参是 ``credentials``。二者名字不同,</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        映射归**装配层**(治理层不 import tools_guard,ADR-018:308)。等同性:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        ``credentials=None`` 时 from_config 仍从 cfg 取默认清单,与 S1 行为一致。</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        return guard_from_config(cfg_, session=session, bus=bus,</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                                 credentials=credential_paths,</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>                                 validator=validator, path_exists=path_exists,</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                                 link_resolver=link_resolver,</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>                                 approval_channel=approval_channel)</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    inj = dict(validator=tool_reg.validate_args, credential_paths=None,</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>               path_exists=None, link_resolver=None, approval_channel=True)</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    policy = PolicyEngine.from_config(</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        cfg, session=session, bus=bus,</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        rules=describe_rules(**inj),</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        chain_factory=_guard_factory, **inj)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    return policy, policy.chain</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                            sessions_dir: Path,</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                            store: Any = None,</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>                            attach_persistence: bool = True,</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>                            channel: Any = CHANNEL_UNDECLARED,</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>                            llm_runtime: Any = None, register_model: bool = True, register_llm=None, record_to=None, workspace_for=None) -&gt; EngineSpine:</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    &quot;&quot;&quot;纯组件装配(复用外部已 open 的 SessionLog/bus/store)。</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    desktop 多会话场景:会话已由 DesktopSessionManager open(log_/store/bus</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    俱在),本函数只补 loop/scope/registry/tools/llm——避免第二 store 实例</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    同写一 JSONL(双缓冲竞态)。build_spine = 本函数 + 自建 store/session,</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    语义等价。</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    attach_persistence:总线→存储落盘订阅开关。自建 spine(build_spine)须开;</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    desktop 复用 manager 会话时 manager._attach_persistence 已订阅(owner=</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    persistence:{sid}),重复订阅 → 每事件双写 + store 游标错乱(实测卡死),</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    故 desktop 调用传 attach_persistence=False。</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    channel(GAP-11):外壳身份声明(三态见 ``EngineSpine.channel``)。**每条</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    生产路径都必须显式声明**——未声明时该引擎产出的任何决策都会在</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    ``authorize()`` 处以 APR-503 fail-closed,这是有意为之(装配缺陷可见,</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    不静默降级为 system 主体)。</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    # Connection registry keys and policy compilation are runtime-local state.</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    cfg = copy.deepcopy(cfg)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    # Resolve the required workspace before subscribing capability owners.</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    # A bad path must not leave approval listeners attached to a borrowed bus.</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    workspace_root = workspace_for(cfg, log_)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    loop = AgentLoop(cfg)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    # Scope(strict 最小权限 + cfg 预算);counters = 会话级共享用量计数器</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    # (F029 report_usage 入账 → task_total 读数,F032 硬闸与 llm 同一实例)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    limits = BudgetLimits.from_cfg(cfg)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    policy = ScopePolicy()                     # 默认:strict / 空 deny / 空域名</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    counters = llm_mod.UsageCounters()</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    scope = Scope(policy, limits, session_id=str(getattr(log_, &quot;sid&quot;, &quot;&quot;)),</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                  counters=counters, session=log_, bus=bus)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code></code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    # 预算门面(F032 只读消费面):与 Scope 共用同一 limits/counters 实例,</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    # 仪表盘读数 = 循环强制终态判据(2026-09-12 修复:此前无人赋值 ctx.budget,</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    # 导致 /api/budget 恒 disabled)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    from pyharness.core.budget import BudgetGate</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    budget_gate = BudgetGate(limits=limits, counters=counters, scope=scope,</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                             session_id=str(getattr(log_, &quot;sid&quot;, &quot;&quot;)))</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    # Registry(能力三类索引,agent 装配用)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    registry = Registry(bus)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code></code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    # ---- 工具链(F008/F014/F015 真装配):fs.* 4 工具 + 四关执行器 + guard + 审批</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    from pyharness.core.tools_registry import ToolRegistry</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    from pyharness.core.tools_executor import ToolExecutor</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    from pyharness.core.approval import ApprovalProvider</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    from pyharness.core import tool_fs</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    from pyharness.governance import (AuditSystem, DecisionEngine,</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>                                      EvidenceCollector, GovernanceContext,</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                                      ReceiptStore)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    tool_reg = ToolRegistry()</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    tool_fs.register(tool_reg)                 # fs.read_file/write_file/list_dir/delete_file</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    from pyharness.core import spill as spill_mod</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    spill_mod.register(tool_reg)               # storage.spill.read(F039 读工具,strict 可见)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    tools = ToolExecutor(tool_reg,                     # ctx.tools: schemas_for + execute(四关管道)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                         max_arg_failures=_cfg_max_arg_failures(cfg))</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    # 内置 g1-g7(单调,事件落 session)——2026-09-14 S1-01 修复:此前直构</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    # GuardChain(session,bus),绕过 from_config,导致三处装配缺口:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    #   ① validator 恒 None → g1 g-schema 在生产恒 allow(INV-04 内层复查失效);</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    #   ② cfg.security.guards.disabled 永不生效(运维以为关了,实际仍在链上);</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    #   ③ 凭据清单/path_exists/link_resolver 走默认,与 config 声明脱节。</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>    # 现经工厂装配并注入 validator=registry.validate_args(关1b 同源校验面)。</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    # approval_channel=True:engine 装配面视同交互通道在位(与修复前 None 的</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    # &quot;视同有通道&quot;语义等价);无通道场景仍由 approval 层 APR-501 兜底拒绝,</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    # 故本项不改变 headless 行为。</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    # 注意:不得用局部名 `policy` —— 上游已有 `policy = ScopePolicy()`(scope 的策略面),</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    # 遮蔽它会让下面的 danger_marks/_apply_preset 写到 PolicyEngine 上而 scope 失效</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    # (S2-3.2 实测:fs.delete_file 变可见)。故用 gov_policy。</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    gov_policy, guard = _build_governance(cfg, session=log_, bus=bus,</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                                          tool_reg=tool_reg)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    # N5:provider 缺省通道由**装配参数**决定(不再硬编码 &quot;desktop&quot;)。</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    # 未声明(CHANNEL_UNDECLARED)⇒ None(无缺省)。ctx 的声明才是权威;</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>    # 缺省仅供 user_choice/信任名单判定,**不**作为&quot;ctx 未声明&quot;的回退源。</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    approval = ApprovalProvider(</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        session=log_, bus=bus, config=cfg,</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        channel=(None if channel is CHANNEL_UNDECLARED else channel))</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code></code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    # danger 分级同源装配(F023):注册表 defn.danger → policy.danger_marks,</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    # scope.can_use 据此拦 critical、schemas_for 据此过滤不可见工具</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    marks = []</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    for d in tool_reg.iter_definitions():</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        lv = str(getattr(d, &quot;danger&quot;, &quot;none&quot;) or &quot;none&quot;)</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        if lv != &quot;none&quot;:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>            marks.append({&quot;pattern&quot;: str(d.name), &quot;level&quot;: lv})</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    if marks:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        policy.danger_marks = marks</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    # 权限预设档位(#39):locked/readonly/standard/strict(注册名已知后编译)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>    # scope 传入 → 同步段补 scope.updated 审计(装配期无 await,见 note_tighten)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>    _apply_preset(cfg, policy, tool_reg, scope=scope)</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    # workspace 根(F055):**每会话专属根** {storage.workspaces_dir}/{sid}</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>    # (PRD-Core §5.6 F055 / CFG.md §3.6 / OPS.md / DEP.md 一致口径;未设则 fs.*</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    # fail-closed)。2026-09-21 修:此前此处赋的是**裸** workspaces_dir → ①所有会话</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    # 共用同一 fs 根,跨会话文件互相可见/可写(会话隔离失效);②子会话工厂按规格</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    # 形态 base.parent/{sub_id} 推导时越出 workspaces 树且目录从未创建(子代理</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    # 文件类工具全废)。派生一律走 scope.session_workspace 单点,不再就地拼接。</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    policy.workspace_root = workspace_root</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    # storage.spill 定位器:首个 agent 就绪时 SpillProvider.enter 挂载(见</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    # _activate_storage_caps)——executor 关4 超长输出(&gt;2KB)→ spill 私有区 +</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    # ref 回喂(F039);激活失败时报 PERS-221 不崩(截断兜底)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code></code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    # LLM 门面(会话级;适配器须先 register_default_llm)+ 降级链(F013/F028):</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    # fallback_models 非空 → FallbackChain 挂载(指数退避 + 单调降级 + BudgetGuard</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>    # 前置);chain.adapters 引用 llm 模块注册表,后续 register 补注册立即可见</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    owns_llm_runtime = llm_runtime is None</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>    llm_runtime = llm_runtime or llm_mod.LLMRuntime()</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    if register_model:</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        register_llm(cfg, registry=llm_runtime.registry)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>    fb_models = list(getattr(getattr(cfg, &quot;llm&quot;, None), &quot;fallback_models&quot;, None) or [])</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    llm_client = llm_mod.LLMClient(</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        cfg, registry=llm_runtime.registry,</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        chain=_make_chain(cfg, bus, llm_runtime.registry) if fb_models else None)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>    # F033 健康探针:**回切的唯一驱动**。2026-09-21 修:`chain.probe_loop` 此前全库</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>    # 零生产调用者(只有单测启动过),而健康状态机只能被探针改回 healthy、降级链的</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    # idx 也只在探针里归零 ⇒ **一次降级即永久降级**(进程生命周期内不回切主模型),</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>    # `llm.recovered` 永不发出。此处按进程/会话生命周期起任务,close 时取消。</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    probe_task = None</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>    llm_chain = getattr(llm_client, &quot;chain&quot;, None)</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    if llm_chain is not None:</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        try:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>            probe_task = asyncio.get_running_loop().create_task(</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                llm_chain.probe_loop(interval_s=_cfg_probe_interval(cfg)),</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                name=f&quot;llm-probe:{getattr(log_, &#x27;sid&#x27;, &#x27;?&#x27;)}&quot;)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        except RuntimeError:                       # 无运行中事件循环(同步装配)</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            log.warning(&quot;llm 探针未启动(无运行中事件循环):模型降级后不会自动回切&quot;)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>    # F010 系统提示词装配器 / F058 压缩器:挂 ctx.sysprompt/ctx.compactor,</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    # agent-loop 出网前装配、wake 请求边界压缩(模块完整,装配即真链)</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>    from pyharness.core.system_prompt import SystemPromptAssembler</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    from pyharness.core.compaction import Compactor</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    sysprompt = SystemPromptAssembler(config=cfg)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>    compactor = Compactor.from_config(cfg)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>    # F047 目标管理 / #32 待办:状态只由 goal.*/todo.updated 事件派生,管理器</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    # 挂 ctx.goals/ctx.todos(工具 provider 消费面 + sysprompt 目标段数据源)</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>    from pyharness.core import tool_goal as _tool_goal</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>    from pyharness.core import tool_todo as _tool_todo</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>    from pyharness.core import tool_web as _tool_web</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    from pyharness.core.goal import GoalManager</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>    from pyharness.core.todo import TodoManager</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>    _tool_goal.register(tool_reg)                # goal.*(会话内自管理,恒可见)</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>    _tool_todo.register(tool_reg)                # todo.*</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    _tool_web.register(tool_reg)                 # web.search/fetch(域放行才可见)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>    from pyharness.core import kv as _tool_kv</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>    _tool_kv.register(tool_reg)                  # storage.kv(#53 会话 KV)</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>    from pyharness.core import tool_exec as _tool_exec</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>    _tool_exec.register(tool_reg)                # exec.* 沙箱族(#28/#29/#35/#58)</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    from pyharness.core import tool_ask as _tool_ask</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>    _tool_ask.register(tool_reg)                 # user.ask(#38 反问)</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>    from pyharness.core.skill import SkillManager</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>    from pyharness.core import tool_skill as _tool_skill</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>    _tool_skill.register(tool_reg)               # skill.load/list(F073 技能系统)</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>    from pyharness.core import tool_schedule as _tool_schedule</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>    _tool_schedule.register(tool_reg)            # schedule(F048 定时任务管理面)</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>    skill_roots = [Path(__file__).resolve().parents[1] / &quot;skills&quot;]</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>    try:</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        extra_skill_dir = getattr(getattr(cfg, &quot;skills&quot;, None), &quot;dir&quot;, None)</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        if extra_skill_dir:</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>            skill_roots.append(Path(str(extra_skill_dir)).expanduser())</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>    except Exception:                                    # noqa: BLE001</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        pass</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>    skills = SkillManager(skill_roots, session=log_)     # 仓库 + 用户技能目录</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    # ---- 插件系统:五态管理器(装载/热更/卸载经 async _preload_plugins 或</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>    #     桌面 API;同步装配段只建管理器,await 在 async 入口做)----</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>    from pyharness.bus.plugin import PluginManager</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>    plg_mgr = PluginManager()</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>    plg_state: dict = {}</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    goals = GoalManager(session=log_)</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>    todos = TodoManager(session=log_)</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>    from pyharness.core.user_ask import AskProvider</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>    ask = AskProvider(session=log_, bus=bus)     # #38 反问宿主(pending/答复)</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>    from pyharness.core.plan_mode import PlanManager</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>    from pyharness.core.schedule import Scheduler</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>    from pyharness.core.tool_web import BingRssBackend, DuckDuckGoBackend</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>    plan = PlanManager()                         # F045/F046 计划模式</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>    schedule = Scheduler(session=log_, task_queue=None,</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>                         auto_ticker=True)       # F048 定时任务</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>    net = getattr(getattr(cfg, &quot;security&quot;, None), &quot;network&quot;, None)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>    backend_name = str(getattr(net, &quot;search_backend&quot;, &quot;disabled&quot;))</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>    endpoint = str(getattr(net, &quot;search_endpoint&quot;, &quot;&quot;))</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>    search_ep = &quot;&quot;</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>    if backend_name == &quot;bing&quot;:</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        search_ep = endpoint or &quot;https://cn.bing.com/search&quot;</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        search_backend = BingRssBackend(search_ep)</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>    elif backend_name == &quot;duckduckgo&quot;:</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        search_ep = endpoint or &quot;https://html.duckduckgo.com/html/&quot;</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        search_backend = DuckDuckGoBackend(search_ep)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>    else:</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        search_backend = None</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>    # g5 外发闸:web.search 无 url 参数,以其后端 host 作目标域(P3:web.search 恒拒)</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>    # ——操作者在 allowed_domains 列入后端 host 后 web.search 方可通行;未配后端=空。</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>    if search_backend is not None:</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>        from urllib.parse import urlsplit</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        try:</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            policy.search_host = (urlsplit(search_ep).hostname or &quot;&quot;).lower()</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        except Exception:                            # noqa: BLE001 解析失败=空(恒拒)</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>            policy.search_host = &quot;&quot;</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code></code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>    # SessionLog 接总线落盘订阅(事件一入内存即入真源队列)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>    engine_owners: list[str] = []              # 本会话在总线上持有的属主(收尾按属主摘除)</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>    if attach_persistence:</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        if bus is not None:</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            # 属主含**租户**(R12):多租户共用总线时,同名 sid 可能并存(会话目录按</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>            # 租户分目录)—— 属主只含 sid 会让两租户同属主,摘一个连坐另一个。</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>            owner = f&quot;engine:{_tenant_of(log_)}:{_sid_of(log_)}&quot;</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>            engine_owners.append(owner)</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>            for t in _EVENT_TYPES_OR_ALL():</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>                bus.subscribe(t, record_to(store, _sid_of(log_)), owner=owner)</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        if store is not None:</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>            log_._bus = bus                  # append → 分发 → 落盘闭环</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code></code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>    # 治理证据装配(S5-2b):**构造 → 订阅 → 注入**(顺序不可颠倒,否则首事件丢失)</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>    # ``EvidenceCollector`` 的索引是**只读派生缓存**(可由事件日志完全重建,INV-E3);</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>    # 它只**消费**事件、不产生事件——唯一写点仍是 ``archive()`` 的 evidence.archived。</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>    # 订阅 owner 与落盘订阅区分开,便于 deactivate 时各自摘除。</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>    evidence = EvidenceCollector(session=log_)</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>    if bus is not None:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        ev_owner = f&quot;governance-evidence:{_tenant_of(log_)}:{_sid_of(log_)}&quot;</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        engine_owners.append(ev_owner)</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        for t in _EVIDENCE_EVENT_TYPES:</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>            bus.subscribe(t, evidence.on_event, owner=ev_owner)</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code></code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>    # 治理审计装配(S5-3b):**只构造、只注入** —— ``AuditSystem`` 是 **replay-only**</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>    # (仅重放)的派生视图:**不订阅**任何事件、**不缓存**跨调用状态。**默认零写**;</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>    # 唯一写点是 ``reconcile(emit=True)`` 的既有 ``syscheck.fail``。</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>    # S5-4:旧审计面兼容适配**经注入**(治理层不得 import core,ADR-018:308)。</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>    from pyharness.core.telemetry import session_audit as _legacy_audit</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>    audit = AuditSystem(session=log_, legacy_audit=_legacy_audit)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code></code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>    spine = EngineSpine(</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>        session=log_, bus=bus, registry=registry,</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        scope=scope, llm=llm_client, tools=tools,</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>        guard=guard, approval=approval,</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        governance=GovernanceContext(policy=gov_policy,</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>                                     decisions=DecisionEngine(),</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>                                     receipts=ReceiptStore(),</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>                                     evidence=evidence,</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                                     audit=audit),</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        counters=counters, sysprompt=sysprompt, compactor=compactor,</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        goals=goals, todos=todos, ask=ask, skills=skills,</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>        plugins=plg_mgr, plugin_state=plg_state, tool_registry=tool_reg,</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        streaming=bool(getattr(getattr(cfg, &quot;loop&quot;, None), &quot;streaming&quot;, False)),</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        loop=loop, sys=None, settings=cfg,</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        storage=EngineStorage(sessions_dir=sessions_dir),</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        persistence=store, plan=plan, schedule=schedule,</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>        budget=budget_gate,</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>        search_backend=search_backend,</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        llm_probe=probe_task,</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        channel=channel)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>    spine.owns_persistence = attach_persistence</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>    spine.llm_runtime = llm_runtime</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>    spine.owns_llm_runtime = owns_llm_runtime</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>    # 真实编排适配层:jobs/subagent 不再停在 runner=None 的模块单测状态。</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>    # SubagentManager 的 announce 使用 tool_registry 直接绑 Provider;模型经</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>    # 正常 ToolExecutor 看到 subagent.spawn。</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>    from pyharness.core.jobs import JobManager</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>    from pyharness.core.orchestration import (EngineIntentRunner,</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>                                              EngineSubagentRunner)</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>    from pyharness.core.subagent import SubagentManager</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>    spine.jobs = JobManager(session=log_, task_queue=None,</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>                            runner=EngineIntentRunner(spine), bus=bus)</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>    sub_runner = EngineSubagentRunner(spine, sessions_dir,</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>                                      evidence_producer=_evidence_producer)</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>    spine.subagent = SubagentManager(</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>        session=log_, runner=sub_runner, parent_scope=scope,</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        tools=tool_reg, bus=bus, cfg=cfg,</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>        session_factory=sub_runner.child_session)</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>    # N3/M5-3:证据生产者订阅**段关闭**(而非 run_for_task 的函数体)。</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>    # 订阅面与落盘订阅 owner 区分开,便于 deactivate 时各自摘除。</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>    if bus is not None:</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>        prod_owner = f&quot;governance-evidence-producer:{_tenant_of(log_)}:{_sid_of(log_)}&quot;</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>        engine_owners.append(prod_owner)</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>        bus.subscribe(</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>            &quot;segment.end&quot;, _evidence_producer(spine), owner=prod_owner)</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>    spine.bus_owners = engine_owners</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>    # R12-3:审批 → 队列联动接线(惰性取值:队列可能由 attach/外壳在**之后**挂上</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>    # spine.task_queue)。挂起审批时真挂起本会话队列,恢复时真恢复 —— 使</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>    # `queue.suspended/resumed` 事件与 `queue.status().paused` 一致。</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>    try:</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>        spine.approval._queue_getter = lambda: spine.task_queue</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>    except Exception:                            # noqa: BLE001 旧形状 provider:跳过</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>        log.debug(&quot;approval 队列联动未接线(provider 形状不支持)&quot;)</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>    return spine</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

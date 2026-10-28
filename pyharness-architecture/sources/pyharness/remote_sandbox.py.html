@@ -1,0 +1,258 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/remote_sandbox.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/remote_sandbox.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 258 行</span></nav><main class="wrap source-page"><h1>pyharness/remote_sandbox.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：dcf60171d266cf195195da39d951de635b2b213f<br>SHA-256（内容校验）：342f98a25808e2bf177dbce3288ecccbd26b399b514c5b6cdf788b0701a3e7cc</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 16 个类、函数与方法</summary><ul><li><a href="#L32">create_app（函数） · L32–L236</a><ul><li><a href="#L43">create_app.save（方法） · L43–L45</a></li><li><a href="#L47">create_app.audit（方法） · L47–L53</a></li><li><a href="#L55">create_app.remove（异步方法） · L55–L66</a></li><li><a href="#L68">create_app.janitor（异步方法） · L68–L83</a></li><li><a href="#L85">create_app.lifespan（异步方法） · L85–L106</a></li><li><a href="#L111">create_app.authenticate（异步方法） · L111–L126</a></li><li><a href="#L128">create_app.owned（方法） · L128–L133</a></li><li><a href="#L135">create_app.health（异步方法） · L135–L143</a></li><li><a href="#L145">create_app.create（异步方法） · L145–L171</a></li><li><a href="#L173">create_app.execute（异步方法） · L173–L200</a></li><li><a href="#L202">create_app.status（异步方法） · L202–L205</a></li><li><a href="#L207">create_app.files（异步方法） · L207–L215</a></li><li><a href="#L217">create_app.file_operation（异步方法） · L217–L226</a></li><li><a href="#L228">create_app.cancel（异步方法） · L228–L235</a></li></ul></li><li><a href="#L239">main（函数） · L239–L254</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Authenticated, independently deployable Docker worker. Never executes on host.</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Run: python -m pyharness.remote_sandbox --help. Tokens come from an owner-only</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>JSON file, never command line arguments. A token identifies one account.</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>import asyncio</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>import base64</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from contextlib import asynccontextmanager</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import hashlib</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>import json</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>import os</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>import secrets</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>import time</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>import uuid</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from fastapi import FastAPI, Request, HTTPException</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from fastapi.responses import JSONResponse</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>from pyharness.core.sandbox_models import SandboxProfile, SandboxRecord</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>from pyharness.core.sandbox import SandboxManager, safe_path, read_regular</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>from pyharness.core.tenant_settings import TenantSettingsStore</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>from pyharness.errors import PyHError</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>from pyharness.core.workspace_codec import MAX_BYTES, pack_files, unpack_files</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code></code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code></code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>def create_app(root: Path, accounts: dict[str, str], *, manager=None, retention=900,</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>               max_active=4, images=(&#x27;python:3.13-slim&#x27;,)):</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    &quot;&quot;&quot;manager injection is for deterministic tests only; CLI always uses Docker.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    if not accounts or len(set(accounts.values())) != len(accounts) or any(not isinstance(token,str) or not 32&lt;=len(token)&lt;=4096 or not token.isascii() or any(c.isspace() or ord(c)&lt;33 for c in token) for token in accounts.values()):</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        raise ValueError(&#x27;Each account needs a random token of at least 32 characters&#x27;)</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    root = Path(root)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    root.mkdir(parents=True, exist_ok=True)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    manager = manager or SandboxManager(root / &#x27;workspaces&#x27;)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    tasks, jobs = {}, {}</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    lock = asyncio.Lock()</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code></code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    def save():</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        doc = {key: {k: v for k, v in row.items() if k != &#x27;lock&#x27;} for key, row in tasks.items()}</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        TenantSettingsStore._atomic_write(root / &#x27;tasks.json&#x27;, json.dumps(doc).encode())</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    def audit(owner, task, action, **data):</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        # No tokens, file contents or command text in service logs.</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        line = json.dumps(dict(time=time.time(), owner=owner, task=task, action=action, **data))</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        if (root/&#x27;audit.jsonl&#x27;).exists() and (root/&#x27;audit.jsonl&#x27;).stat().st_size&gt;5*1048576:</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>            os.replace(root/&#x27;audit.jsonl&#x27;,root/&#x27;audit.previous.jsonl&#x27;)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        with (root / &#x27;audit.jsonl&#x27;).open(&#x27;a&#x27;, encoding=&#x27;utf-8&#x27;) as stream:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>            stream.write(line + &#x27;\n&#x27;); stream.flush(); os.fsync(stream.fileno())</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    async def remove(ident):</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        row = tasks[ident]</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        job = jobs.get(ident)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        if job and not job.done():</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            job.cancel()</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            await asyncio.gather(job, return_exceptions=True)</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        if row[&#x27;sandbox&#x27;] in manager.records:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            await manager.destroy(row[&#x27;sandbox&#x27;])</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        row[&#x27;status&#x27;] = &#x27;deleted&#x27;</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        row[&#x27;result&#x27;] = None</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        save()</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        audit(row[&#x27;owner&#x27;], ident, &#x27;deleted&#x27;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code></code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    async def janitor():</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        while True:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            await asyncio.sleep(2)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            async with lock:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                for ident, row in list(tasks.items()):</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                    if row[&#x27;status&#x27;] == &#x27;deleted&#x27;:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                        if row[&#x27;expires&#x27;]+86400 &lt; time.time(): del tasks[ident];save()</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                        continue</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                    over = False</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                    try:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                        pack_files(manager.workspace(row[&#x27;sandbox&#x27;]))</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                    except Exception:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                        over = True</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                    if row[&#x27;expires&#x27;] &lt; time.time() or over:</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                        try: await remove(ident)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                        except Exception: audit(row[&#x27;owner&#x27;], ident, &#x27;cleanup_failed&#x27;)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code></code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    @asynccontextmanager</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    async def lifespan(app):</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        # Recover only containers whose owner label matches this worker root.</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        if (root / &#x27;tasks.json&#x27;).exists():</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            old = json.loads((root / &#x27;tasks.json&#x27;).read_text(&#x27;utf-8&#x27;))</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            for ident, row in old.items():</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                if row[&#x27;status&#x27;] != &#x27;deleted&#x27;:</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>                    record = SandboxRecord.model_validate(row[&#x27;record&#x27;])</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                    await manager.recover(record)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                    await manager.destroy(record.sandbox_id)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                    audit(row[&#x27;owner&#x27;], ident, &#x27;restart_cleanup&#x27;)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            tasks.update({k: {**v, &#x27;status&#x27;: &#x27;deleted&#x27;, &#x27;result&#x27;: None} for k, v in old.items()})</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            save()</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        cleaner = asyncio.create_task(janitor())</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        try: yield</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        finally:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            cleaner.cancel()</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            await asyncio.gather(cleaner, return_exceptions=True)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            async with lock:</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                for ident, row in tasks.items():</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                    if row[&#x27;status&#x27;] != &#x27;deleted&#x27;: await remove(ident)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            await manager.close()</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    app.state.manager, app.state.tasks = manager, tasks</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    @app.middleware(&#x27;http&#x27;)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    async def authenticate(request, next_handler):</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        given = request.headers.get(&#x27;authorization&#x27;, &#x27;&#x27;).removeprefix(&#x27;Bearer &#x27;)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        owner = next((name for name, token in accounts.items() if secrets.compare_digest(given, token)), None)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        if owner is None: return JSONResponse({&#x27;code&#x27;: &#x27;unauthorized&#x27;}, status_code=401)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        request.state.owner = owner</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        # Bound decoded request bodies, including chunked requests.</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        raw = bytearray()</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        async for chunk in request.stream():</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>            raw.extend(chunk)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            if len(raw) &gt; 15 * 1048576:</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                return JSONResponse({&#x27;code&#x27;: &#x27;request_too_large&#x27;}, status_code=413)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        request._body = bytes(raw)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        try: return await next_handler(request)</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        except (PyHError, ValueError, KeyError):</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>            return JSONResponse({&#x27;code&#x27;: &#x27;remote_operation_failed&#x27;}, status_code=422)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code></code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    def owned(request, ident):</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        row = tasks.get(ident)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        if not row or row[&#x27;owner&#x27;] != request.state.owner or row[&#x27;status&#x27;] == &#x27;deleted&#x27;:</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            raise HTTPException(404, &#x27;task_not_found&#x27;)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        if row[&#x27;expires&#x27;] &lt; time.time(): raise HTTPException(410, &#x27;task_expired&#x27;)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        return row</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code></code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    @app.get(&#x27;/v1/health&#x27;)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    async def health():</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        engine = await manager.backends[&#x27;isolated&#x27;].health()</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        image_ready = {}</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        for image in images:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            check = await manager.backends[&#x27;isolated&#x27;]._command([&#x27;image&#x27;, &#x27;inspect&#x27;, image], timeout=5)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            image_ready[image] = check[&#x27;exit_code&#x27;] == 0</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        return {&#x27;protocol&#x27;: 1, &#x27;engine&#x27;: engine, &#x27;images&#x27;: image_ready,</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>                &#x27;ready&#x27;: engine[&#x27;status&#x27;] == &#x27;available&#x27; and all(image_ready.values())}</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    @app.post(&#x27;/v1/tasks/{ident}&#x27;)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    async def create(request: Request, ident: str):</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        if not __import__(&#x27;re&#x27;).fullmatch(r&#x27;[a-f0-9]{32}&#x27;, ident): raise HTTPException(422)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        body = await request.json()</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        profile = SandboxProfile.model_validate({**body[&#x27;profile&#x27;], &#x27;mode&#x27;: &#x27;isolated&#x27;, &#x27;remote_connection&#x27;: None})</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        if profile.image not in images: raise HTTPException(422, &#x27;image_not_allowed&#x27;)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        fingerprint = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        async with lock:</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            if ident in tasks:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                row = owned(request, ident)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                if row[&#x27;fingerprint&#x27;] != fingerprint: raise HTTPException(409, &#x27;idempotency_conflict&#x27;)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                return {&#x27;task_id&#x27;: ident, &#x27;status&#x27;: row[&#x27;status&#x27;]}</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>            if len(tasks)&gt;=4096: raise HTTPException(429,&#x27;worker_metadata_quota&#x27;)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            if sum(r[&#x27;owner&#x27;] == request.state.owner and r[&#x27;status&#x27;] != &#x27;deleted&#x27; for r in tasks.values()) &gt;= max_active:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                raise HTTPException(429, &#x27;account_quota&#x27;)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            record = await manager.create(ident, profile.model_copy(update={&#x27;workspace_mode&#x27;: &#x27;empty&#x27;}))</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>            try:</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                async with manager.snapshot(record.sandbox_id) as workspace:</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                    unpack_files(workspace, body.get(&#x27;files&#x27;, {}))</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>            except BaseException:</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                await manager.destroy(record.sandbox_id)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                raise</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>            tasks[ident] = dict(owner=request.state.owner, sandbox=record.sandbox_id,</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                record=record.model_dump(), fingerprint=fingerprint, status=&#x27;ready&#x27;, result=None,</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>                operation=None, expires=time.time() + min(max(retention, 30), 3600))</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>            save(); audit(request.state.owner, ident, &#x27;created&#x27;)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>            return {&#x27;task_id&#x27;: ident, &#x27;status&#x27;: &#x27;ready&#x27;}</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code></code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    @app.post(&#x27;/v1/tasks/{ident}/execute&#x27;)</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>    async def execute(request: Request, ident: str):</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        body = await request.json()</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        command, operation = body.get(&#x27;command&#x27;), body.get(&#x27;operation&#x27;)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        if not isinstance(command, str) or len(command) &gt; 32000 or not isinstance(operation, str) or len(operation) &gt; 64:</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            raise HTTPException(422)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        async with lock:</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>            row = owned(request, ident)</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>            digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>            if row[&#x27;operation&#x27;] == operation:</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>                if row.get(&#x27;operation_digest&#x27;) != digest: raise HTTPException(409, &#x27;idempotency_conflict&#x27;)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>                return {&#x27;status&#x27;: row[&#x27;status&#x27;]}</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>            if row[&#x27;status&#x27;] not in (&#x27;ready&#x27;, &#x27;completed&#x27;): raise HTTPException(409, &#x27;task_busy&#x27;)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>            row.update(status=&#x27;running&#x27;, operation=operation, operation_digest=digest, result=None)</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>            save(); audit(row[&#x27;owner&#x27;], ident, &#x27;executing&#x27;, operation=operation, digest=digest)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            async def run():</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                try:</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                    result = await manager.execute(row[&#x27;sandbox&#x27;], command, python=body.get(&#x27;python&#x27;) is True)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                    row.update(status=&#x27;completed&#x27;, result=result)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                    row.update(status=&#x27;cancelled&#x27;, result={&#x27;error_code&#x27;: &#x27;cancelled&#x27;})</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                    raise</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                except Exception as exc:</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                    row.update(status=&#x27;failed&#x27;, result={&#x27;error_code&#x27;: &#x27;timeout&#x27; if isinstance(exc, asyncio.TimeoutError) else &#x27;execution_failed&#x27;})</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>                finally:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>                    save(); audit(row[&#x27;owner&#x27;], ident, row[&#x27;status&#x27;], operation=operation)</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            jobs[ident] = asyncio.create_task(run())</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            return {&#x27;status&#x27;: &#x27;running&#x27;}</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code></code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>    @app.get(&#x27;/v1/tasks/{ident}&#x27;)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    async def status(request: Request, ident: str):</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        row = owned(request, ident)</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        return {key: row[key] for key in (&#x27;status&#x27;, &#x27;result&#x27;, &#x27;operation&#x27;, &#x27;expires&#x27;)}</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code></code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    @app.post(&#x27;/v1/tasks/{ident}/files&#x27;)</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>    async def files(request: Request, ident: str):</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        body = await request.json()</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        async with lock:</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>            row = owned(request, ident)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>            if row[&#x27;status&#x27;] not in (&#x27;ready&#x27;, &#x27;completed&#x27;): raise HTTPException(409, &#x27;task_busy&#x27;)</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            async with manager.snapshot(row[&#x27;sandbox&#x27;]) as workspace:</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>                if &#x27;files&#x27; in body: unpack_files(workspace, body[&#x27;files&#x27;])</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>                return {&#x27;files&#x27;: pack_files(workspace)}</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code></code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>    @app.post(&#x27;/v1/tasks/{ident}/file-operation&#x27;)</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>    async def file_operation(request: Request, ident: str):</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        body = await request.json()</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        async with lock:</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>            row = owned(request, ident)</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>            if row[&#x27;status&#x27;] not in (&#x27;ready&#x27;, &#x27;completed&#x27;): raise HTTPException(409, &#x27;task_busy&#x27;)</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            if body.get(&#x27;name&#x27;) not in (&#x27;fs.read_file&#x27;, &#x27;fs.list_dir&#x27;, &#x27;fs.write_file&#x27;, &#x27;fs.patch&#x27;): raise HTTPException(422)</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            value = await manager.file_operation(row[&#x27;sandbox&#x27;], body[&#x27;name&#x27;], body[&#x27;args&#x27;])</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>            audit(row[&#x27;owner&#x27;], ident, &#x27;file_operation&#x27;, tool=body[&#x27;name&#x27;])</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>            return {&#x27;value&#x27;: value}</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code></code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>    @app.delete(&#x27;/v1/tasks/{ident}&#x27;)</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>    async def cancel(request: Request, ident: str):</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        async with lock:</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>            row = tasks.get(ident)</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            if row and row[&#x27;owner&#x27;] == request.state.owner and row[&#x27;status&#x27;] == &#x27;deleted&#x27;: return {&#x27;ok&#x27;: True}</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            owned(request, ident)</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            await remove(ident)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>            return {&#x27;ok&#x27;: True}</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    return app</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code></code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code></code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>def main():</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>    import argparse</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>    import uvicorn</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>    parser = argparse.ArgumentParser(description=__doc__)</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>    parser.add_argument(&#x27;--data-dir&#x27;, type=Path, required=True)</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>    parser.add_argument(&#x27;--accounts-file&#x27;, type=Path, required=True, help=&#x27;JSON account ID -&gt; random token (32+ characters)&#x27;)</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>    parser.add_argument(&#x27;--host&#x27;, default=&#x27;127.0.0.1&#x27;)</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>    parser.add_argument(&#x27;--port&#x27;, type=int, default=60500)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>    parser.add_argument(&#x27;--ssl-certfile&#x27;)</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>    parser.add_argument(&#x27;--ssl-keyfile&#x27;)</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>    args = parser.parse_args()</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>    if args.host not in (&#x27;127.0.0.1&#x27;, &#x27;::1&#x27;, &#x27;localhost&#x27;) and not (args.ssl_certfile and args.ssl_keyfile):</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        parser.error(&#x27;Non-loopback serving requires a TLS certificate and key&#x27;)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>    app = create_app(args.data_dir, json.loads(args.accounts_file.read_text(&#x27;utf-8-sig&#x27;)))</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>    uvicorn.run(app, host=args.host, port=args.port, ssl_certfile=args.ssl_certfile,</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                ssl_keyfile=args.ssl_keyfile, access_log=False)</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code></code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code></code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>if __name__ == &#x27;__main__&#x27;:</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>    main()</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

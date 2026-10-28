@@ -1,0 +1,151 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/handoff_execution_store.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/handoff_execution_store.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 151 行</span></nav><main class="wrap source-page"><h1>pyharness/application/handoff_execution_store.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：dba065afad635527a65f8eaa7e14556beaabc7d5<br>SHA-256（内容校验）：3b9e9f49b47b28cdbc1b584e4c9f1c9c1ca53fb5c92a9479da2b38187f3c5273</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 10 个类、函数与方法</summary><ul><li><a href="#L8">handoff_contexts（函数） · L8–L15</a></li><li><a href="#L18">lease_identity（函数） · L18–L21</a></li><li><a href="#L24">HandoffExecutionStore（类） · L24–L151</a><ul><li><a href="#L25">HandoffExecutionStore._handoff_execution_binding（方法） · L25–L27</a></li><li><a href="#L29">HandoffExecutionStore._handoff_context_binding（方法） · L29–L57</a></li><li><a href="#L59">HandoffExecutionStore._check_handoff_execution（方法） · L59–L95</a></li><li><a href="#L97">HandoffExecutionStore._reserve_handoff_budget（异步方法） · L97–L119</a><ul><li><a href="#L106">HandoffExecutionStore._reserve_handoff_budget.gate（方法） · L106–L111</a></li></ul></li><li><a href="#L121">HandoffExecutionStore._validate_handoff_budget（方法） · L121–L142</a></li><li><a href="#L144">HandoffExecutionStore._validate_handoff_execution_lease（方法） · L144–L151</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Fixed-role consumption and irreversible reservations before original admission.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from pyharness.application.handoff_budget_contracts import HandoffBudget,HandoffAllowance</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.handoff_budget_observation import consumer_allowance,parent_allowance</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.delivery_support import delivery_ref</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.errors import raise_code,PyHError</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code></code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>def handoff_contexts(store,resources,attempt):</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    value=attempt[&#x27;run_attempt&#x27;] if &#x27;run_attempt&#x27; in attempt else attempt</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    refs=list(value[&#x27;context&#x27;][&#x27;document_refs&#x27;])</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    for ref in value[&#x27;context&#x27;][&#x27;citation_refs&#x27;]:</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>        cite=resources.get(ref[&#x27;citation_id&#x27;],{}).get(&#x27;citation&#x27;)</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>        if cite:refs.append(cite[&#x27;locator&#x27;][&#x27;document_ref&#x27;])</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    docs={ref[&#x27;document_id&#x27;]:resources[ref[&#x27;document_id&#x27;]][&#x27;document&#x27;] for ref in refs}</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    return [d for d in docs.values() if d[&#x27;schema_version&#x27;]==2]</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>def lease_identity(execution_id,attempt_ref,role_ref):</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>    from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>    checksum=digest_of(canonical(dict(execution_id=execution_id,attempt_ref=attempt_ref,role_ref=role_ref)))</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    return &#x27;hb-&#x27;+checksum[:16],&#x27;handoff-budget.&#x27;+checksum</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>class HandoffExecutionStore:</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    def _handoff_execution_binding(self,resources,attempt,agent_ref):</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        value=attempt[&#x27;run_attempt&#x27;]</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        return self._handoff_context_binding(resources,value[&#x27;project_id&#x27;],value[&#x27;context&#x27;],value[&#x27;created_by&#x27;],agent_ref)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    def _handoff_context_binding(self,resources,project,context,actor,agent_ref):</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        docs=[resources[ref[&#x27;document_id&#x27;]][&#x27;document&#x27;] for ref in context[&#x27;document_refs&#x27;]</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            if resources[ref[&#x27;document_id&#x27;]][&#x27;document&#x27;][&#x27;schema_version&#x27;]==2]</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        if not docs:return None</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        bindings=[]</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        for doc in docs:</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>            h,r,p=self._handoff_document_basis(resources,project,doc[&#x27;source&#x27;],actor)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>            role=r[&#x27;role_contract&#x27;];selected=role[&#x27;selection&#x27;]</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>            if selected[&#x27;role&#x27;]!=&#x27;consumer&#x27; or selected[&#x27;consumer_agent_ref&#x27;]!=agent_ref:</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>                raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_fixed_consumer_required&#x27;)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            bindings.append((h,r,p))</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        first=bindings[0];role_ref=delivery_ref(first[1],&#x27;role_contract&#x27;);package_ref=delivery_ref(first[2],&#x27;delivery_package&#x27;)</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        if any(delivery_ref(r,&#x27;role_contract&#x27;)!=role_ref or delivery_ref(p,&#x27;delivery_package&#x27;)!=package_ref for _,r,p in bindings):</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_conflicting_budget_lineages&#x27;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        # Count the complete quoted context once materialized, including</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        # repeated document copies and citation text repeated in the bundle.</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        text_bytes=sum(len(doc[&#x27;handoff_context&#x27;].encode(&#x27;utf-8&#x27;))+</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>            sum(len(block[&#x27;text&#x27;].encode(&#x27;utf-8&#x27;)) for block in doc[&#x27;blocks&#x27;]) for doc in docs)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        owned={doc[&#x27;document_id&#x27;] for doc in docs}</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        for reference in context[&#x27;citation_refs&#x27;]:</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            citation=resources[reference[&#x27;citation_id&#x27;]][&#x27;citation&#x27;]</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            if citation[&#x27;locator&#x27;][&#x27;document_ref&#x27;][&#x27;document_id&#x27;] in owned:</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                _,_,quote=self._citation_document(resources,project,citation[&#x27;locator&#x27;],actor,current=True)</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>                text_bytes+=len(quote.encode(&#x27;utf-8&#x27;))</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        if text_bytes&gt;first[1][&#x27;role_contract&#x27;][&#x27;selection&#x27;][&#x27;max_context_bytes&#x27;]:</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_context_limit&#x27;)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        refs={h[&#x27;role_handoff&#x27;][&#x27;selection&#x27;][&#x27;handoff_id&#x27;]:delivery_ref(h,&#x27;role_handoff&#x27;) for h,_,_ in bindings}</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        return dict(role_ref=role_ref,package_ref=package_ref,handoff_refs=[refs[k] for k in sorted(refs)],</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            parent_execution_ref=first[2][&#x27;delivery_package&#x27;][&#x27;selection&#x27;][&#x27;execution_ref&#x27;])</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    def _check_handoff_execution(self,resources,attempt,command,environment,actor,authorize,*,reserve=False):</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        from pyharness.application.delivery_identity import consumer_ceiling</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>        binding=self._handoff_execution_binding(resources,attempt,command.agent_ref.model_dump())</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        if binding is None:return None</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>        if attempt[&#x27;run_attempt&#x27;][&#x27;schema_version&#x27;]==2:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_continuation_requires_budget_admission&#x27;)</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        service=self._handoff_owner();project=attempt[&#x27;run_attempt&#x27;][&#x27;project_id&#x27;]</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        for reference in binding[&#x27;handoff_refs&#x27;]:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            handoff,_,_=self._handoff_record(resources,project,reference)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>            self._handoff_current(resources,handoff,actor,authorize,service)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        parent=self._s05_exact(resources,project,&#x27;execution_authorization&#x27;,binding[&#x27;parent_execution_ref&#x27;],&#x27;execution_id&#x27;,</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            resources[binding[&#x27;parent_execution_ref&#x27;][&#x27;execution_id&#x27;]][&#x27;execution_authorization&#x27;][&#x27;created_by&#x27;])</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        try:consumer_ceiling(parent[&#x27;execution_authorization&#x27;][&#x27;environment&#x27;][&#x27;agent_snapshot&#x27;],environment.agent_snapshot)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        except ValueError:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_consumer_capability_exceeded&#x27;)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        # Metadata-only pricing check; no credential resolution or model calls.</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        from pyharness.application.execution_configuration import compiled_configuration</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        from types import SimpleNamespace</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>        from pyharness.core.llm_usage import _price_table</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        _,cfg=compiled_configuration(SimpleNamespace(service=service),command.agent_ref)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        prices=_price_table(cfg.llm.usage.unit_price)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        if any(model not in prices for model in [cfg.llm.model,*(cfg.llm.fallback_models or [])]):</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_consumer_pricing_unknown&#x27;)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        limits,observed,capacity,witness=parent_allowance(service,parent)</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>        reserved=consumer_allowance(environment.agent_snapshot)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        exid=getattr(command,&#x27;execution_id&#x27;,None)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        total={k:0 for k in HandoffAllowance.model_fields}</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        for row in resources.values():</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            lease=row.get(&#x27;handoff_budget&#x27;)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            if lease and lease[&#x27;parent_execution_ref&#x27;]==binding[&#x27;parent_execution_ref&#x27;]:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                if lease[&#x27;execution_id&#x27;]==exid:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>                    if (lease[&#x27;attempt_ref&#x27;]!=command.attempt_ref.model_dump() or lease[&#x27;role_ref&#x27;]!=binding[&#x27;role_ref&#x27;] or</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                            lease[&#x27;reserved&#x27;]!=reserved.model_dump()):raise_code(&#x27;EVT-101&#x27;,reason=&#x27;handoff_budget_lease_conflict&#x27;)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                    continue</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                for key in total:total[key]+=lease[&#x27;reserved&#x27;][key]</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        if any(total[k]+getattr(reserved,k)&gt;getattr(capacity,k) for k in total):</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_parent_budget_exhausted&#x27;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        self._context_finish(authorize,actor,resources)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        return dict(binding=binding,parent_limits=limits,observed=observed,capacity=capacity,reserved=reserved,observation_digest=witness)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    async def _reserve_handoff_budget(self,resources,attempt,command,environment,actor,authorize):</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        observed=self._check_handoff_execution(resources,attempt,command,environment,actor,authorize,reserve=True)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        if observed is None:return resources</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        binding=observed.pop(&#x27;binding&#x27;);project=attempt[&#x27;run_attempt&#x27;][&#x27;project_id&#x27;]</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        reference=self._s05_ref(attempt,&#x27;attempt_id&#x27;,&#x27;run_attempt&#x27;)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        ident,key=lease_identity(command.execution_id,reference,binding[&#x27;role_ref&#x27;])</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        definition=HandoffBudget(budget_id=ident,project_id=project,project_revision=attempt[&#x27;run_attempt&#x27;][&#x27;project_revision&#x27;],</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            created_by=actor,submission_key=key,execution_id=command.execution_id,attempt_ref=reference,</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>            agent_ref=command.agent_ref,**binding,**observed)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        def gate():</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            fresh,_=self._grant_state();current=self._check_handoff_execution(fresh,attempt,command,environment,actor,authorize,reserve=True)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            if current is None:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;handoff_budget_binding_changed&#x27;)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            prior=fresh.get(ident,{}).get(&#x27;handoff_budget&#x27;)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            if prior and prior!=definition.model_dump():raise_code(&#x27;EVT-101&#x27;,reason=&#x27;handoff_budget_lease_conflict&#x27;)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>            self._context_quota(fresh,&#x27;handoff_budget&#x27;,project)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        gate()</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        if ident in resources:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            if resources[ident][&#x27;handoff_budget&#x27;]!=definition.model_dump():raise_code(&#x27;EVT-101&#x27;,reason=&#x27;handoff_budget_lease_conflict&#x27;)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>            return resources</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        request=digest_of(canonical(definition.model_dump()))</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        resources,_=await self._append_context(definition,&#x27;handoff_budget&#x27;,ident,key,actor,request,gate)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        return resources</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    def _validate_handoff_budget(self,definition,resources,previous,event):</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        value=definition.model_dump();actor=definition.created_by;project=definition.project_id</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>        try:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            if previous or actor!=event.payload[&#x27;actor_ref&#x27;] or definition.submission_key!=event.payload[&#x27;command_id&#x27;]:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                raise ValueError(&#x27;immutable budget actor/key&#x27;)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>            self._context_project(resources,project,definition.project_revision);self._context_quota(resources,&#x27;handoff_budget&#x27;,project)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            attempt=self._execution_attempt(resources,project,definition.attempt_ref,actor)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            binding=self._handoff_execution_binding(resources,attempt,definition.agent_ref.model_dump())</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            if binding is None or any(value[k]!=v for k,v in binding.items()):raise ValueError(&#x27;budget lineage&#x27;)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            ident,key=lease_identity(definition.execution_id,definition.attempt_ref.model_dump(),definition.role_ref.model_dump())</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            if ident!=definition.budget_id or key!=definition.submission_key or digest_of(canonical(value))!=event.payload[&#x27;request_digest&#x27;]:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>                raise ValueError(&#x27;budget deterministic identity&#x27;)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            role=resources[definition.role_ref.role_id][&#x27;role_contract&#x27;]</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            if consumer_allowance(role[&#x27;consumer_snapshot&#x27;])!=definition.reserved:raise ValueError(&#x27;budget fixed consumer allowance&#x27;)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            for dim in HandoffAllowance.model_fields:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                limit=getattr(definition.parent_limits,dim);spent=getattr(definition.observed,dim);capacity=getattr(definition.capacity,dim)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>                if capacity&gt;max(0,limit-spent):raise ValueError(&#x27;budget capacity arithmetic&#x27;)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                total=sum(r[&#x27;handoff_budget&#x27;][&#x27;reserved&#x27;][dim] for r in resources.values() if</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                    r.get(&#x27;handoff_budget&#x27;,{}).get(&#x27;parent_execution_ref&#x27;)==value[&#x27;parent_execution_ref&#x27;])</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                if total+value[&#x27;reserved&#x27;][dim]&gt;capacity:raise ValueError(&#x27;budget oversubscribed&#x27;)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        except (ValueError,KeyError,PyHError):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;handoff_budget_definition_binding&#x27;)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code></code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>    def _validate_handoff_execution_lease(self,resources,definition,attempt):</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        binding=self._handoff_execution_binding(resources,attempt,definition.selection.agent_ref.model_dump())</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>        if binding is None:return</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        ident,_=lease_identity(definition.execution_id,definition.selection.attempt_ref.model_dump(),binding[&#x27;role_ref&#x27;])</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        lease=resources.get(ident,{}).get(&#x27;handoff_budget&#x27;)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        if (not lease or lease[&#x27;created_by&#x27;]!=definition.created_by or lease[&#x27;execution_id&#x27;]!=definition.execution_id or</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                lease[&#x27;attempt_ref&#x27;]!=definition.selection.attempt_ref.model_dump() or</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>                any(lease[k]!=v for k,v in binding.items())):raise ValueError(&#x27;handoff budget must precede execution authorization&#x27;)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

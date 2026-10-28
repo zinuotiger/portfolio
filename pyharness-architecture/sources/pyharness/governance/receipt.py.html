@@ -1,0 +1,352 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/governance/receipt.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/governance/receipt.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 352 行</span></nav><main class="wrap source-page"><h1>pyharness/governance/receipt.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：7c62cf8bf1c0aa4f448ef807a9150bd43550e539<br>SHA-256（内容校验）：f0d19ef35e48d0d921094b8c8d8b0526378fb18ac5940021a2986dcabdfba825</p><p><a href="../../../architecture-detailed.html?node=receipt">Decision Receipts（决策凭证完整性链）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 22 个类、函数与方法</summary><ul><li><a href="#L51">_canonical（函数） · L51–L54</a></li><li><a href="#L57">_sha256（函数） · L57–L58</a></li><li><a href="#L61">receipt_kind_of（函数） · L61–L74</a></li><li><a href="#L77">_protected_content（函数） · L77–L97</a></li><li><a href="#L100">content_hash_for（函数） · L100–L104</a></li><li><a href="#L107">DecisionReceipt（类） · L107–L159</a><ul><li><a href="#L133">DecisionReceipt.is_approval（方法） · L133–L135</a></li><li><a href="#L137">DecisionReceipt.protected（方法） · L137–L153</a></li><li><a href="#L155">DecisionReceipt.to_payload（方法） · L155–L159</a></li></ul></li><li><a href="#L162">_read_events（函数） · L162–L177</a></li><li><a href="#L180">_utc_now（函数） · L180–L181</a></li><li><a href="#L184">verify_receipt（函数） · L184–L206</a></li><li><a href="#L209">ReceiptStore（类） · L209–L289</a><ul><li><a href="#L216">ReceiptStore.__init__（方法） · L216–L222</a></li><li><a href="#L225">ReceiptStore._load_chain（方法） · L225–L235</a></li><li><a href="#L238">ReceiptStore.emit（异步方法） · L238–L273</a></li><li><a href="#L276">ReceiptStore.get（方法） · L276–L277</a></li><li><a href="#L279">ReceiptStore.of_decision（方法） · L279–L282</a></li><li><a href="#L284">ReceiptStore.all（方法） · L284–L285</a></li><li><a href="#L287">ReceiptStore.verify（方法） · L287–L289</a></li></ul></li><li><a href="#L292">rebuild_from_log（函数） · L292–L333</a></li><li><a href="#L336">verify_chain（函数） · L336–L345</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/governance/receipt.py — 决策凭证(S4/M4)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>一句话职责:把一次**已经发生并持久化**的治理决策,升格为**可离线核验的凭证**</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>——`DecisionReceipt` 是**证明对象**,不是新业务状态;持久化形态只有</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>``receipt.emitted`` 事件(薄引用 + 完整性链),**事件日志仍是唯一真源**。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>依赖方向(ADR-018:308,强制):本模块只 import 标准库、``pyharness.errors`` 与本包;</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>**禁止** ``pyharness.core.*`` / ``engine`` / ``bus`` / ``persistence``。需要会话时</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>经 ``ctx`` 鸭子类型只读使用(与 ``context.authorize`` 同型)。</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>关键裁定(2026-09-15 M4 Entry Analysis,R-1/R-2/R-3):</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>1. **R-1**:``receipt.emitted.payload.digest`` == ``Receipt.content_hash``(与相邻</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>   ``prev_hash`` 同属完整性链)。``inputs_digest`` 语义**不变**(表达&quot;本次授权针对</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>   什么 inputs&quot;),**不得**混用。不新增 payload 字段。</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>2. **R-2**:approval 凭证在 **D2 处**发射(``approval.granted`` 早于 D2;D1 无</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>   ``approval_ref``)。链路:``approval.granted.approval_id → D2.approval_ref →</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>   D2.decision_id → approval Receipt``。</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>3. **R-3**:``Receipt.ts`` = ``receipt.emitted`` 的 ``Envelope.ts``(凭证**生成**时刻);</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>   与 ``Decision.ts``(决策**形成**时刻)语义不同,两者并存不混。</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>**content_hash 确定性**(M4 硬约束):受保护集合**排除**随机 ``receipt_id``</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>(否则同一事实每次 hash 不同)与 append 时才产生的 ``ts``/``event_seq``。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>规范化复用 ``policy.compute_fingerprint`` 同款 canonical JSON 规则</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>(``sort_keys=True`` / ``ensure_ascii=False`` / ``separators=(&quot;,&quot;,&quot;:&quot;)`` /</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>``default=str``)+ sha256——**不新建第三套 canonicalization/hash**。</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>**prev_hash 链**:链头由 ``ReceiptStore`` 首次 emit 时**从会话日志 replay 推出**</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>(只读使用唯一真源);内存 ``_last_hash`` 仅为缓存,重启可由日志重建 ⇒ 不构成第二</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>persistence source of truth(INV-R5)。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>import hashlib</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>import json</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>from dataclasses import dataclass</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>from datetime import datetime, timezone</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>from typing import Any, Callable, Optional</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>from uuid import uuid4</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>from pyharness.governance.decision import Decision, Principal, Verdict</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code></code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code># 凭证类别:decision = ALLOW/REJECT 结论;approval = 审批后重新授权(D2)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>KIND_DECISION = &quot;decision&quot;</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>KIND_APPROVAL = &quot;approval&quot;</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>RECEIPT_KINDS: tuple[str, ...] = (KIND_DECISION, KIND_APPROVAL)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>EVENT_RECEIPT_EMITTED = &quot;receipt.emitted&quot;</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>def _canonical(payload: dict) -&gt; str:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    &quot;&quot;&quot;规范化 JSON(与 ``policy.compute_fingerprint`` 同款规则;不新建第二套)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    return json.dumps(payload, sort_keys=True, ensure_ascii=False,</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>                      separators=(&quot;,&quot;, &quot;:&quot;), default=str)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>def _sha256(text: str) -&gt; str:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    return hashlib.sha256(text.encode(&quot;utf-8&quot;)).hexdigest()</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code></code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>def receipt_kind_of(decision: Decision) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    &quot;&quot;&quot;决策 → 凭证类别(M4 产生规则)。``None`` = **不产生凭证**。</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    - ``approval_ref is not None`` ⇒ ``approval``(D2:审批后重新授权,携带真实</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>      approval identity ⇒ 闭合 INV-G2 链);</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    - ``verdict=APPROVAL`` 且 ``approval_ref is None`` ⇒ **D1(审批请求决策)**:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>      不产生凭证——它是&quot;需要进一步审批&quot;的治理中间态,不授权任何执行;</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    - 其余(ALLOW / REJECT)⇒ ``decision``。</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    if decision.approval_ref is not None:</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>        return KIND_APPROVAL</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    if decision.verdict is Verdict.APPROVAL:</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>        return None</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    return KIND_DECISION</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>def _protected_content(*, decision: Decision, kind: str,</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                       prev_hash: Optional[str]) -&gt; dict:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    &quot;&quot;&quot;``content_hash`` 的受保护集合(**确定性**;发射前全部已知)。</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    刻意排除:``receipt_id``(随机)、``ts`` / ``event_seq``(append 时才产生)。</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    p = decision.principal</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    return {</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        &quot;decision_id&quot;: str(decision.decision_id),</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        &quot;kind&quot;: str(kind),</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        &quot;verdict&quot;: str(decision.verdict),</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        &quot;tool&quot;: str(decision.tool),</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        &quot;inputs_digest&quot;: str(decision.inputs_digest),</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        &quot;policy_fingerprint&quot;: str(decision.policy_fingerprint),</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        &quot;principal_kind&quot;: str(p.kind) if p is not None else &quot;&quot;,</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        &quot;principal_id&quot;: str(p.id) if p is not None else &quot;&quot;,</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        &quot;principal_channel&quot;: (p.channel if p is not None else None),</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        &quot;approval_ref&quot;: decision.approval_ref,</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        &quot;supersedes&quot;: decision.supersedes,</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        &quot;prev_hash&quot;: prev_hash,</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    }</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code></code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>def content_hash_for(*, decision: Decision, kind: str,</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                     prev_hash: Optional[str]) -&gt; str:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    &quot;&quot;&quot;凭证内容哈希 = sha256(canonical(受保护集合))。同事实 ⇒ 同哈希(INV-R3)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    return _sha256(_canonical(_protected_content(</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        decision=decision, kind=kind, prev_hash=prev_hash)))</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code></code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>class DecisionReceipt:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    &quot;&quot;&quot;★ 可离线核验的裁决凭证(设计 §3.4)。</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    运行时对象**字段较丰富**;持久化的 ``receipt.emitted`` payload **只 5 字段**</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    (``receipt_id``/``decision_id``/``kind``/``digest``/``prev_hash``)——其余由</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    ``decision_id`` 指向的 ``decision.issued`` **派生**(INV-G4:只含引用与哈希)。</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code></code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    receipt_id: str</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    decision_id: str</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    kind: str</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    verdict: str</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    tool: str</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    inputs_digest: str</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    policy_fingerprint: str</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    principal: Optional[Principal]</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    approval_ref: Optional[int]</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    supersedes: Optional[str]</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    event_seq: Optional[int]</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    call_id: str</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    ts: str</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    content_hash: str</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    prev_hash: Optional[str] = None</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    signature: Optional[str] = None      # v1.0 留空(设计 §3.4)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code></code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>    @property</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>    def is_approval(self) -&gt; bool:</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        return self.kind == KIND_APPROVAL</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code></code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    def protected(self) -&gt; dict:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        &quot;&quot;&quot;本凭证的受保护集合(供 verify 重算哈希)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        p = self.principal</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        return {</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            &quot;decision_id&quot;: str(self.decision_id),</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            &quot;kind&quot;: str(self.kind),</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            &quot;verdict&quot;: str(self.verdict),</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            &quot;tool&quot;: str(self.tool),</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            &quot;inputs_digest&quot;: str(self.inputs_digest),</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            &quot;policy_fingerprint&quot;: str(self.policy_fingerprint),</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            &quot;principal_kind&quot;: str(p.kind) if p is not None else &quot;&quot;,</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            &quot;principal_id&quot;: str(p.id) if p is not None else &quot;&quot;,</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>            &quot;principal_channel&quot;: (p.channel if p is not None else None),</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>            &quot;approval_ref&quot;: self.approval_ref,</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>            &quot;supersedes&quot;: self.supersedes,</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            &quot;prev_hash&quot;: self.prev_hash,</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        }</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code></code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    def to_payload(self) -&gt; dict:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        &quot;&quot;&quot;持久化形态(冻结 5 字段;``digest`` == content_hash)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        return {&quot;receipt_id&quot;: self.receipt_id, &quot;decision_id&quot;: self.decision_id,</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                &quot;kind&quot;: self.kind, &quot;digest&quot;: self.content_hash,</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                &quot;prev_hash&quot;: self.prev_hash}</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code></code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code></code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>def _read_events(sess: Any) -&gt; list:</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    &quot;&quot;&quot;只读取出会话事件(鸭子类型)。</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code></code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    优先 ``events_after(0)``(``SessionLog``);回落 ``replay()``(``SessionStore``</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    等持久化面)。二者均为**唯一真源**的只读视图——本模块不 import 任何 core 模块</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    (ADR-018:308),也不缓存为第二真源。</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    for name in (&quot;events_after&quot;, &quot;replay&quot;):</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        reader = getattr(sess, name, None)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        if reader is None:</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            continue</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        try:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>            return list(reader(0) if name == &quot;events_after&quot; else reader())</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        except Exception:                            # noqa: BLE001 只读探测:尽力</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>            return []</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    return []</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code></code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code></code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>def _utc_now() -&gt; str:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>    return datetime.now(timezone.utc).isoformat()</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code></code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code></code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>def verify_receipt(receipt: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    &quot;&quot;&quot;离线核验(**fail-closed**,ADR-018:318;INV-R4)。</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code></code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    返回 ``False`` ⇒ 调用方**必须**拒绝执行(沿用 INV-05 纪律)。检查:</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code></code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    1. 类型与 ``kind`` 合法;</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>    2. ``content_hash`` 与受保护集合**重算值**一致(任一受保护字段被改 → False);</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>    3. ``kind`` 与 ``approval_ref`` 语义自洽(approval↔非 None / decision↔None)。</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>    if not isinstance(receipt, DecisionReceipt):</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        return False</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>    if receipt.kind not in RECEIPT_KINDS:</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        return False</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    if not receipt.content_hash or not receipt.decision_id:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        return False</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    expected = _sha256(_canonical(receipt.protected()))</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    if expected != receipt.content_hash:</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        return False</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>    if receipt.kind == KIND_APPROVAL and receipt.approval_ref is None:</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        return False</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>    if receipt.kind == KIND_DECISION and receipt.approval_ref is not None:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        return False</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>    return True</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code></code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code></code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>class ReceiptStore:</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>    &quot;&quot;&quot;凭证的生成、持久化、查询、核验(M4)。</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code></code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>    **不持有第二份持久化**:唯一写动作 = ``session.append(&quot;receipt.emitted&quot;, …)``;</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>    索引与哈希链头均为**可由日志重建的缓存**(INV-R5)。</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code></code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    def __init__(self, *, id_factory: Optional[Callable[[], str]] = None,</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>                 clock: Optional[Callable[[], str]] = None) -&gt; None:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        self._id_factory = id_factory or (lambda: uuid4().hex)</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        self._clock = clock or _utc_now</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        self._index: dict[str, DecisionReceipt] = {}</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        self._last_hash: Optional[str] = None</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        self._chain_loaded = False</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code></code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>    # ------------------------------------------------------------ 链头</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>    def _load_chain(self, sess: Any) -&gt; None:</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        &quot;&quot;&quot;从会话日志 replay 出链头(只读;唯一真源=JSONL)。幂等,仅首次生效。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        if self._chain_loaded:</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>            return</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        self._chain_loaded = True</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        for e in _read_events(sess):</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>            if getattr(e, &quot;type&quot;, None) != EVENT_RECEIPT_EMITTED:</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                continue</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>            d = (getattr(e, &quot;payload&quot;, None) or {}).get(&quot;digest&quot;)</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            if d:</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                self._last_hash = str(d)</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code></code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>    # ------------------------------------------------------------ 发射</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>    async def emit(self, ctx: Any, decision: Decision, *,</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                   call_id: str = &quot;&quot;) -&gt; Optional[DecisionReceipt]:</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>        &quot;&quot;&quot;按产生规则生成凭证并落盘(强同步)。``None`` = 该决策不产生凭证(D1)。</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code></code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        异常:落盘失败按 PERS-202 语义上抛(F-SYNC-1 修复后**不再 silent success**),</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        调用方 fail-closed。</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        kind = receipt_kind_of(decision)</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        if kind is None:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>            return None                              # D1:审批请求决策,无凭证</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        sess = getattr(ctx, &quot;session&quot;, None)</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        if sess is None:</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>            return None                              # 未接线(纯内存/单测):降级</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        self._load_chain(sess)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        prev = self._last_hash</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>        chash = content_hash_for(decision=decision, kind=kind, prev_hash=prev)</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        receipt_id = self._id_factory()</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>        payload = {&quot;receipt_id&quot;: receipt_id, &quot;decision_id&quot;: decision.decision_id,</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>                   &quot;kind&quot;: kind, &quot;digest&quot;: chash, &quot;prev_hash&quot;: prev}</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        trace = {&quot;call_id&quot;: call_id} if call_id else None</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        r = sess.append(EVENT_RECEIPT_EMITTED, payload, actor=&quot;system&quot;,</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>                        sync=True, trace=trace)</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        if hasattr(r, &quot;__await__&quot;):</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>            r = await r</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        receipt = DecisionReceipt(</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            receipt_id=receipt_id, decision_id=decision.decision_id, kind=kind,</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            verdict=str(decision.verdict), tool=decision.tool,</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>            inputs_digest=decision.inputs_digest,</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>            policy_fingerprint=decision.policy_fingerprint,</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>            principal=decision.principal, approval_ref=decision.approval_ref,</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>            supersedes=decision.supersedes,</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>            event_seq=getattr(r, &quot;seq&quot;, None), call_id=call_id,</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>            ts=self._clock(), content_hash=chash, prev_hash=prev)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>        self._index[receipt_id] = receipt</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        self._last_hash = chash</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>        return receipt</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code></code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>    # ------------------------------------------------------------ 查询</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>    def get(self, receipt_id: str) -&gt; Optional[DecisionReceipt]:</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>        return self._index.get(receipt_id)</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code></code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>    def of_decision(self, decision_id: str) -&gt; tuple[DecisionReceipt, ...]:</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        &quot;&quot;&quot;该决策的全部凭证(**复数**——decision/approval 混合模型)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        return tuple(r for r in self._index.values()</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>                     if r.decision_id == decision_id)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code></code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>    def all(self) -&gt; tuple[DecisionReceipt, ...]:</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        return tuple(self._index.values())</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code></code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>    def verify(self, receipt: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        &quot;&quot;&quot;见模块级 ``verify_receipt``(fail-closed)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        return verify_receipt(receipt)</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code></code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code></code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>def rebuild_from_log(sess: Any) -&gt; tuple[DecisionReceipt, ...]:</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>    &quot;&quot;&quot;从**事件真源**重建全部凭证(INV-G2/R2:可 replay、可核验)。</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code></code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>    仅用 ``receipt.emitted``(定位 + 哈希链)与 ``decision.issued``(决策事实),</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>    **不依赖任何内存缓存**;返回的凭证必须全部 ``verify_receipt`` 为真。</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>    decisions: dict[str, Any] = {}</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>    emitted: list[Any] = []</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>    for e in _read_events(sess):</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>        t = getattr(e, &quot;type&quot;, None)</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        if t == &quot;decision.issued&quot;:</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>            d = getattr(e, &quot;payload&quot;, None) or {}</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>            did = d.get(&quot;decision_id&quot;)</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>            if did:</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                decisions[str(did)] = (d, getattr(e, &quot;trace&quot;, None) or {})</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        elif t == EVENT_RECEIPT_EMITTED:</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>            emitted.append(e)</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>    out: list[DecisionReceipt] = []</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>    for e in emitted:</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        p = getattr(e, &quot;payload&quot;, None) or {}</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>        did = str(p.get(&quot;decision_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        d, trace = decisions.get(did, ({}, {}))</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>        if not d:</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>            continue                                 # 无对应决策:跳过(不臆造)</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        kind = str(p.get(&quot;kind&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        pid = str(d.get(&quot;principal_id&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        pch = d.get(&quot;principal_channel&quot;)</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        principal = Principal.from_legacy_by(</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>            f&quot;{pch}:{pid}&quot; if (pch and pch != pid) else (pid or &quot;system&quot;))</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>        out.append(DecisionReceipt(</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>            receipt_id=str(p.get(&quot;receipt_id&quot;) or &quot;&quot;), decision_id=did, kind=kind,</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>            verdict=str(d.get(&quot;verdict&quot;) or &quot;&quot;), tool=str(d.get(&quot;tool&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>            inputs_digest=str(d.get(&quot;inputs_digest&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>            policy_fingerprint=str(d.get(&quot;policy_fingerprint&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>            principal=principal, approval_ref=d.get(&quot;approval_ref&quot;),</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>            supersedes=d.get(&quot;supersedes&quot;),</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>            event_seq=getattr(e, &quot;seq&quot;, None),</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>            call_id=str(trace.get(&quot;call_id&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>            ts=str(getattr(e, &quot;ts&quot;, &quot;&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>            content_hash=str(p.get(&quot;digest&quot;) or &quot;&quot;),</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>            prev_hash=p.get(&quot;prev_hash&quot;)))</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>    return tuple(out)</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code></code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code></code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>def verify_chain(receipts: tuple[DecisionReceipt, ...]) -&gt; bool:</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>    &quot;&quot;&quot;校验 ``prev_hash`` 链单调可验(INV-R8):首条创世为 ``None``,其余指向前一条。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>    prev: Optional[str] = None</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>    for r in receipts:</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>        if r.prev_hash != prev:</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>            return False</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>        if not verify_receipt(r):</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>            return False</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>        prev = r.content_hash</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>    return True</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code></code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code></code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>__all__ = [</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>    &quot;KIND_DECISION&quot;, &quot;KIND_APPROVAL&quot;, &quot;RECEIPT_KINDS&quot;, &quot;EVENT_RECEIPT_EMITTED&quot;,</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>    &quot;DecisionReceipt&quot;, &quot;ReceiptStore&quot;, &quot;content_hash_for&quot;, &quot;receipt_kind_of&quot;,</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>    &quot;verify_receipt&quot;, &quot;verify_chain&quot;, &quot;rebuild_from_log&quot;,</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

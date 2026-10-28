@@ -1,0 +1,295 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/llm_types.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/llm_types.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 295 行</span></nav><main class="wrap source-page"><h1>pyharness/core/llm_types.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：2b4edd084b306b0505b255632dedf7fbe8ace103<br>SHA-256（内容校验）：1acc98a208e19b4f20390fd52808d4ba849dfb00e1b20a042c61f5b01865a886</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 28 个类、函数与方法</summary><ul><li><a href="#L15">_l1_settings（函数） · L15–L21</a></li><li><a href="#L23">TimeoutLimits（类） · L23–L40</a><ul><li><a href="#L31">TimeoutLimits.__post_init__（方法） · L31–L35</a></li><li><a href="#L37">TimeoutLimits.from_cfg（方法） · L37–L40</a></li></ul></li><li><a href="#L42">ToolCall（类） · L42–L59</a><ul><li><a href="#L56">ToolCall.call_id（方法） · L56–L59</a></li></ul></li><li><a href="#L61">LLMResponse（类） · L61–L75</a></li><li><a href="#L77">UsageCounters（类） · L77–L232</a><ul><li><a href="#L106">UsageCounters.new_task（方法） · L106–L109</a></li><li><a href="#L111">UsageCounters.ancestors（方法） · L111–L115</a></li><li><a href="#L117">UsageCounters.reserve_output（方法） · L117–L166</a><ul><li><a href="#L158">UsageCounters.reserve_output.release（方法） · L158–L165</a></li></ul></li><li><a href="#L168">UsageCounters.task_add（方法） · L168–L193</a></li><li><a href="#L195">UsageCounters.snapshot（方法） · L195–L204</a></li><li><a href="#L206">UsageCounters.task_total（方法） · L206–L215</a></li><li><a href="#L217">UsageCounters.rate_limit_streak（方法） · L217–L219</a></li><li><a href="#L221">UsageCounters.rate_limit_add（方法） · L221–L224</a></li><li><a href="#L226">UsageCounters.degrade_add（方法） · L226–L232</a></li></ul></li><li><a href="#L234">AdapterTriple（类） · L234–L242</a></li><li><a href="#L244">ProviderStatusError（类） · L244–L250</a><ul><li><a href="#L247">ProviderStatusError.__init__（方法） · L247–L250</a></li></ul></li><li><a href="#L252">ProviderProtocolError（类） · L252–L253</a></li><li><a href="#L255">ToolCallSyntaxError（类） · L255–L264</a><ul><li><a href="#L261">ToolCallSyntaxError.__init__（方法） · L261–L264</a></li></ul></li><li><a href="#L266">LLMAdapter（类） · L266–L284</a><ul><li><a href="#L272">LLMAdapter.chat（异步方法） · L272–L275</a></li><li><a href="#L277">LLMAdapter.chat_stream（异步方法） · L277–L280</a></li><li><a href="#L282">LLMAdapter.ping（异步方法） · L282–L284</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Llm types: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from abc import ABC, abstractmethod</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from typing import TYPE_CHECKING, Any, Optional</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>if TYPE_CHECKING:  # 仅类型标注;装配对象鸭子注入(session/bus 经 ctx)</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>    pass</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>_RETRYABLE_CODES = frozenset({&quot;LLM-301&quot;, &quot;LLM-303&quot;})</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>_L1_SETTINGS: Any = None  # L1 兜底配置懒加载缓存(无 ctx.config/无注入 cfg 时)</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>def _l1_settings() -&gt; Any:</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>    &quot;&quot;&quot;L1 默认 Settings(键缺省必可加载;仅无注入配置时兜底,不读写用户密钥)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    global _L1_SETTINGS</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    if _L1_SETTINGS is None:</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        from pyharness.config import load_settings  # 惰性:保持模块导入零配置依赖</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        _L1_SETTINGS = load_settings()</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    return _L1_SETTINGS</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>@dataclass</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>class TimeoutLimits:</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    &quot;&quot;&quot;三档超时(F017/PARAMETER-ANCHOR 锁死 10/60/180);强制 total&gt;first&gt;connect,违者 CFG-601。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>    connect_s: int = 10        # 连接/写/池 档(httpx)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>    first_token_s: int = 60    # 首 token 档(httpx read)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>    total_s: int = 180         # 总闸档(asyncio.wait_for 编排)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code></code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>    def __post_init__(self) -&gt; None:</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        if not (self.connect_s &lt; self.first_token_s &lt; self.total_s):</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            raise_code(&quot;CFG-601&quot;, reason=&quot;structural&quot;, fields=[&quot;llm.timeout.*&quot;],</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>                       detail=f&quot;超时档序须 connect&lt;first&lt;total,实得 &quot;</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>                              f&quot;{self.connect_s}/{self.first_token_s}/{self.total_s}&quot;)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    @classmethod</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    def from_cfg(cls, t: Any) -&gt; &quot;TimeoutLimits&quot;:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        &quot;&quot;&quot;自配置段构建(settings.llm.timeout;顺序/范围已由 config.validate_rules 复核)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        return cls(int(t.connect_s), int(t.first_token_s), int(t.total_s))</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>@dataclass</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>class ToolCall:</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    &quot;&quot;&quot;解析后的工具调用(id/index/name/raw_args/raw_json;ADI §1.4.4)。</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    raw_json = arguments 模型原文(字符串,可能含换行/缩进),回填 tool 消息时原样带回</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    (不重序列化,INV-06 审计口径);raw_args = 二次 json.loads 后的 dict(强校验输入)。</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    id: Optional[str]</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    index: int</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    name: Optional[str] = None</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    raw_args: dict = field(default_factory=dict)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>    raw_json: str = &quot;&quot;</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>    @property</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    def call_id(self) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        &quot;&quot;&quot;工具层兼容别名(偏离 5):tools.execute 按 call_id 配对 tool.result,= id。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        return self.id</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code></code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>@dataclass</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>class LLMResponse:</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    &quot;&quot;&quot;chat/chat_stream 同型结构化返回(content/tool_calls/usage/model/finish_reason/raw)。</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    tool_calls 保留 raw_args 与 raw_json 双轨供审计(F026/INV-06);seq 为 llm.response</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    事件日志 seq(偏离 5,agent_loop trace 父关联用);raw = 传输层原始响应(留审计,流式 None)。</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code></code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>    content: str = &quot;&quot;</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    tool_calls: Optional[list] = None      # list[ToolCall];None = 纯文本轮</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    usage: Any = None                      # 传输层 usage(prompt/completion/cache 扩展)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    model: str = &quot;&quot;</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    finish_reason: str = &quot;&quot;</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    raw: Any = None</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    seq: Optional[int] = None              # 偏离 1:llm.response 事件 seq</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>@dataclass</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>class UsageCounters:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    &quot;&quot;&quot;F029 token 计量计数器(report_usage 唯一写入;scope/agent-loop 只读,F032 硬闸)。</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    会话级总量 + by_model 模型细分二维(任务维可经事件日志按 task_id 重建,INV-01);</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    ``cost_est`` **是**预算硬闸判据之一(与 token 并列):``Scope.budget_state`` 与</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    ``BudgetGate._compute_state`` 均按 ``used.cost_est &gt;= limits.max_cost_yuan`` 判</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    exhausted。原注释称其&quot;只进事件/报表、不打硬闸(N14)&quot;**与实现相反**(实测:纯成本</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    超限即拦),已在 R21 更正。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code></code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    in_tokens: int = 0</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    out_tokens: int = 0</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    cache_hit: int = 0</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    cost_est: float = 0.0</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    requests: int = 0</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    by_model: dict[str, &quot;UsageCounters&quot;] = field(default_factory=dict)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    # llm_fallback 编排面私有计数(协议:task_total/rate_limit_streak/degrade_add;</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    # 非事件字段——可整体重建,不进 snapshot,防审计口径漂移)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>    _rate_limit_streak: int = field(default=0, repr=False, compare=False)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    _degrade_total: int = field(default=0, repr=False, compare=False)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    _degrade_last: dict = field(default_factory=dict, repr=False, compare=False)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    _session_total: Any = field(default=None, repr=False, compare=False)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    _parent: Any = field(default=None, repr=False, compare=False)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    _limits: Any = field(default=None, repr=False, compare=False)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    _descendants: Any = field(default=None, repr=False, compare=False)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    _reserved_out: int = field(default=0, repr=False, compare=False)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    _reserved_in: int = field(default=0, repr=False, compare=False)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    _reserved_cost: float = field(default=0, repr=False, compare=False)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    def new_task(self, limits, *, parent=None):</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        &quot;&quot;&quot;Fresh task usage, separate from session and ancestor totals.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        return UsageCounters(_session_total=self._session_total or self,</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                             _parent=parent, _limits=limits)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    def ancestors(self):</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        account = self</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        while account is not None:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            yield account</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>            account = account._parent</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code></code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    def reserve_output(self, requested, *, input_tokens=0, input_rate=0.0, output_rate=0.0):</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        &quot;&quot;&quot;Atomic on the runtime loop: reserve before awaiting any transport.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        from pyharness.core.scope import BudgetExhausted</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        from pyharness.core.budget_diagnostics import budget_detail</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        accounts = list(self.ancestors())</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        available = int(requested)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        for account in accounts:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            limits = account._limits</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            if limits is None:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                continue</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>            used = account.task_total()</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            owner=&#x27;task&#x27; if account is self else &#x27;parent&#x27;</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            if used.in_tokens &gt;= limits.max_in_tokens or used.in_tokens + account._reserved_in + input_tokens &gt; limits.max_in_tokens:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>                raise BudgetExhausted(&#x27;Input allowance exhausted&#x27;, diagnostics=budget_detail(&#x27;input&#x27;,</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>                    limit=limits.max_in_tokens,used=used.in_tokens,reserved=account._reserved_in,</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                    requested=input_tokens,account=owner,basis=&#x27;conservative_utf8_bytes&#x27;))</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            if used.cost_est &gt;= limits.max_cost_yuan:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>                raise BudgetExhausted(&#x27;Cost allowance exhausted&#x27;,diagnostics=budget_detail(&#x27;cost&#x27;,</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                    limit=limits.max_cost_yuan,used=used.cost_est,reserved=account._reserved_cost,</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                    requested=input_tokens*input_rate+output_rate,account=owner,basis=&#x27;estimated_yuan&#x27;))</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            available = min(available, limits.max_out_tokens-used.out_tokens-account._reserved_out)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            cost_left = limits.max_cost_yuan-used.cost_est-account._reserved_cost-input_tokens*input_rate</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            if cost_left &lt; 0:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                raise BudgetExhausted(&#x27;No unreserved task or parent cost allowance&#x27;,diagnostics=budget_detail(&#x27;cost&#x27;,</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                    limit=limits.max_cost_yuan,used=used.cost_est,reserved=account._reserved_cost,</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                    requested=input_tokens*input_rate+output_rate,account=owner,basis=&#x27;estimated_yuan&#x27;))</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            if output_rate &gt; 0:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                available = min(available, int(max(0,cost_left)/output_rate))</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>            if available &lt;= 0:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                dimension=&#x27;cost&#x27; if output_rate&gt;0 and cost_left&lt;output_rate else &#x27;output&#x27;</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                raise BudgetExhausted(&#x27;No unreserved task or parent output allowance&#x27;,diagnostics=budget_detail(dimension,</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>                    limit=limits.max_cost_yuan if dimension==&#x27;cost&#x27; else limits.max_out_tokens,</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>                    used=used.cost_est if dimension==&#x27;cost&#x27; else used.out_tokens,</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                    reserved=account._reserved_cost if dimension==&#x27;cost&#x27; else account._reserved_out,</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>                    requested=input_tokens*input_rate+output_rate if dimension==&#x27;cost&#x27; else 1,</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>                    account=owner,basis=&#x27;estimated_yuan&#x27; if dimension==&#x27;cost&#x27; else &#x27;tokens&#x27;))</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        for account in accounts:</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>            account._reserved_out += available</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>            account._reserved_in += input_tokens</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            account._reserved_cost += input_tokens*input_rate+available*output_rate</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>        released = False</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>        def release():</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>            nonlocal released</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            if not released:</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>                released = True</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                for account in accounts:</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                    account._reserved_out -= available</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                    account._reserved_in -= input_tokens</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>                    account._reserved_cost = max(0, account._reserved_cost-input_tokens*input_rate-available*output_rate)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>        return available, release</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code></code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    def task_add(self, payload: dict) -&gt; None:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        &quot;&quot;&quot;按 llm.usage 事件 payload 入账(事件即事实;计数器可整体重建)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        model = payload.get(&quot;model&quot;) or &quot;?&quot;</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        m = self.by_model.setdefault(model, UsageCounters())</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        self.requests += 1</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        m.requests += 1</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        self.in_tokens += int(payload.get(&quot;in_tokens&quot;) or 0)</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        self.out_tokens += int(payload.get(&quot;out_tokens&quot;) or 0)</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        self.cache_hit += int(payload.get(&quot;cache_hit&quot;) or 0)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        self.cost_est += float(payload.get(&quot;cost_est&quot;) or 0.0)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        # 模型细分按各自增量累计(与总量并行,互不覆盖)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        m.in_tokens += int(payload.get(&quot;in_tokens&quot;) or 0)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        m.out_tokens += int(payload.get(&quot;out_tokens&quot;) or 0)</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        m.cache_hit += int(payload.get(&quot;cache_hit&quot;) or 0)</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        m.cost_est += float(payload.get(&quot;cost_est&quot;) or 0.0)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        self._rate_limit_streak = 0</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        if self._session_total is not None:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>            self._session_total.task_add(payload)</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        parent = self._parent</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        while parent is not None:</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            # A legacy session counter already received the charge above.</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>            if parent is not self._session_total:</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                if parent._descendants is None:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                    parent._descendants = UsageCounters()</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                parent._descendants.task_add(payload)</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            parent = parent._parent</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code></code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>    def snapshot(self) -&gt; dict:</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        &quot;&quot;&quot;只读快照(审计/报表;禁止由此路径改写计数)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        return {</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            &quot;requests&quot;: self.requests,</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            &quot;in_tokens&quot;: self.in_tokens,</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            &quot;out_tokens&quot;: self.out_tokens,</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>            &quot;cache_hit&quot;: self.cache_hit,</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            &quot;cost_est&quot;: round(self.cost_est, 6),</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            &quot;by_model&quot;: {k: v.snapshot() for k, v in sorted(self.by_model.items())},</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>        }</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code></code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>    def task_total(self) -&gt; Any:</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>        &quot;&quot;&quot;llm_fallback.UsageCounters 协议:TaskUsage 型读数(F032 预算闸同源)。</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code></code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>        Task fields represent own usage; descendants contribute only here.</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        The session ledger is independently cumulative across task lifetimes.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        from pyharness.core.llm_fallback import TaskUsage   # 免顶层环依赖</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        child = self._descendants</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        return TaskUsage(in_tokens=self.in_tokens+(child.in_tokens if child else 0),</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>                         out_tokens=self.out_tokens+(child.out_tokens if child else 0),</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>                         cost_est=round(self.cost_est+(child.cost_est if child else 0), 6))</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code></code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>    def rate_limit_streak(self) -&gt; int:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        &quot;&quot;&quot;连续 429 计数(协议;事件可重建)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        return self._rate_limit_streak</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code></code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>    def rate_limit_add(self) -&gt; int:</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        &quot;&quot;&quot;429 计数 +1(适配器归一 LLM-303 时调用;返回累计)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        self._rate_limit_streak += 1</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        return self._rate_limit_streak</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code></code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>    def degrade_add(self, failed: str, to: str) -&gt; int:</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        &quot;&quot;&quot;会话级降级计数(F013):返回累计次数(超 max_per_session 发告警)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        if self._session_total is not None:</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>            return self._session_total.degrade_add(failed, to)</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>        self._degrade_total += 1</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        self._degrade_last = {&quot;failed&quot;: failed, &quot;to&quot;: to}</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>        return self._degrade_total</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code></code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>class AdapterTriple:</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>    &quot;&quot;&quot;端点三元组(ADI §0.1 全局不变量①:模型差异=(base_url, api_key_ref, model))。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code></code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>    base_url: str        # 裸域或 /v1 结尾(禁写 /chat/completions)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>    api_key_ref: str     # env:NAME / file:PATH 秘密引用(F016 单口)</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>    model: str</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>    credential_store: Any = field(default=None, repr=False, compare=False)</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>    credential_binding: Any = field(default=None, repr=False, compare=False)</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code></code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>class ProviderStatusError(Exception):</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>    &quot;&quot;&quot;内置传输层 HTTP 状态错(类别判定用,ADI §7;body 文案不上行 ERR §5.1)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code></code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>    def __init__(self, status_code: int, detail: str = &quot;&quot;, *, diagnostics=None) -&gt; None:</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        self.status_code = int(status_code)</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        self.diagnostics = dict(diagnostics or {})</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        super().__init__(f&quot;HTTP {self.status_code}&quot;)</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code></code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>class ProviderProtocolError(Exception):</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>    &quot;&quot;&quot;传输层协议/结构错(响应非 JSON/choices 空/缺 message)→ LLM-304 语义。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code></code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>class ToolCallSyntaxError(Exception):</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>    &quot;&quot;&quot;arguments 非合法 JSON / 非对象 / 同响应 id 重复 → 上层映射 TLB-803 回喂,零执行。</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code></code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>    零猜原则(ADI §1.4.3):语法错绝不在解析层补全/猜测,原样上抛由 agent-loop 回喂。</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code></code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>    def __init__(self, call_id: Optional[str], cause: Any) -&gt; None:</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        self.call_id = call_id</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        self.cause = cause</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        super().__init__(f&quot;tool_calls arguments 非法:call_id={call_id!r} 原因={cause!r}&quot;)</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code></code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>class LLMAdapter(ABC):</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>    &quot;&quot;&quot;统一适配器接口(F030):三接口 + model/timeout;实例注入超时/计量钩子。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code></code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>    model: str</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>    timeout: TimeoutLimits</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code></code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>    @abstractmethod</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>    async def chat(self, messages: list[dict], tools: Optional[list] = None, *,</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>                   ctx: Any) -&gt; LLMResponse:</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>        &quot;&quot;&quot;非流式唯一出口(每次调用 = 一次请求全生命周期:事件/总闸/归一/计量/解析)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code></code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>    @abstractmethod</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>    async def chat_stream(self, messages: list[dict], tools: Optional[list] = None, *,</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>                          ctx: Any) -&gt; LLMResponse:</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        &quot;&quot;&quot;流式入口(F027):chunk 只上总线不入日志;与 chat 同型返回。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code></code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>    @abstractmethod</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>    async def ping(self) -&gt; float:</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        &quot;&quot;&quot;F033 探针:返回往返秒;失败 → LLM-303(不计 F029)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code></code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>TimeoutLimits.__module__ = &#x27;pyharness.core.llm&#x27;</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>ToolCall.__module__ = &#x27;pyharness.core.llm&#x27;</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>LLMResponse.__module__ = &#x27;pyharness.core.llm&#x27;</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>UsageCounters.__module__ = &#x27;pyharness.core.llm&#x27;</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>AdapterTriple.__module__ = &#x27;pyharness.core.llm&#x27;</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>ProviderStatusError.__module__ = &#x27;pyharness.core.llm&#x27;</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>ProviderProtocolError.__module__ = &#x27;pyharness.core.llm&#x27;</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>ToolCallSyntaxError.__module__ = &#x27;pyharness.core.llm&#x27;</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>LLMAdapter.__module__ = &#x27;pyharness.core.llm&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

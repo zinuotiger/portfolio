@@ -1,0 +1,126 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/handoff_document_support.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/handoff_document_support.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 126 行</span></nav><main class="wrap source-page"><h1>pyharness/application/handoff_document_support.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：6927ea9b21ac2126c76bb0c16914c415c662ddf1<br>SHA-256（内容校验）：f682377e18b32798b1f4dbbdc172a79510a214f53f03afea5305b006eb05724e</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 8 个类、函数与方法</summary><ul><li><a href="#L10">HandoffDocumentSupport（类） · L10–L126</a><ul><li><a href="#L11">HandoffDocumentSupport._handoff_dependencies_current（方法） · L11–L28</a></li><li><a href="#L30">HandoffDocumentSupport._handoff_owner（方法） · L30–L34</a></li><li><a href="#L36">HandoffDocumentSupport._package_acceptance（方法） · L36–L43</a></li><li><a href="#L45">HandoffDocumentSupport._handoff_document_basis（方法） · L45–L51</a></li><li><a href="#L53">HandoffDocumentSupport._handoff_document_gate（方法） · L53–L79</a></li><li><a href="#L81">HandoffDocumentSupport._handoff_document_grants（方法） · L81–L91</a></li><li><a href="#L93">HandoffDocumentSupport._validate_handoff_document（方法） · L93–L126</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Explicit output grant to quoted document, rechecked at every original use.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from contextvars import ContextVar</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.delivery_roles import subset_outputs</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.delivery_support import delivery_ref</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.errors import raise_code,PyHError</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>_handoff_reads=ContextVar(&#x27;handoff_document_reads&#x27;,default=())</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>class HandoffDocumentSupport:</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>    def _handoff_dependencies_current(self,resources,attempt,requester,authorize,service):</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>        &quot;&quot;&quot;Verify transitive provenance without exposing upstream contexts or</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>        substituting their stored owners for the real current requester.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>        from pyharness.application.handoff_execution_store import handoff_contexts</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        for value in handoff_contexts(self,resources,attempt):</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>            ident=value[&#x27;document_id&#x27;];seen=_handoff_reads.get()</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>            if ident in seen or len(seen)&gt;=20:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_dependency_limit&#x27;)</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>            token=_handoff_reads.set((*seen,ident))</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>            try:</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>                source=value[&#x27;source&#x27;]</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>                handoff,role,package=self._handoff_document_basis(resources,value[&#x27;project_id&#x27;],source,value[&#x27;created_by&#x27;])</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>                # The outer fixed-output grant permits provenance checking,</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>                # while only its selected downstream output is returned.</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>                self._handoff_current(resources,handoff,requester,authorize,service,package_granted=True)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>                if role[&#x27;role_contract&#x27;][&#x27;selection&#x27;][&#x27;role&#x27;]==&#x27;consumer&#x27;:</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>                    accepted=self._package_acceptance(resources,package,requester,authorize,service)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>                    if accepted!=source[&#x27;acceptance_ref&#x27;]:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;handoff_upstream_acceptance_changed&#x27;)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>            finally:_handoff_reads.reset(token)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    def _handoff_owner(self):</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        service=getattr(self,&#x27;_delivery_service&#x27;,None)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        if service is None or service.tenant_id!=self.tenant_id or self.root!=service.tenant_root()/&#x27;workspace-v1&#x27;:</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_document_owner_unbound&#x27;)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        return service</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    def _package_acceptance(self,resources,package,actor,authorize,service):</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        reference=delivery_ref(package,&#x27;delivery_package&#x27;)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        rows=[r for r in resources.values() if r.get(&#x27;delivery_acceptance&#x27;,{}).get(&#x27;selection&#x27;,{}).get(&#x27;package_ref&#x27;)==reference]</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        if not rows:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;independent_acceptance_required&#x27;)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        row=max(rows,key=lambda r:r[&#x27;source_seq&#x27;])</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        if self._acceptance_current(resources,row,actor,authorize,service,package_granted=True)!=&#x27;passed&#x27;:</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;independent_acceptance_required&#x27;)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        return delivery_ref(row,&#x27;delivery_acceptance&#x27;)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    def _handoff_document_basis(self,resources,project,source,actor):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        handoff,role,package=self._handoff_record(resources,project,source[&#x27;handoff_ref&#x27;])</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        h=handoff[&#x27;role_handoff&#x27;]</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        if actor!=h[&#x27;recipient_id&#x27;] or not self._handoff_acknowledged(resources,handoff,actor):</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;acknowledged_handoff_recipient_required&#x27;)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        subset_outputs([source[&#x27;output_ref&#x27;]],h[&#x27;selection&#x27;][&#x27;outputs&#x27;])</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        return handoff,role,package</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code></code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    def _handoff_document_gate(self,resources,row,actor,authorize,started):</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        service=self._handoff_owner();value=row[&#x27;document&#x27;];source=value[&#x27;source&#x27;];ident=value[&#x27;document_id&#x27;]</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        seen=_handoff_reads.get()</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        if ident in seen or len(seen)&gt;=20:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_dependency_limit&#x27;)</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        token=_handoff_reads.set((*seen,ident))</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        try:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            self._context_owned({ident:row},ident,&#x27;document&#x27;,value[&#x27;project_id&#x27;],actor)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            self._context_project(resources,value[&#x27;project_id&#x27;],value[&#x27;project_revision&#x27;])</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            handoff,role,package=self._handoff_document_basis(resources,value[&#x27;project_id&#x27;],source,actor)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>            self._handoff_current(resources,handoff,actor,authorize,service)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            if role[&#x27;role_contract&#x27;][&#x27;selection&#x27;][&#x27;role&#x27;]==&#x27;consumer&#x27;:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                accepted=self._package_acceptance(resources,package,actor,authorize,service)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>                if source[&#x27;acceptance_ref&#x27;]!=accepted:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;handoff_document_acceptance_changed&#x27;)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            if value[&#x27;handoff_context&#x27;]!=handoff[&#x27;role_handoff&#x27;][&#x27;selection&#x27;][&#x27;minimum_context&#x27;]:</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                raise_code(&#x27;PERS-202&#x27;,reason=&#x27;handoff_document_context_binding&#x27;)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            from pyharness.application.document_text import parser_version</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            if value[&#x27;parser_version&#x27;]!=parser_version(value[&#x27;format&#x27;]):raise_code(&#x27;EVT-101&#x27;,reason=&#x27;handoff_document_parser_changed&#x27;)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            from pyharness.application.delivery_contracts import DeliveryPackageCommand</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            _,attempt,_=self._delivery_package_basis(resources,value[&#x27;project_id&#x27;],</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                DeliveryPackageCommand.model_validate(package[&#x27;delivery_package&#x27;][&#x27;selection&#x27;]),package[&#x27;delivery_package&#x27;][&#x27;created_by&#x27;])</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            grants=self._delivery_source_grants(resources,attempt)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>            self._context_finish(authorize,actor,resources,grants)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>            if value[&#x27;retired&#x27;]:return [&#x27;document_retired&#x27;]</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>            import time</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            if time.monotonic()-started&gt;=self.MAX_WORKSPACE_CAPTURE_SECONDS:raise_code(&#x27;EVT-104&#x27;,reason=&#x27;document_observation_time_limit&#x27;)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            return []</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        finally:_handoff_reads.reset(token)</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code></code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    def _handoff_document_grants(self,resources,value,actor):</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        from pyharness.application.delivery_contracts import DeliveryPackageCommand</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        seen=_handoff_reads.get();ident=value[&#x27;document_id&#x27;]</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        if ident in seen or len(seen)&gt;=20:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_dependency_limit&#x27;)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        token=_handoff_reads.set((*seen,ident))</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        try:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            _,_,package=self._handoff_document_basis(resources,value[&#x27;project_id&#x27;],value[&#x27;source&#x27;],actor)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            p=package[&#x27;delivery_package&#x27;]</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            _,attempt,_=self._delivery_package_basis(resources,value[&#x27;project_id&#x27;],DeliveryPackageCommand.model_validate(p[&#x27;selection&#x27;]),p[&#x27;created_by&#x27;])</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            return self._delivery_source_grants(resources,attempt)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        finally:_handoff_reads.reset(token)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code></code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    def _validate_handoff_document(self,definition,resources,previous,event):</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        from pyharness.application.workspace_store import canonical,digest_of</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        from pyharness.application.handoff_document_contracts import HandoffDocumentCommand</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        value=definition.model_dump();source=value[&#x27;source&#x27;];actor=value[&#x27;created_by&#x27;]</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        try:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            if previous is not None:raise ValueError(&#x27;handoff document immutable&#x27;)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            self._s05_base(value,resources,previous,event,&#x27;document&#x27;)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>            handoff,role,package=self._handoff_document_basis(resources,value[&#x27;project_id&#x27;],source,actor)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            if role[&#x27;role_contract&#x27;][&#x27;selection&#x27;][&#x27;role&#x27;]==&#x27;consumer&#x27;:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                if source[&#x27;acceptance_ref&#x27;] is None:raise ValueError(&#x27;consumer independent acceptance missing&#x27;)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                accepted=self._delivery_exact(resources,value[&#x27;project_id&#x27;],&#x27;delivery_acceptance&#x27;,source[&#x27;acceptance_ref&#x27;])</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                if (self._acceptance_verdict(accepted[&#x27;delivery_acceptance&#x27;])!=&#x27;passed&#x27; or</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                        accepted[&#x27;delivery_acceptance&#x27;][&#x27;selection&#x27;][&#x27;package_ref&#x27;]!=delivery_ref(package,&#x27;delivery_package&#x27;)):</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                    raise ValueError(&#x27;consumer acceptance binding&#x27;)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            elif source[&#x27;acceptance_ref&#x27;] is not None:raise ValueError(&#x27;reviewer document has no execution acceptance&#x27;)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            if value[&#x27;source_metadata&#x27;] is not None or value[&#x27;retired&#x27;] or value[&#x27;handoff_context&#x27;]!=handoff[&#x27;role_handoff&#x27;][&#x27;selection&#x27;][&#x27;minimum_context&#x27;]:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                raise ValueError(&#x27;handoff document provenance&#x27;)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            command=HandoffDocumentCommand(schema_version=2,document_id=value[&#x27;document_id&#x27;],project_revision=value[&#x27;project_revision&#x27;],</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                title=value[&#x27;title&#x27;],handoff_ref=source[&#x27;handoff_ref&#x27;],output_ref=source[&#x27;output_ref&#x27;],format=value[&#x27;format&#x27;],</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                text_selection=source[&#x27;text_selection&#x27;],confirmation_digest=source[&#x27;confirmation_digest&#x27;])</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            expected_digest=(source[&#x27;text_selection&#x27;][&#x27;quote_digest&#x27;] if source[&#x27;text_selection&#x27;] else source[&#x27;output_ref&#x27;][&#x27;sha256&#x27;])</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            if value[&#x27;content_digest&#x27;]!=expected_digest:raise ValueError(&#x27;handoff selected bytes digest&#x27;)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>            if source[&#x27;text_selection&#x27;] is None and value[&#x27;size_bytes&#x27;]!=source[&#x27;output_ref&#x27;][&#x27;size_bytes&#x27;]:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                raise ValueError(&#x27;handoff selected bytes size&#x27;)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            text_bytes=sum(len(b[&#x27;text&#x27;].encode(&#x27;utf-8&#x27;)) for b in value[&#x27;blocks&#x27;])+len(value[&#x27;handoff_context&#x27;].encode(&#x27;utf-8&#x27;))</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            if text_bytes&gt;role[&#x27;role_contract&#x27;][&#x27;selection&#x27;][&#x27;max_context_bytes&#x27;]:raise ValueError(&#x27;handoff context ceiling&#x27;)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            if value[&#x27;format&#x27;]==&#x27;pdf&#x27;:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                from pyharness.application.handoff_document_store import pdf_confirmation</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>                parsed={k:value[k] for k in (&#x27;format&#x27;,&#x27;parser_version&#x27;,&#x27;page_count&#x27;,&#x27;unlocatable_pages&#x27;,&#x27;blocks&#x27;,&#x27;capability&#x27;,&#x27;capability_reason&#x27;)}</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                if source[&#x27;confirmation_digest&#x27;]!=pdf_confirmation(value[&#x27;project_id&#x27;],actor,command,parsed):</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>                    raise ValueError(&#x27;handoff PDF preview binding&#x27;)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            request=digest_of(canonical(dict(operation=&#x27;handoff_document.save&#x27;,project_id=value[&#x27;project_id&#x27;],command=command.model_dump())))</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            if request!=event.payload[&#x27;request_digest&#x27;]:raise ValueError(&#x27;handoff document request binding&#x27;)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        except (ValueError,KeyError,PyHError):raise_code(&#x27;PERS-202&#x27;,reason=&#x27;handoff_document_definition_binding&#x27;)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

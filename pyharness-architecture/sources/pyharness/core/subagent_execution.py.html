@@ -1,0 +1,326 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/subagent_execution.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/subagent_execution.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 326 行</span></nav><main class="wrap source-page"><h1>pyharness/core/subagent_execution.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：63a1cd25d3cd6c7f66b1271ebf64276c032bfde7<br>SHA-256（内容校验）：5a83a66d32af1d0536afb707751acd44597b792d72f03dfe609c9ec7f914054f</p><p><a href="../../../architecture-detailed.html?node=subagent">Subagent Orchestration（子代理委派与回收）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 12 个类、函数与方法</summary><ul><li><a href="#L11">SubagentExecution（类） · L11–L325</a><ul><li><a href="#L14">SubagentExecution.spawn（异步方法） · L14–L104</a></li><li><a href="#L106">SubagentExecution._invoke_child（异步方法） · L106–L130</a></li><li><a href="#L132">SubagentExecution._run_child（异步方法） · L132–L180</a></li><li><a href="#L182">SubagentExecution._finalize（方法） · L182–L195</a></li><li><a href="#L197">SubagentExecution._historic_result（方法） · L197–L214</a></li><li><a href="#L216">SubagentExecution.join（异步方法） · L216–L243</a></li><li><a href="#L245">SubagentExecution.cancel（异步方法） · L245–L265</a></li><li><a href="#L267">SubagentExecution.status（方法） · L267–L275</a></li><li><a href="#L277">SubagentExecution._cancel_all_children（异步方法） · L277–L312</a></li><li><a href="#L314">SubagentExecution._on_session_closing（异步方法） · L314–L320</a></li><li><a href="#L322">SubagentExecution.close_children（异步方法） · L322–L325</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;SubagentExecution operations, separated from facade assembly.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.core.lifecycle import admitted, stop_admissions</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import asyncio</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import inspect</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import time</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.errors import PyHError, raise_code, wrap_unexpected</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.core.subagent_models import log, SUBA_OWNER, _TERMINAL, SubagentSpec, ChildContext, ChildHandle, SubagentStatus, summarize, _scale_limits</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>class SubagentExecution:</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    &quot;&quot;&quot;SubagentExecution responsibility; state is owned by the composing facade.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    @admitted</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>    async def spawn(self, spec: SubagentSpec, ctx: Any = None) -&gt; str:</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>        &quot;&quot;&quot;F049 核心入口:四道约束闸(深度/工具子集在册/并发/预算)全过 → 建独立</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>        子会话 → 父会话落 subagent.spawned → 登记 ChildHandle 并起 _run_child;</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        返回 sub_id(join 的合法凭据,结果只可 join 一次)。</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        异常:BUSY(深度 &gt;3/层级不递增/并发满)、TLB-802(工具子集含未注册名)、</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        EVT-100(spec 非法)、EVT-104(父会话已 finished——session.append 校验链拒)。</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        任一步失败:并发闸已占则释放,零残留(无脏登记/无孤儿会话引导)。</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>        self._ensure_session()</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        self._validate_spec(spec)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        if spec.depth &gt; self._max_depth:        # ① 递归闸上界 ≤3(PRD F049)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>                &quot;hint&quot;: f&quot;子任务深度 {spec.depth} 超上限 {self._max_depth}&quot;,</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>                &quot;advice&quot;: &quot;子任务不得再嵌套超过 3 层;考虑平铺任务或合入父意图&quot;})</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        if spec.depth &lt; self._depth + 1:        # 递归闸递增链(偏离 5)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>                &quot;hint&quot;: f&quot;子任务深度 {spec.depth} 未达本层 {self._depth} + 1&quot;,</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>                &quot;advice&quot;: &quot;深度必须逐层 +1(平级/降级派发会绕过递归闸)&quot;})</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        # ② 工具子集必须已注册(幻觉名拦截;tools 未接线 → 日志降级跳过)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        tools = self._tools</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        if ctx is not None:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>            tools = tools or getattr(ctx, &quot;tools&quot;, None)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        if tools is not None:</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            has = getattr(tools, &quot;has&quot;, None)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>            for t in spec.tools_subset or []:</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>                if has is not None and not has(t):</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>                    raise_code(&quot;TLB-802&quot;, tool=t,</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>                               advice=&quot;tools_subset 含未注册工具;核对注册表,删幻觉名&quot;)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        # ④ 预算 = 父 × spec.budget_ratio(计入父任务:charge_hook 注入位,偏离 3)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        parent_scope = self._parent_scope</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        if ctx is not None:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>            parent_scope = getattr(ctx, &quot;scope&quot;, None) or parent_scope</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        limits = None</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        if parent_scope is not None:</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>            limits = _scale_limits(getattr(parent_scope, &quot;limits&quot;, None),</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>                                   float(spec.budget_ratio))</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        # ③ 并发闸(满 → BUSY;随后任何失败路径都释放,零残留)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        await self._acquire_slot()</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        sub_id = None</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        try:</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>            sub_id = self._child_id_factory()</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            child = self._session_factory(sub_id)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            child_scope = None</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            factory = self._child_scope_factory</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            if callable(factory):</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>                child_scope = factory(parent_scope, sub_id, child, limits,</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                                      spec.deny_extra)</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            if parent_scope is not None and child_scope is None:</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>                raise PyHError(&#x27;GRD-403&#x27;, ctx={&#x27;reason&#x27;: &#x27;child_scope_unavailable&#x27;})</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            if child_scope is not None and spec.tools_subset is not None:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                permitted = set(spec.tools_subset)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>                inherited = getattr(child_scope.policy, &#x27;allowed_tools&#x27;, None)</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>                child_scope.policy.allowed_tools = permitted if inherited is None else permitted &amp; inherited</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            anchor = self._parent_anchor(ctx)</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            # 子会话引导(独立 seq=1;真实 JSONL 由装配注 persistence)</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            await self._bootstrap_child(child, sub_id)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>            # 父会话只记委派事实(普通落盘;actor=agent,EVENT-SCHEMA §3.5.3)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            env = await self._session.append(</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                &quot;subagent.spawned&quot;,</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                {&quot;sub_id&quot;: sub_id, &quot;parent_seq&quot;: anchor, &quot;task&quot;: spec.task},</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                actor=&quot;agent&quot;, origin=SUBA_OWNER)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            h = ChildHandle(sub_id=sub_id, parent_sid=self._session.sid,</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                            parent_seq=env.seq, spec=spec, session=child,</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                            state=&quot;spawning&quot;,</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                            result=asyncio.get_running_loop().create_future(),</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                            started_ts=time.time(),</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                            budget_limits=limits, scope=child_scope,</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                            slot=True)</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            h.env = ChildContext(sub_id=sub_id, session=child, spec=spec,</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                                 scope=child_scope, budget_limits=limits,</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                                 parent_sid=self._session.sid)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>            self._children[sub_id] = h</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            h.task = asyncio.create_task(self._run_child(h))</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            h.state = &quot;running&quot;</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>            log.info(&quot;subagent spawned sub=%s parent=%s depth=%d task=%.60s&quot;,</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>                     sub_id, self._session.sid, spec.depth, spec.task)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            return sub_id</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        except BaseException as primary:</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>            self._release_slot()</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            if sub_id is not None:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>                self._children.pop(sub_id, None)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>                cleanup = getattr(self._runner, &#x27;close_child&#x27;, None)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>                if callable(cleanup):</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>                    try:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                        result = cleanup(sub_id)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                        if inspect.isawaitable(result): await result</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                    except BaseException as secondary:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                        primary.add_note(f&#x27;child rollback failed: {secondary!r}&#x27;)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>            raise</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code></code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    async def _invoke_child(self, h: ChildHandle) -&gt; Any:</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        &quot;&quot;&quot;子执行器调用 seam(偏离 7):runner.run_child(env) 异步/同步兼容。</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        未装配 runner → CYC-999 快速失败(防 S-1&quot;伪造已执行&quot;:宁失败不静默假完成,</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        task_queue._run_runner 同款)。F007 唯一 LLM 入口纪律(INV-02)由 runner</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        内部保证——子任务任何 LLM/工具动作都只能发生在 runner 提供的子循环内。</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        runner = self._runner</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        if runner is None:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>            raise_code(&quot;CYC-999&quot;, hint=&quot;SubagentManager 未装配子会话执行器&quot;,</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                       advice=&quot;装配层注入 agent_loop 适配 runner(INV-02 纪律)&quot;)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        fn = getattr(runner, &quot;run_child&quot;, runner)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        if not callable(fn):</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            raise_code(&quot;CYC-999&quot;, hint=f&quot;子执行器不可调用: {type(runner).__name__}&quot;)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        res = fn(h.env)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        if inspect.isawaitable(res):</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            res = await res</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        if self._charge_hook is not None:       # 子用量计入父任务(偏离 3)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            try:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                r = self._charge_hook(h.env)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                if inspect.isawaitable(r):</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>                    await r</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>            except Exception as exc:            # noqa: BLE001 记账失败不阻断回收</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>                log.warning(&quot;charge_hook 失败 sub=%s: %s&quot;, h.sub_id, exc)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        return res</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code></code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    async def _run_child(self, h: ChildHandle) -&gt; None:</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        &quot;&quot;&quot;子会话执行与回收(F049 核心):委派意图交子执行器(独立 session 上跑,</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        不占用父会话 running)→ 终态摘要(≤2KB)→ subagent.joined;PyHError/取消 →</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        subagent.failed / cancelled;finally 释放并发闸 + 摘登记(已回收即摘)。</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code></code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        取消分支不吞:re-raise CancelledError 沿 await 链传播(F025);终态审计事件</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        由 cancel()/_cancel_all_children() 统一落(见规格 _run_child 注释)。</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        try:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            out = await self._invoke_child(h)           # F007 子循环(seam)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            summary = summarize(out, self._summary_max_chars)   # ≤2KB(数据身份)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            if h.spec.notify:                           # 回收写父会话(普通落盘)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                await self._write_event(</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                    &quot;subagent.joined&quot;,</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                    {&quot;sub_id&quot;: h.sub_id, &quot;summary&quot;: summary},</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>                    actor=&quot;agent&quot;, trace={&quot;parent_seq&quot;: h.parent_seq})</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>            h.summary, h.state = summary, &quot;done&quot;</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>            if h.result is not None and not h.result.done():</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>                h.result.set_result(summary)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        except asyncio.CancelledError:                  # F025 取消传播:不吞</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            h.state = &quot;cancelled&quot;</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>            if h.result is not None and not h.result.done():</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>                h.result.cancel()                       # 唤醒 join 等待者(取消态)</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>            raise</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>        except PyHError as e:                           # 结构化失败:原码透传</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>            h.error_code, h.state = e.code, &quot;failed&quot;</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>            if h.spec.notify:</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                await self._write_event(</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>                    &quot;subagent.failed&quot;,</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>                    {&quot;sub_id&quot;: h.sub_id,</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>                     &quot;summary&quot;: summarize(</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                         f&quot;[{e.code}] {e.spec.advice}&quot;, self._summary_max_chars)},</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                    actor=&quot;agent&quot;, trace={&quot;parent_seq&quot;: h.parent_seq})</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>            if h.result is not None and not h.result.done():</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>                h.result.set_exception(e)               # join 上抛原 PyHError</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        except Exception as e:                          # 未预期兜底:CYC-999</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>            err = wrap_unexpected(e, &quot;subagent&quot;)</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            h.error_code, h.state = err.code, &quot;failed&quot;</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>            if h.spec.notify:</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>                await self._write_event(</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>                    &quot;subagent.failed&quot;,</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>                    {&quot;sub_id&quot;: h.sub_id,</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>                     &quot;summary&quot;: summarize(</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>                         f&quot;[{err.code}] {err.spec.advice}&quot;, self._summary_max_chars)},</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                    actor=&quot;agent&quot;, trace={&quot;parent_seq&quot;: h.parent_seq})</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>            if h.result is not None and not h.result.done():</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>                h.result.set_exception(err)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        finally:</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>            self._finalize(h)                           # 释放闸 + 摘登记(幂等)</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code></code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>    def _finalize(self, h: ChildHandle) -&gt; None:</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        &quot;&quot;&quot;句柄收尾(幂等):并发闸归还(防双放:slot 标记) + 从在途表摘除。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        if h.slot:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>            h.slot = False</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>            self._release_slot()</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        if self._children.get(h.sub_id) is h:</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            self._children.pop(h.sub_id, None)</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>            self._completed[h.sub_id] = (h.state, h.summary, h.error_code)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>            while len(self._completed) &gt; self._completed_limit:</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                self._completed.popitem(last=False)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            if h.result is not None and h.result.done() and not h.result.cancelled():</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                h.result.exception()  # Retrieve failures even without a waiting join.</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            finalize=getattr(self._runner,&#x27;finalize_child&#x27;,None)</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            if callable(finalize):finalize(h.sub_id)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code></code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    def _historic_result(self, sub_id):</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        &quot;&quot;&quot;Only owned child IDs may be recovered from this parent&#x27;s event log.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        events = list(self._ensure_session().events_after(0))</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        if not any(e.type == &#x27;subagent.spawned&#x27; and e.payload.get(&#x27;sub_id&#x27;) == sub_id for e in events):</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>            return None</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        for event in reversed(events):</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            p = event.payload</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>            if p.get(&#x27;sub_id&#x27;) == sub_id:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>                if event.type == &#x27;subagent.joined&#x27;:</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>                    return (&#x27;done&#x27;, p[&#x27;summary&#x27;], None)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                if event.type == &#x27;subagent.failed&#x27;:</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                    import re</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                    match = re.match(r&#x27;\[([A-Z]+-\d+)\]&#x27;, p.get(&#x27;summary&#x27;, &#x27;&#x27;))</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                    return (&#x27;failed&#x27;, None, match[1] if match else &#x27;CYC-999&#x27;)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>            if event.type == &#x27;system.cancelled&#x27; and p.get(&#x27;what&#x27;) == &#x27;subagent:&#x27;+sub_id:</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                return (&#x27;cancelled&#x27;, None, None)</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>        reader = getattr(self._runner, &#x27;completed_result&#x27;, None)</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        return reader(sub_id) if callable(reader) else None</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code></code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    async def join(self, sub_id: str, *, timeout: Optional[float] = None,</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>                   ctx: Any = None) -&gt; Optional[str]:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        &quot;&quot;&quot;主循环 await 子任务终态取回摘要:成功 → summary(≤2KB);失败 → raise 原</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        PyHError(回喂可行动文本);timeout → None(调用方决定再等/取消/先干别的);</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        Completed results support repeated join; evicted entries use owned history.</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        h = self._children.get(sub_id)</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        if h is None:</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            result = self._completed.get(sub_id) or self._historic_result(sub_id)</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>            if result is not None:</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                state, summary, code = result</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                if state == &#x27;cancelled&#x27;:</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                    raise asyncio.CancelledError</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                if state == &#x27;failed&#x27;:</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                    raise PyHError(code or &#x27;CYC-999&#x27;)</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                return summary</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            raise_code(&quot;EVT-101&quot;, sub_id=sub_id,</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                       hint=&quot;sub_id 不存在或没有可恢复的终态&quot;,</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>                       advice=&quot;使用本会话 spawn 返回的子任务 ID&quot;)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        if h.state in (&quot;spawning&quot;, &quot;running&quot;):</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>            h.state = &quot;joining&quot;                 # 等待期状态(ChildState 词表)</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        try:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>            # shield:超时只取消本等待,不毒化 h.result 内部 Future——否则超时后</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>            # 再次 join 读到 cancelled future 直接抛 CancelledError、结果永久丢失</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>            # (task_queue.wait_for 同款处理,P2 修复)。</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>            return await asyncio.wait_for(asyncio.shield(h.result), timeout)</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        except asyncio.TimeoutError:</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            return None                         # 调用方:再等/取消/先干别的</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code></code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>    async def cancel(self, sub_id: str, *, by: str = &quot;system&quot;,</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                     reason: str = &quot;user-cancel&quot;) -&gt; bool:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        &quot;&quot;&quot;取消在途子任务并归一化:system.cancelled 审计(父会话)→ 任务 cancel 传播</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        → await 其清理(终态由子循环自记 state=cancelled)→ 取消注入早于任务启动</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        (停 spawning)则补漏终态;已终态/不存在 → 幂等 False。</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        h = self._children.get(sub_id)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        if h is None or h.state in _TERMINAL:</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>            return False                        # 已终态/不存在 → 幂等 False</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        if h.task is not None and not h.task.done():</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>            h.task.cancel()                     # 沿 await 链传播 CancelledError</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>        await self._write_event(                # 声明式取消审计(父会话)</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>            &quot;system.cancelled&quot;,</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            {&quot;what&quot;: f&quot;subagent:{sub_id}&quot;, &quot;reason&quot;: reason},</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>            actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>        if h.task is not None:</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>            await asyncio.gather(h.task, return_exceptions=True)  # 等清理完成</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        if self._children.get(sub_id) is h and h.state not in _TERMINAL:</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            h.state = &quot;cancelled&quot;               # 取消早于任务启动:补漏终态</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            self._finalize(h)                   # 释放闸 + 摘登记(防泄漏)</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        return True</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code></code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>    def status(self) -&gt; SubagentStatus:</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        &quot;&quot;&quot;并发与在途查询(纯读,零副作用):running ≤limit,各在途 sub_id/state/age。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        now = time.time()</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        return SubagentStatus(</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            running=len(self._children),</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>            active_children=[{&quot;sub_id&quot;: h.sub_id, &quot;state&quot;: h.state,</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>                              &quot;age_s&quot;: int(now - h.started_ts)}</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>                             for h in self._children.values()],</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>            limit=self._max_concurrent)</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code></code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>    async def _cancel_all_children(self, *, reason: str) -&gt; None:</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>        &quot;&quot;&quot;child-first 清理主体:先逐子在途任务声明式取消(审计 + cancel),await</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>        全部退出,再补漏(取消注入早于任务启动的 spawning 句柄落 subagent.failed</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        终态事件 + 释放闸);摘净后才交还调用方(结构上杜绝&quot;父已终态、子还在跑/</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        回写 EVT-104&quot;)。</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        await stop_admissions(self)</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        hs = list(self._children.values())</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        if not hs:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>            return</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        errors = []</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>        for h in hs:</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>            if h.state not in _TERMINAL and h.task is not None and not h.task.done():</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                h.task.cancel()</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>        for h in hs:</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>            if h.state in _TERMINAL:</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>                continue</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>            try:</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>                await self._write_event(&#x27;system.cancelled&#x27;,</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>                    {&#x27;what&#x27;: f&#x27;subagent:{h.sub_id}&#x27;, &#x27;reason&#x27;: reason}, actor=&#x27;system&#x27;)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>            except BaseException as exc:</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                errors.append(exc)</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>        await asyncio.gather(*(h.task for h in hs if h.task is not None), return_exceptions=True)</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        for h in hs:</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>            try:</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                if h.state not in _TERMINAL:</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>                    await self._write_event(&#x27;subagent.failed&#x27;,</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>                        {&#x27;sub_id&#x27;:h.sub_id, &#x27;summary&#x27;:f&#x27;parent closed ({reason})&#x27;},</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>                        actor=&#x27;agent&#x27;, trace={&#x27;parent_seq&#x27;:h.parent_seq})</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                    h.state = &#x27;cancelled&#x27;</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>            except BaseException as exc:</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>                errors.append(exc)</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>            finally:</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>                self._finalize(h)</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        if errors:</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>            raise BaseExceptionGroup(&#x27;child cancellation audit failed&#x27;, errors)</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code></code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>    async def _on_session_closing(self, type_: str,</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>                                  payload: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        &quot;&quot;&quot;父会话关闭前 child-first 钩子(bus 订阅签名;announce 挂于 session.closing,</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        规范预关钩子,偏离 11):先取消全部在途子任务并 await,落终态事件,随后才</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        允许 finished 落盘——从结构上杜绝&quot;父已终态、子还在跑/回写 EVT-104&quot;。</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>        await self._cancel_all_children(reason=&quot;parent-closed&quot;)</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code></code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>    async def close_children(self, *, reason: str = &quot;parent-closed&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>        &quot;&quot;&quot;child-first 清理公开入口(detach/_on_session_closing 共用;装配层可在</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>        agent.close 落 finished 前显式触发)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        await self._cancel_all_children(reason=reason)</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

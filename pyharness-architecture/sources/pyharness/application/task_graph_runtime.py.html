@@ -1,0 +1,154 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/task_graph_runtime.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/task_graph_runtime.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 154 行</span></nav><main class="wrap source-page"><h1>pyharness/application/task_graph_runtime.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：985f6a15ad17198dc0f5cd856faf52b0494b4005<br>SHA-256（内容校验）：394da3222569c3a568e6e2c8d4a711efb2cf00392f3ce86698fe1cb3f75922a8</p><p><a href="../../../architecture-detailed.html?node=task_graph">TaskGraph（依赖任务图调度）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 10 个类、函数与方法</summary><ul><li><a href="#L11">GraphOwner（类） · L11–L119</a><ul><li><a href="#L12">GraphOwner.__init__（方法） · L12–L15</a></li><li><a href="#L17">GraphOwner.check（方法） · L17–L24</a></li><li><a href="#L26">GraphOwner.ready（方法） · L26–L30</a></li><li><a href="#L32">GraphOwner.node（异步方法） · L32–L61</a></li><li><a href="#L63">GraphOwner.stop_children（异步方法） · L63–L96</a></li><li><a href="#L98">GraphOwner.run（异步方法） · L98–L119</a></li></ul></li><li><a href="#L122">run_owned_graph（异步函数） · L122–L124</a></li><li><a href="#L127">stop_task_graphs（异步函数） · L127–L131</a></li><li><a href="#L134">graph_observation（异步函数） · L134–L154</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Ready-node scheduler over original product executions; reads never restart it.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>import asyncio</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.core.lifecycle import admitted</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.application.execution_configuration import describe_execution</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from pyharness.application.task_graph_binding import node_keys</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pyharness.application.task_graph_execution_contracts import GraphNodeStartExecution</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pyharness.application.execution_contracts import AgentVersionReference</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.errors import PyHError,raise_code</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>class GraphOwner:</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>    def __init__(self,projects,authority,actor):</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>        self.projects=projects;self.authority=authority;self.actor=actor</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>        self.reference={k:authority[k] for k in (&#x27;graph_run_id&#x27;,&#x27;revision&#x27;,&#x27;digest&#x27;,&#x27;source_seq&#x27;)}</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        self.active=set();self.completed=set();self.stop_targets={};self.closed=False;self.task=None;self.error=None</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    def check(self):</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        if self.closed or self.task.done() or self.projects._authorize(write=True)!=self.actor:</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;graph_owner_unavailable&#x27;)</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        resources,_=self.projects.store._cancellation_state()</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        self.projects.store._graph_control_run(resources,self.authority[&#x27;project_id&#x27;],self.reference,self.actor)</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        if (self.projects.store._graph_cancelled(resources,self.reference) or</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>                self.projects.store._experiment_graph_stop_requested(resources,self.reference)):</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>            raise asyncio.CancelledError(&#x27;task_graph_cancel_requested&#x27;)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    def ready(self,node):</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>        self.check()</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        if node[&#x27;node_id&#x27;] not in self.active or not set(node[&#x27;depends_on&#x27;])&lt;=self.completed:</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;graph_node_not_ready&#x27;)</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>        if len(self.active)&gt;self.authority[&#x27;concurrency&#x27;]:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;graph_concurrency_exceeded&#x27;)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code></code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>    async def node(self,node):</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        p=self.projects;project=self.authority[&#x27;project_id&#x27;];self.ready(node)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>        basis=await p.store.append_graph_dispatch(project,self.reference,node[&#x27;node_id&#x27;],authorize=lambda:p._authorize(write=True),ready=lambda:self.ready(node))</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        attempt=await p.store.submit_graph_node(project,basis,authorize=lambda:p._authorize(write=True),live=lambda:self.ready(node))</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>        selection=dict(schema_version=1,attempt_ref={k:attempt[k] for k in (&#x27;attempt_id&#x27;,&#x27;revision&#x27;,&#x27;digest&#x27;,&#x27;source_seq&#x27;)},agent_ref=node[&#x27;agent_ref&#x27;],</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>            execution_id=node[&#x27;execution_id&#x27;],confirmation_digest=&#x27;0&#x27;*64,confirm_host_boundary=self.authority[&#x27;selection&#x27;][&#x27;confirm_host_boundary&#x27;],graph_node=basis)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>        command=GraphNodeStartExecution.model_validate(selection)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        await p._execution_ready(command)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        describe=lambda:describe_execution(p,AgentVersionReference.model_validate(node[&#x27;agent_ref&#x27;]))</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>        authorize=lambda:p._authorize(write=True)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        preview=await p.store.preview_execution(project,command,authorize=authorize,describe=describe)</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>        command=command.model_copy(update={&#x27;confirmation_digest&#x27;:preview[&#x27;confirmation_digest&#x27;]})</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        materials=await p.store.capture_execution_materials(project,command,authorize=authorize,describe=describe)</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        from pyharness.application.product_executions import require_material_reader</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        require_material_reader(describe()[&#x27;agent_snapshot&#x27;],materials)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>        self.ready(node)</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>        _,key=node_keys(self.reference,node[&#x27;node_id&#x27;])</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>        receipt,first=await p.store.authorize_execution(project,command,command_id=key,authorize=authorize,describe=describe)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        if not first:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;graph_node_dispatch_not_first&#x27;)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        self.stop_targets[receipt[&#x27;execution_id&#x27;]]=dict(session_id=receipt[&#x27;session_id&#x27;],task_id=receipt[&#x27;task_id&#x27;],project_id=project,tenant_id=p.service.tenant_id,subject=self.actor,execution_ref={k:receipt[k] for k in (&#x27;execution_id&#x27;,&#x27;revision&#x27;,&#x27;digest&#x27;,&#x27;source_seq&#x27;)})</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        await p._launch_product_execution(receipt,materials)</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        while True:</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            self.check();result=await p.execution(project,node[&#x27;execution_id&#x27;])</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>            if result[&#x27;status&#x27;] in {&#x27;completed&#x27;,&#x27;failed&#x27;,&#x27;cancelled&#x27;,&#x27;interrupted&#x27;,&#x27;unknown&#x27;}:</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                queue=p.service._queues.get(result[&#x27;session_id&#x27;])</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>                if queue is not None and result[&#x27;task_id&#x27;] in (queue.status().running,*queue.status().waiting):</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>                    await asyncio.sleep(.02);continue</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>                if result[&#x27;status&#x27;]!=&#x27;completed&#x27; or result[&#x27;unknown_effects&#x27;]:raise_code(&#x27;EVT-104&#x27;,reason=&#x27;graph_node_not_confirmed_complete&#x27;)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>                self.completed.add(node[&#x27;node_id&#x27;]);return</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            await asyncio.sleep(.02)</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    async def stop_children(self):</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        # Revoke scheduler admission before awaiting child cleanup.</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        self.closed=True</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>        targets=dict(self.stop_targets)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        try:</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            resources,_=self.projects.store._cancellation_state()</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>            from pyharness.application.task_graph_control_checks import graph_basis</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            for row in resources.values():</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>                value=row.get(&#x27;execution_authorization&#x27;)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                if not value or value[&#x27;created_by&#x27;]!=self.actor:continue</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>                attempt=self.projects.store._execution_attempt(resources,value[&#x27;project_id&#x27;],value[&#x27;selection&#x27;][&#x27;attempt_ref&#x27;],self.actor)</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                basis=graph_basis(self.projects.store,resources,attempt)</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                if basis is None or basis[&#x27;graph_run_ref&#x27;]!=self.reference:continue</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                targets[value[&#x27;execution_id&#x27;]]=dict(session_id=value[&#x27;session_id&#x27;],task_id=value[&#x27;task_id&#x27;],project_id=value[&#x27;project_id&#x27;],tenant_id=self.projects.service.tenant_id,</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                    subject=self.actor,execution_ref=self.projects.store._s05_ref(row,&#x27;execution_id&#x27;,&#x27;execution_authorization&#x27;))</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>        except PyHError:</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>            # These receipts only reduce permissions for exact already-owned</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>            # queues. They cannot read sources, create attempts or grant I/O.</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>            if not targets:raise</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        stopping=[]</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        for target in targets.values():</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>            queue=self.projects._owned_stop_queue(target)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>            if queue is not None:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>                await self.projects._signal_execution_stop(target,queue,&#x27;task_graph_stopped&#x27;)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>                stopping.append((target[&#x27;task_id&#x27;],queue))</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        # A queue can publish its terminal result before segment cleanup clears</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        # its running slot. Retain only these already-verified owned identities;</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        # do not await, cancel or inspect unrelated queued work.</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        try:</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            async with asyncio.timeout(3):</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                while any(task in (queue.status().running,*queue.status().waiting) for task,queue in stopping):</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>                    await asyncio.sleep(.01)</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        except TimeoutError:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            raise_code(&#x27;PERS-202&#x27;,reason=&#x27;graph_stop_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    async def run(self):</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        pending={n[&#x27;node_id&#x27;]:n for n in self.authority[&#x27;nodes&#x27;]};running={}</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        try:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>            while pending or running:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>                self.check()</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>                for ident in sorted(list(pending)):</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                    node=pending[ident]</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                    if len(running)&gt;=self.authority[&#x27;concurrency&#x27;]:break</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                    if not set(node[&#x27;depends_on&#x27;])&lt;=self.completed:continue</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                    self.active.add(ident);pending.pop(ident);running[ident]=asyncio.create_task(self.node(node))</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                if not running:raise_code(&#x27;EVT-104&#x27;,reason=&#x27;graph_no_confirmed_ready_nodes&#x27;)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                done,_=await asyncio.wait(list(running.values()),return_when=asyncio.FIRST_COMPLETED)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                for ident,task in list(running.items()):</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                    if task not in done:continue</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>                    task.result();running.pop(ident);self.active.remove(ident)</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        except BaseException as exc:</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            self.error=&#x27;cancelled&#x27; if isinstance(exc,asyncio.CancelledError) else str(getattr(exc,&#x27;code&#x27;,&#x27;graph_runtime_failed&#x27;))</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>            for task in running.values():task.cancel()</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            await asyncio.gather(*running.values(),return_exceptions=True)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>            try:await self.stop_children()</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>            except BaseException as secondary:exc.add_note(&#x27;graph stop unavailable: &#x27;+type(secondary).__name__)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        finally:self.closed=True</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>@admitted</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>async def run_owned_graph(projects,owner):</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    await owner.run()</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code></code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>async def stop_task_graphs(service):</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    owners=list(getattr(service,&#x27;_task_graph_owners&#x27;,{}).values())</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    for owner in owners:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        if not owner.task.done():owner.task.cancel()</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>    await asyncio.gather(*(owner.task for owner in owners),return_exceptions=True)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code></code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code></code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>async def graph_observation(projects,authority):</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    project=authority[&#x27;project_id&#x27;];resources,_,_=await projects.store._execution_read_state()</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    reference={k:authority[k] for k in (&#x27;graph_run_id&#x27;,&#x27;revision&#x27;,&#x27;digest&#x27;,&#x27;source_seq&#x27;)}</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    cancelled=projects.store._graph_cancelled(resources,reference);nodes=[]</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>    owner=getattr(projects.service,&#x27;_task_graph_owners&#x27;,{}).get(reference[&#x27;graph_run_id&#x27;]);live=owner is not None and not owner.closed and not owner.task.done()</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    for plan in authority[&#x27;nodes&#x27;]:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        row=resources.get(plan[&#x27;execution_id&#x27;]);node=dict(plan,status=&#x27;pending&#x27; if live else &#x27;interrupted&#x27;,unknown_effects=False)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        if row and &#x27;execution_authorization&#x27; in row:</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            result=await projects.execution(project,plan[&#x27;execution_id&#x27;])</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            node.update(status=result[&#x27;status&#x27;],unknown_effects=result[&#x27;unknown_effects&#x27;],execution_ref=projects.store._s05_ref(row,&#x27;execution_id&#x27;,&#x27;execution_authorization&#x27;),</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                observed_seq=result[&#x27;observed_seq&#x27;],result_summary=result.get(&#x27;result_summary&#x27;,&#x27;&#x27;),artifacts=result.get(&#x27;artifacts&#x27;,[]))</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>        nodes.append(node)</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    states={n[&#x27;status&#x27;] for n in nodes}</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>    if states=={&#x27;completed&#x27;} and not any(n[&#x27;unknown_effects&#x27;] for n in nodes):status=&#x27;completed&#x27;</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    elif cancelled:status=&#x27;cancelling&#x27; if states&amp;{&#x27;running&#x27;,&#x27;queued&#x27;,&#x27;preparing&#x27;} else &#x27;cancelled&#x27;</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    elif live:status=&#x27;running&#x27;</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    elif &#x27;unknown&#x27; in states or any(n[&#x27;unknown_effects&#x27;] for n in nodes):status=&#x27;unknown&#x27;</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    elif &#x27;failed&#x27; in states:status=&#x27;failed&#x27;</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>    else:status=&#x27;interrupted&#x27;</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    return dict(authority,nodes=nodes,status=status,business_acceptance=&#x27;not_evaluated&#x27;,scheduler_active=live,automatic_dispatch=False,</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        cancel_requested=cancelled,cost_observation=&#x27;runtime_estimate&#x27;,runtime_error=owner.error if owner else None)</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

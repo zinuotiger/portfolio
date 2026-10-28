@@ -1,0 +1,129 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/execution_result.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/execution_result.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 129 行</span></nav><main class="wrap source-page"><h1>pyharness/core/execution_result.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：2e3eb65f153c61abfd3f361ab3c05f933c44e6de<br>SHA-256（内容校验）：f9b82ca07b0e4d156a7eb54346ba1aa4f305ff783beea28e27956ac45848eab2</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 6 个类、函数与方法</summary><ul><li><a href="#L35">ExecResult（类） · L35–L47</a></li><li><a href="#L49">ApprovalRoundResult（类） · L49–L67</a></li><li><a href="#L69">summarize_text（函数） · L69–L73</a></li><li><a href="#L75">_short_value（函数） · L75–L93</a></li><li><a href="#L95">summarize（函数） · L95–L112</a></li><li><a href="#L114">_approval_binding（函数） · L114–L124</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Execution result: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import hashlib</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import json</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import logging</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from dataclasses import dataclass</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code></code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>log = logging.getLogger(&quot;pyharness.tools_executor&quot;)</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>DEFAULT_TOOL_TIMEOUT: int = 60          # F017 工具默认超时(PARAMETER-ANCHOR 锁定)</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>SPILL_THRESHOLD: int = 2048             # 结果文本 &gt;2KB → spill(F039,DIS-SEAM §6.1 G1)</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>SUMMARY_MAX_CHARS: int = 2000           # tool.result summary ≤2KB(payload max 2048)</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>DEFAULT_MAX_ARG_FAILURES: int = 2</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>PARSE_FAIL_NAME: str = &quot;?&quot;              # 解析失败事件 name 回落值(缺工具名时,审计占位)</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>_ZOMBIE_POOL_LIMIT: int = 32            # 僵尸线程池保留上限(超出即裁剪已空闲池)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>_SUMMARY_PRIORITY: tuple[str, ...] = (</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>    &quot;url&quot;, &quot;domain&quot;, &quot;host&quot;, &quot;target&quot;, &quot;path&quot;, &quot;src&quot;, &quot;dst&quot;, &quot;dir&quot;,</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>    &quot;mode&quot;, &quot;command&quot;, &quot;cmd&quot;, &quot;shell&quot;, &quot;message&quot;, &quot;content&quot;,</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>_SUMMARY_TAIL_KEYS: frozenset = frozenset(</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    {&quot;command&quot;, &quot;cmd&quot;, &quot;code&quot;, &quot;input&quot;, &quot;content&quot;, &quot;text&quot;, &quot;script&quot;,</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>     &quot;prompt&quot;, &quot;message&quot;, &quot;args&quot;, &quot;path&quot;, &quot;query&quot;})</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>_TAIL_KEEP: int = 24              # 尾部保留宽度(头尾双展示:尾 ≥24 字符可见)</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code></code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>class ExecResult:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    &quot;&quot;&quot;单次工具调用结果(spec 数据结构表;F022 批量入口消费)。</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code></code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    summary ≤2KB(回喂/审计);truncated/spill_ref 由关4 finalize 产出</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>    (超长 → spill 私有区,大结果不进上下文/日志);elapsed_ms = Provider 实耗。</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code></code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    ok: bool</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    summary: str</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>    truncated: bool = False</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    spill_ref: Optional[dict] = None     # {ref, chars, lines, preview}(事件同型)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    elapsed_ms: float = 0.0</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code></code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>class ApprovalRoundResult:</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    &quot;&quot;&quot;关2.5 审批编排结果(S3-2-2;取代&quot;allow&quot;/摘要文本的混合字符串返回契约)。</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code></code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    字段语义(互不等价):</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>      - ``decision`` : 本轮治理决策——未获批时为 **D1**;获批重入后为 **D2**</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        (``D2.supersedes == D1.decision_id``);</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>      - ``approved`` : **人类是否批准**(granted);</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>      - ``executed`` : 是否**放行至关3**(获批 ≠ 放行:重入 reject / 绑定不符时不放行);</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>      - ``message``  : 用户可见文案(``executed=False`` 时由调用方原样回喂)。</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code></code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    边界:``denied``/``timeout``/``APR-501`` 一律 **不产生 D2、不再次 authorize、</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    不执行 provider**(该语义归 approval transport + executor,R1)。</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>    decision: Any</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    approved: bool</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    executed: bool</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    message: str = &quot;&quot;</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code></code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>def summarize_text(text: str, max_chars: int = SUMMARY_MAX_CHARS) -&gt; str:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    &quot;&quot;&quot;文本截断摘要(≤max_chars;截断处补 … 记号,防静默丢尾)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    if len(text) &lt;= max_chars:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>        return text</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    return text[: max_chars - 1] + &quot;…&quot;</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code></code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>def _short_value(v: Any, width: int = 80, key: Optional[str] = None) -&gt; str:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    &quot;&quot;&quot;摘要值短化:dict/list 只报结构;字符串截断;None/bool/int 直写。</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    内容承载键(key ∈ _SUMMARY_TAIL_KEYS)超宽时头尾双展示(保留尾部 _TAIL_KEEP</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    字符)——审批视图不得把危险命令段藏在省略号后;普通键单侧截断。</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    if isinstance(v, dict):</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        return f&quot;&lt;dict {len(v)}键&gt;&quot;</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    if isinstance(v, (list, tuple)):</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        return f&quot;&lt;list {len(v)}项&gt;&quot;</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    if v is None:</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        return &quot;null&quot;</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>    s = str(v)</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    if len(s) &lt;= width:</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        return s</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    if key is not None and key in _SUMMARY_TAIL_KEYS:</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        head = s[: max(0, width - _TAIL_KEEP - 2)]</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        return f&quot;{head} … {s[-_TAIL_KEEP:]}&quot;</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    return s[: width - 1] + &quot;…&quot;</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>def summarize(args: Any, *, max_chars: int = 400) -&gt; str:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    &quot;&quot;&quot;Consumer 层参数摘要化(审批展示用;spec 速览表 def summarize(args))。</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>    不由 Provider/LLM 生成(防注入操纵摘要,SECURITY §5):只做键值短化 + 动作</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    键优先排序;超长截断。content/command 类键头尾双展示(尾部可见,防截断隐藏)。</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>    if not isinstance(args, dict) or not args:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        return &quot;(无参数)&quot;</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    ordered = sorted(args, key=lambda k: (_SUMMARY_PRIORITY.index(k)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                                          if k in _SUMMARY_PRIORITY else 99, k))</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    parts: list[str] = []</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    for k in ordered:</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        seg = f&quot;{k}={_short_value(args[k], key=k)}&quot;</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        if sum(len(p) for p in parts) + len(seg) &gt; max_chars:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>            parts.append(&quot;…&quot;)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            break</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        parts.append(seg)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    return &quot;, &quot;.join(parts)</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>def _approval_binding(call: Any, args: dict) -&gt; str:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    &quot;&quot;&quot;审批绑定指纹:sha1(tool + 规范化参数序列化)。</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code></code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    唯一用途 = 把&quot;人类批准&quot;与&quot;实际执行&quot;绑定到同一调用:granted 后重入 guard</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>    得到 approval 决策时,校验本指纹 == 审批提供器为该 call_id 记录的绑定,</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    不一致 = 批准针对的是不同参数(注入/篡改),拒绝执行(GRD-403)。参数序列化</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    用 sort_keys 定序(同一调用内同 args 确定性一致;跨会话信任仍走 approval 层</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    自己的 canonical_json)。</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    canon = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    return hashlib.sha1(f&quot;{call.name}\n{canon}&quot;.encode(&quot;utf-8&quot;)).hexdigest()</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code></code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code></code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>ExecResult.__module__ = &#x27;pyharness.core.tools_executor&#x27;</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>ApprovalRoundResult.__module__ = &#x27;pyharness.core.tools_executor&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

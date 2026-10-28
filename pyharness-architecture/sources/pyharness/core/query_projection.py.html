@@ -1,0 +1,254 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/query_projection.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/query_projection.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 254 行</span></nav><main class="wrap source-page"><h1>pyharness/core/query_projection.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：f7767a10fd7b4104f3c670e7af1705a69be043c7<br>SHA-256（内容校验）：83e527c136eaf08d3fd3c5d6d10728ad6f3f2d5d803f7d4985e85c34d12b1073</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 19 个类、函数与方法</summary><ul><li><a href="#L36">default_db_path（函数） · L36–L39</a></li><li><a href="#L47">_tokenize（函数） · L47–L67</a></li><li><a href="#L69">_index_text（函数） · L69–L71</a></li><li><a href="#L73">_pretty_snippet（函数） · L73–L75</a></li><li><a href="#L77">_payload（函数） · L77–L85</a></li><li><a href="#L87">_field（函数） · L87–L93</a></li><li><a href="#L95">_payload_field（函数） · L95–L97</a></li><li><a href="#L99">_extract_content（函数） · L99–L100</a></li><li><a href="#L102">_extract_summary（函数） · L102–L103</a></li><li><a href="#L105">_extract_new_title（函数） · L105–L106</a></li><li><a href="#L119">_index_item（函数） · L119–L148</a></li><li><a href="#L150">is_indexable（函数） · L150–L156</a></li><li><a href="#L160">read_max_seq（函数） · L160–L189</a></li><li><a href="#L191">Hit（类） · L191–L200</a></li><li><a href="#L202">QueryResult（类） · L202–L207</a></li><li><a href="#L209">_log_warn（函数） · L209–L211</a></li><li><a href="#L213">FtsQueryHandle（类） · L213–L235</a><ul><li><a href="#L222">FtsQueryHandle.handle（异步方法） · L222–L235</a></li></ul></li><li><a href="#L237">_replay_store（函数） · L237–L249</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Query projection: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import logging</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import re</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from typing import Any, Iterator, Optional</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from pyharness.config import DEFAULTS</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code></code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>log = logging.getLogger(&quot;pyharness.session_query&quot;)</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>_FTS_DEFAULTS: dict = DEFAULTS[&quot;storage&quot;][&quot;fts&quot;]</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>_INDEX_BATCH_MS: int = int(_FTS_DEFAULTS[&quot;index_batch_ms&quot;])     # 200ms 攒批</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code></code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>_QUERY_TIMEOUT_S: float = float(_FTS_DEFAULTS[&quot;query_timeout_s&quot;])  # 5s 软降级</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>_RESULT_LIMIT: int = int(_FTS_DEFAULTS[&quot;result_limit&quot;])         # ≤20 条</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code></code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>_MIN_CJK: int = 2          # 中文下限:≥2 字(2-gram 语义)(F057 边界)</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>_MIN_LATIN: int = 3        # 英文/数字下限:≥3 字符(F057 边界)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code></code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>_FLUSH_BATCH: int = 64     # 攒批条数闸(≥64 条立即落库;spec 伪码常量)</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>_OWNER: str = &quot;cap:session_fts&quot;          # 订阅属主**前缀**(实例再拼库路径+会话集,见 __init__)</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>TOOL_NAME: str = &quot;session.fts_query&quot;     # LLM 可见搜索工具名(F064 消费)</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code></code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>_CONTENT_COL: int = 6      # snippet 提取列:7 列布局下 content 的列序号(偏离 1)</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code></code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>DEFAULT_DB_NAME: str = &quot;index.db&quot;</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>def default_db_path() -&gt; Path:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    &quot;&quot;&quot;默认索引库路径:storage.root 锚点 ~/.pyharness 下 index.db(可被构造参数覆盖)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    root = str(DEFAULTS[&quot;storage&quot;][&quot;root&quot;]).replace(&quot;~&quot;, str(Path.home()))</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>    return Path(root).expanduser() / DEFAULT_DB_NAME</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>_CJK_RUN = re.compile(r&quot;[\u4e00-\u9fff]+&quot;)          # 连续中文段(查询侧滑窗)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code></code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>_CJK_CHAR = re.compile(r&quot;[\u4e00-\u9fff]&quot;)          # 单中文字(索引侧逐字)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>_WORD = re.compile(r&quot;[A-Za-z0-9_]{3,}&quot;)             # 查询侧拉丁词(≥3 字符)</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>def _tokenize(text: str) -&gt; list[str]:</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    &quot;&quot;&quot;逐段扫描文本:中文连续段逐字出 token,ASCII 连续段整词出 token,其余丢弃。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    out: list[str] = []</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    i, n = 0, len(text)</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>    while i &lt; n:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        ch = text[i]</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        if _CJK_CHAR.fullmatch(ch):</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            j = i + 1</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>            while j &lt; n and _CJK_CHAR.fullmatch(text[j]):</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>                j += 1</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>            out.extend(text[i:j])                    # 逐字成 token(每字一词)</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>            i = j</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>        elif ch.isascii() and (ch.isalnum() or ch == &quot;_&quot;):</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>            j = i + 1</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>            while j &lt; n and text[j].isascii() and (text[j].isalnum() or text[j] == &quot;_&quot;):</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>                j += 1</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>            out.append(text[i:j])                    # ASCII 整词成 token</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>            i = j</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        else:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>            i += 1                                   # 标点/空白/其他:丢弃(分隔)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    return out</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code></code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>def _index_text(text: str) -&gt; str:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>    &quot;&quot;&quot;写索引前的文本变换:token 空格拼接(中文字间有空格,词边界即 token 边界)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    return &quot; &quot;.join(_tokenize(text))</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>def _pretty_snippet(snippet: str) -&gt; str:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    &quot;&quot;&quot;snippet 美化:回缩中文相邻字之间的索引空格(展示层复原;拉丁词间距保留)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    return re.sub(r&quot;(?&lt;=[\u4e00-\u9fff]) (?=[\u4e00-\u9fff])&quot;, &quot;&quot;, snippet)</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>def _payload(env: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    &quot;&quot;&quot;信封/裸 dict 双形态取 payload(总线会话事件载荷为 Envelope;dict 兜底)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    if env is None:</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>        return {}</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    if isinstance(env, dict):</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>        p = env.get(&quot;payload&quot;)</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>        return p if isinstance(p, dict) else {}</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    p = getattr(env, &quot;payload&quot;, None)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    return p if isinstance(p, dict) else {}</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code></code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>def _field(env: Any, name: str, default: Any = None) -&gt; Any:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>    &quot;&quot;&quot;信封/裸 dict 双形态取顶层字段(session_id/seq/type/ts/actor)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    if env is None:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        return default</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    if isinstance(env, dict):</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        return env.get(name, default)</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    return getattr(env, name, default)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>def _payload_field(env: Any, name: str, default: Any = &quot;&quot;) -&gt; Any:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    &quot;&quot;&quot;payload 内字段抽取(dict 形态容错;缺省空串——空文本行不入索引)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    return _payload(env).get(name, default)</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>def _extract_content(env: Any) -&gt; str:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    return str(_payload_field(env, &quot;content&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code></code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>def _extract_summary(env: Any) -&gt; str:</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    return str(_payload_field(env, &quot;summary&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code></code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>def _extract_new_title(env: Any) -&gt; str:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    return str(_payload_field(env, &quot;new_title&quot;) or &quot;&quot;)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code></code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>_WHITELIST: dict[str, Any] = {</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    &quot;user.message&quot;: _extract_content,</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    &quot;agent.message&quot;: _extract_content,</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>    &quot;llm.response&quot;: _extract_content,          # content 非空才索引(抽取后判空)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    &quot;tool.result&quot;: _extract_summary,</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    &quot;session.renamed&quot;: _extract_new_title,</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    &quot;context.compacted&quot;: _extract_summary,</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>}</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code></code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>_INDEX_TYPES: tuple[str, ...] = tuple(_WHITELIST) + (&quot;user.message_edited&quot;,)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code></code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>def _index_item(type_: str, env: Any) -&gt; Optional[tuple]:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    &quot;&quot;&quot;事件 → 索引项(模块级单源;``SessionQueryIndex._extract`` 与 ``is_indexable`` 共用)。</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code></code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    返回 None = 不索引;(&quot;insert&quot;, row) = 新增内容行;(&quot;edit&quot;, (sid, tseq, newc))</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    = 级联修正(F063,不改行键、不新增行)。</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    if type_ == &quot;user.message_edited&quot;:             # F063:级联更新 target 行</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        sid = _field(env, &quot;session_id&quot;)</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        tseq = _payload_field(env, &quot;target_seq&quot;)</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        newc = _payload_field(env, &quot;new_content&quot;)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        if not sid or not tseq or not newc:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            return None</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        return (&quot;edit&quot;, (sid, int(tseq), str(newc)))</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    fn = _WHITELIST.get(type_)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>    if fn is None:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        return None                                # 白名单外(含 guard.*/瞬时)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>    text = fn(env)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>    text = str(text if text is not None else &quot;&quot;).strip()</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    if not text:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        return None                                # 空文本不索引(llm.response 空轮)</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    sid = _field(env, &quot;session_id&quot;)</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>    seq = _field(env, &quot;seq&quot;)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>    ts = _field(env, &quot;ts&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>    actor = _field(env, &quot;actor&quot;, &quot;&quot;)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>    if not sid or not seq:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>        return None                                # 缺行键:拒(不产生孤儿行)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>    row = (str(sid), int(seq), str(type_), str(ts), str(actor),</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>           _index_text(str(_payload_field(env, &quot;new_title&quot;, &quot;&quot;) or &quot;&quot;)),</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>           _index_text(text))</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    return (&quot;insert&quot;, row)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code></code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>def is_indexable(type_: str, env: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    &quot;&quot;&quot;该事件是否在 FTS 索引**新增行**(insert):edit 不新增行、None 不索引 → False。</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code></code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    repair 对账用——使&quot;日志水位&quot;与索引 ``max_seq`` **同口径**(CND-06/08:读写判据单源)。</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    item = _index_item(type_, env)</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    return item is not None and item[0] == &quot;insert&quot;</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code></code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>_MAX_SEQ_SQL = &quot;SELECT MAX(seq) FROM fts_rows WHERE session_id=?&quot;</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code></code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>def read_max_seq(db_path: Any, session_id: str) -&gt; int:</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    &quot;&quot;&quot;**装配外**只读索引末 seq(F060 落后对账;repair 无 live 索引句柄时用)。</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code></code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>    2026-09-21 R11-2 修:`repair._fts_last_seq_provider` 只认 ``ctx.session_query``</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    / ``ctx.fts_last_seq``,而**没有任何生产调用方注入它们**(CLI 的 ``auto_scan``</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>    连 ctx 都不收)⇒ 索引落后对账**从未真正启用**(``max_seq`` 的旧 docstring 亦自认</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    &quot;装配后仍无法启用&quot;)。本函数让&quot;只知道 db 路径&quot;的调用方也能读数。</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code></code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    语义:库/表不存在 → 0(未索引,调用方按 0 判&quot;不算落后&quot;);读取失败 → PERS-202</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    (不静默吞:对账判据不可得时必须显式)。连接短开短合,只读打开。</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>    import sqlite3 as _sql</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>    db_file = Path(str(db_path)).expanduser()</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    if not db_file.exists():</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        return 0</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    try:</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        conn = _sql.connect(f&quot;file:{db_file}?mode=ro&quot;, uri=True)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    except _sql.Error as e:</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>        raise_code(&quot;PERS-202&quot;, op=&quot;fts_max_seq_ro&quot;, path=str(db_file),</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>                   hint=f&quot;只读打开索引库失败: {e}&quot;)</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>    try:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        row = conn.execute(_MAX_SEQ_SQL, (str(session_id),)).fetchone()</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>    except _sql.Error as e:</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        if &quot;no such table&quot; in str(e).lower():       # 索引未建表:未索引</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>            return 0</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        raise_code(&quot;PERS-202&quot;, op=&quot;fts_max_seq_ro&quot;, path=str(db_file),</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>                   hint=f&quot;索引末 seq 读数失败: {e}&quot;)</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    finally:</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        conn.close()</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>    return int(row[0] or 0) if row else 0</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code></code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>class Hit:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>    &quot;&quot;&quot;命中条目(spec 数据结构表):seq = JSONL 行号锚,下游回原会话取全事件。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code></code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>    session_id: str</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>    seq: int</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>    type: str</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>    ts: str</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>    snippet: str</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>    rank: float</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code></code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>class QueryResult:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>    &quot;&quot;&quot;query 返回值:hits 命中列表;timed_out=True = 5s 超时软降级(不抛不挂)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code></code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>    hits: list[Hit] = field(default_factory=list)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>    timed_out: bool = False</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code></code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>def _log_warn(msg: str, *args: Any) -&gt; None:</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>    &quot;&quot;&quot;统一告警出口(模块 logger;ctx.log 无则回落,行为不变)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    log.warning(msg, *args)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code></code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>class FtsQueryHandle:</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>    &quot;&quot;&quot;session.fts_query 工具的 Provider 实现(executor 契约 handle(args, ctx))。</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code></code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    只读面:把 LLM 参数转发到 ctx.session.fts 上挂载的 SessionQueryIndex.query;</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>    未挂载(能力未 announce)→ TLB-802(不静默,防幻觉工具名)。</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code></code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>    name: str = TOOL_NAME</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code></code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>    async def handle(self, args: dict, ctx: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>        &quot;&quot;&quot;executor 关3 Provider 调用面:经 ctx.session.fts 执行查询。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        sess = getattr(ctx, &quot;session&quot;, None)</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        index = getattr(sess, &quot;fts&quot;, None) if sess is not None else None</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        if index is None or not callable(getattr(index, &quot;query&quot;, None)):</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>            raise_code(&quot;TLB-802&quot;, tool=TOOL_NAME,</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                       advice=&quot;会话 FTS 索引未挂载(ctx.session.fts);先 announce 能力&quot;)</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        result = await index.query(args.get(&quot;q&quot;, &quot;&quot;),</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                                   limit=args.get(&quot;limit&quot;, _RESULT_LIMIT),</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                                   session_id=args.get(&quot;session_id&quot;),</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                                   actor=args.get(&quot;actor&quot;),</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                                   after_ts=args.get(&quot;after_ts&quot;))</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        return {&quot;hits&quot;: [h.__dict__ for h in result.hits],</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                &quot;timed_out&quot;: result.timed_out}</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code></code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>def _replay_store(store: Any) -&gt; Iterator[Any]:</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>    &quot;&quot;&quot;回放源鸭子协议:replay()(SessionStore)或 events_after(0)(SessionLog)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>    replay = getattr(store, &quot;replay&quot;, None)</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>    if callable(replay):</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        yield from replay()</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        return</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>    events_after = getattr(store, &quot;events_after&quot;, None)</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>    if callable(events_after):</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>        yield from events_after(0)</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>        return</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>    raise_code(&quot;PERS-201&quot;, op=&quot;fts_replay&quot;,</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>               hint=f&quot;回放源不支持 replay()/events_after(0): {type(store).__name__}&quot;,</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>               advice=&quot;注入 SessionStore/SessionLog 形态的回放源&quot;)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code></code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code># Preserve historical import and pickle identities through the compatibility facade.</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>Hit.__module__ = &#x27;pyharness.core.session_query&#x27;</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>QueryResult.__module__ = &#x27;pyharness.core.session_query&#x27;</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>FtsQueryHandle.__module__ = &#x27;pyharness.core.session_query&#x27;</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

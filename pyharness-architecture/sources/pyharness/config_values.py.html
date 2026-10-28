@@ -1,0 +1,144 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/config_values.py · GitHub 源码预览</title><link rel="stylesheet" href="../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/config_values.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 144 行</span></nav><main class="wrap source-page"><h1>pyharness/config_values.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：e04b8981193906b543bfbe559a76e8c88de9b153<br>SHA-256（内容校验）：e0f4d098b56c0854a31b19aea6cd7a99beea0053dd379ce70ac66f6721862692</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 9 个类、函数与方法</summary><ul><li><a href="#L33">deep_merge（函数） · L33–L44</a></li><li><a href="#L46">flatten（函数） · L46–L55</a></li><li><a href="#L57">set_dotted（函数） · L57–L63</a></li><li><a href="#L65">get_dotted（函数） · L65–L72</a></li><li><a href="#L74">_set_dotted_new（函数） · L74–L78</a></li><li><a href="#L80">yaml_load_file（函数） · L80–L93</a></li><li><a href="#L95">collect_config_files（函数） · L95–L109</a></li><li><a href="#L111">load_file_layer（函数） · L111–L116</a></li><li><a href="#L118">parse_env_value（函数） · L118–L143</a></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Config values: complete migrated implementation.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>import json</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>import logging</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>import os</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>import re</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>from typing import Any, Optional</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import yaml</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>log = logging.getLogger(&quot;pyharness.config&quot;)</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code></code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>RUNTIME_MUTABLE: frozenset = frozenset({</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    &quot;log.level&quot;, &quot;log.file&quot;, &quot;llm.probe.interval_s&quot;,</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>    &quot;llm.usage.unit_price&quot;, &quot;budget.monthly.alert_ratio&quot;})</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code></code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>BUILTIN_GUARDS = frozenset({</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>    &quot;g-fs-path&quot;, &quot;g-credential-read&quot;, &quot;g-net-outbound&quot;, &quot;g-exec&quot;, &quot;g-overwrite&quot;})</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code></code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>_SECRET_RE = re.compile(r&quot;^(env:[A-Za-z_][A-Za-z0-9_]*|file:.+)$&quot;)</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code></code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>_SECRET_KEYS = (&quot;llm.api_key&quot;, &quot;shell.web.token&quot;)</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code></code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>_TOOL_DANGER_BASELINE: dict[str, str] = {&quot;fs.delete_file&quot;: &quot;high&quot;}</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>_DANGER_RANK: dict[str, int] = {&quot;none&quot;: 0, &quot;low&quot;: 1, &quot;high&quot;: 2, &quot;critical&quot;: 3}</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code></code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>_SECRET_KEY_HINTS = (&quot;api_key&quot;, &quot;token&quot;, &quot;secret&quot;, &quot;password&quot;, &quot;credential&quot;)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>def deep_merge(base: dict, override: dict) -&gt; dict:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>    &quot;&quot;&quot;键级深合并(CFG §1.2):标量后层覆盖、字典键级并集、列表整体替换、null=删键回落 L1。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>    out = dict(base)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>    for k, v in override.items():</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>        if v is None:                        # 显式 null = 删键,回落低层默认</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>            out.pop(k, None)</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>            continue</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        if isinstance(v, dict) and isinstance(out.get(k), dict):</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            out[k] = deep_merge(out[k], v)   # 字典:键级深合并,两键并集</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>        else:</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>            out[k] = v                       # 标量覆盖;列表整体替换(不逐元素合并)</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>    return out</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>def flatten(d: dict, prefix: str = &quot;&quot;) -&gt; dict:</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>    &quot;&quot;&quot;嵌套 dict → 点分键平面(env/CLI/hot-update 寻址用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    out: dict = {}</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    for k, v in d.items():</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        key = f&quot;{prefix}.{k}&quot; if prefix else k</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        if isinstance(v, dict):</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>            out.update(flatten(v, key))      # 递归展开</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        else:</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>            out[key] = v                     # 叶子收进平面</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>    return out</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>def set_dotted(d: dict, key: str, value: Any) -&gt; None:</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>    &quot;&quot;&quot;点分键写入嵌套 dict(逐层建 dict)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    parts = key.split(&quot;.&quot;)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    node = d</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    for p in parts[:-1]:</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>        node = node.setdefault(p, {})</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    node[parts[-1]] = value</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>def get_dotted(d: dict, key: str) -&gt; Any:</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    &quot;&quot;&quot;点分键读嵌套 dict;路径中断返回 None。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    node: Any = d</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    for p in key.split(&quot;.&quot;):</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        node = node[p] if isinstance(node, dict) else None</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>        if node is None:</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            return None</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    return node</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>def _set_dotted_new(key: str, value: Any) -&gt; dict:</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    &quot;&quot;&quot;构造仅含单个点分键的嵌套 dict(热更候选快照铺层用)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    out: dict = {}</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    set_dotted(out, key, value)</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    return out</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>def yaml_load_file(path: str) -&gt; dict:</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    &quot;&quot;&quot;YAML 安全加载单个文件;文件缺失 → 回落 L1 记 info;语法错 → CFG-601(file_parse)中止。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    p = Path(path).expanduser()</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    if not p.exists():</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        log.info(&quot;config file missing, fallback L1: %s&quot;, path)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        return {}</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>    try:</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        data = yaml.safe_load(p.read_text(encoding=&quot;utf-8&quot;)) or {}</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        if not isinstance(data, dict):</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            raise ValueError(&quot;root 必须是映射&quot;)</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        return data</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>    except Exception as e:                   # 语法/权限/类型错一律启动中止(半套比没配更危险)</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        raise_code(&quot;CFG-601&quot;, reason=&quot;file_parse&quot;, file=str(p),</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>                   detail=f&quot;{type(e).__name__}:{e}&quot;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code></code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>def collect_config_files(cli_path: Optional[str]) -&gt; list[Path]:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    &quot;&quot;&quot;搜索顺序(CFG §2.1):--config 显式(不再搜其余)→ PH_CFG_PATH → ~/.pyharness/config.yaml → config.d/*.yaml 升序;缺失 → 空列表回落 L1。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    if cli_path:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        return [Path(cli_path).expanduser()]            # 显式指定后不再搜其余路径</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>    env_path = os.environ.get(&quot;PH_CFG_PATH&quot;)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    if env_path:</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        return [Path(env_path).expanduser()]            # 部署环境统一指向</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    home = Path(&quot;~/.pyharness&quot;).expanduser()</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    files: list[Path] = []</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    main = home / &quot;config.yaml&quot;</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    if main.exists():</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        files.append(main)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    frag = sorted((home / &quot;config.d&quot;).glob(&quot;*.yaml&quot;))   # 文件名升序逐文件 merge</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>    files.extend(frag)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>    return files</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code></code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>def load_file_layer(cli_path: Optional[str]) -&gt; dict:</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    &quot;&quot;&quot;L2 层汇总:主文件 + config.d 片段按序 deep_merge,后文件覆盖前文件。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>    acc: dict = {}</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    for f in collect_config_files(cli_path):</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        acc = deep_merge(acc, yaml_load_file(str(f)))</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    return acc</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code></code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>def parse_env_value(raw: str) -&gt; Any:</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    &quot;&quot;&quot;env 值严格解析:bool/int/float/列表(逗号或 JSON 数组);空串 = 未设置。</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    偏离点:白名单含字符串键(llm.model/base_url/storage 路径/log.file 等),</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    全部按伪码在 int/float 失败后 CFG-601 会让这些键永不可用——故末尾回退原串,</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    交由 pydantic schema 收口(字符串落数字字段仍会 CFG-601 type_range,语义不变)。</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    if raw == &quot;&quot;:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        return None                          # 空串 = 未设置</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>    low = raw.strip().lower()</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    if low in {&quot;1&quot;, &quot;true&quot;, &quot;yes&quot;, &quot;on&quot;}:</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        return True</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>    if low in {&quot;0&quot;, &quot;false&quot;, &quot;no&quot;, &quot;off&quot;}:</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        return False</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>    if &quot;,&quot; in raw or raw.startswith(&quot;[&quot;):    # 列表:逗号或 JSON 数组</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        try:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            return json.loads(raw) if raw.startswith(&quot;[&quot;) else [s.strip() for s in raw.split(&quot;,&quot;)]</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        except json.JSONDecodeError as e:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            raise_code(&quot;CFG-601&quot;, reason=&quot;env_parse&quot;, detail=str(e))</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>    try:</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        return int(raw)                      # int 优先</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>    except ValueError:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>        try:</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            return float(raw)                # float</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        except ValueError:</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            return raw                       # 原串回退(字符串键;数字键由 pydantic 拒)</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code></code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../assets/views/source-return.js"></script></body></html>

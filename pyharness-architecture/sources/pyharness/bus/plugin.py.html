@@ -1,0 +1,385 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/bus/plugin.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/bus/plugin.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 385 行</span></nav><main class="wrap source-page"><h1>pyharness/bus/plugin.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：db18698f113354bcbf72639628d6984fef367421<br>SHA-256（内容校验）：40b763462bd612ceafa41d6d2a31855f8ba7501e52a060f52dc0646250d38757</p><p></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 22 个类、函数与方法</summary><ul><li><a href="#L45">BusyUninstall（类） · L45–L54</a><ul><li><a href="#L52">BusyUninstall.__init__（方法） · L52–L54</a></li></ul></li><li><a href="#L57">Capability（类） · L57–L68</a></li><li><a href="#L71">_coerce_cap（函数） · L71–L85</a></li><li><a href="#L88">PluginHost（类） · L88–L159</a><ul><li><a href="#L92">PluginHost.__init__（方法） · L92–L95</a></li><li><a href="#L97">PluginHost.enter（异步方法） · L97–L124</a></li><li><a href="#L126">PluginHost.detach（异步方法） · L126–L159</a></li></ul></li><li><a href="#L162">PluginRecord（类） · L162–L170</a></li><li><a href="#L173">PluginManager（类） · L173–L381</a><ul><li><a href="#L187">PluginManager.__init__（方法） · L187–L201</a></li><li><a href="#L204">PluginManager.state（方法） · L204–L206</a></li><li><a href="#L209">PluginManager._set_state（方法） · L209–L214</a></li><li><a href="#L217">PluginManager._dep_closure（方法） · L217–L243</a><ul><li><a href="#L222">PluginManager._dep_closure.visit（方法） · L222–L234</a></li></ul></li><li><a href="#L246">PluginManager.install（异步方法） · L246–L276</a></li><li><a href="#L279">PluginManager._load_caps（方法） · L279–L286</a></li><li><a href="#L288">PluginManager._host_for（方法） · L288–L294</a></li><li><a href="#L296">PluginManager.activate（异步方法） · L296–L326</a></li><li><a href="#L328">PluginManager.deactivate（异步方法） · L328–L346</a></li><li><a href="#L348">PluginManager.uninstall（异步方法） · L348–L371</a></li><li><a href="#L374">PluginManager.emit_as（异步方法） · L374–L381</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/bus/plugin.py — 插件宿主与五态生命周期 (specs/bus.py.md PluginManager)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>PluginManager:声明式 manifest(id/version/requires[]/api_version)装载——</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>api_version 校验 → 依赖拓扑(缺失/未激活/循环依赖 → BUS-003)→ 状态收束 →</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>registry 注册插件记录 → ctx.session.append 写 plugin.installed(F004/F006)。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>五态状态机唯一迁移闸 _set_state(spec F006 迁移表):</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>    absent → installed → activating → active → deactivating → inactive</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>            ↘(安装即卸)uninstalled ↖(重激活)           ↘ uninstalled</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>非法迁移 → BUS-003;落定 uninstalled 后插件管理记录摘除(支持热插拔重装,F004)。</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>偏离点(契约内自洽修正,spec 伪码存在自相矛盾处):</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>1. spec 伪码 install 未把插件写入 Registry(kind=plugin),但 deactivate/uninstall</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>   均要求 registry.lookup(&quot;plugin&quot;, pid)——故 install 落定后注册 PluginRecord;</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>2. spec 迁移表缺 absent 起始边(否则首次 install 必 BUS-003)与 installed→uninstalled</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>   (装后未激活即卸载须可执行),_LEGAL 补两边;</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>3. 宿主能力契约(host.enter/detach,spec 指向 DIS-SEAM 未随文件展开):能力对象</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>   须含 id(注册 capability 键)/tool_keys+tool(注册 tool 双键)/subscriptions</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>   [(pattern, handler[, when])](以 owner=plugin_id 装载订阅);detach 逆序摘净;</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>4. api_version 常量取 &quot;1&quot;(EVENT-SCHEMA §3.5.6 示例值);</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>5. uninstall/投递中拦截用专类 BusyUninstall(BUSY 字面量语义,码表无 BUSY 条目,</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>   spec 异常表明示非 NNN 码,故不走 raise_code)。</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code></code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>错误全经 raise_code(F019);能力 enter 半载自回滚,不留脏注册表(TLB-801 纪律)。</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code></code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>import importlib</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>import logging</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>from typing import TYPE_CHECKING, Any, Callable, Optional</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code></code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>from pyharness.bus.registry import Registry</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code></code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>if TYPE_CHECKING:</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    from pyharness.bus.event_bus import EventBus</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code></code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>log = logging.getLogger(&quot;pyharness.bus.plugin&quot;)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code></code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code># 框架插件 API 版本(EVENT-SCHEMA §3.5.6 示例值锁定 &quot;1&quot;;不匹配 → BUS-003 拒装载)</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>API_VERSION = &quot;1&quot;</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code></code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code></code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>class BusyUninstall(Exception):</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>    &quot;&quot;&quot;插件运行中/投递中不可卸载(BUSY 字面量语义,spec 异常表:非 NNN 码)。</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code></code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    码表无 BUSY 条目(ERR.md §1 禁现场造码),故以专类携带 pid 抛出,不走</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>    raise_code;正常路径下由状态机前置(active 等)拦截触发。</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code></code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    def __init__(self, pid: str) -&gt; None:</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        self.pid = pid</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        super().__init__(f&quot;[BUSY] 插件 {pid} 运行中/投递中,不可卸载(deactivate/uninstall)&quot;)</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code></code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>@dataclass</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>class Capability:</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    &quot;&quot;&quot;能力声明(宿主 enter/detach 的最小契约,见模块 docstring 偏离点 3)。</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code></code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    tool_keys 为工具 Definition.name 清单;tool 为注册对象(缺省以能力自身</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    占位);subscriptions 元素为 (pattern, handler[, when]) 订阅三元/二元组。</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code></code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>    id: str                                        # capability 注册键(ctx 路径式)</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>    tool_keys: list = field(default_factory=list)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    tool: Any = None</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>    subscriptions: list = field(default_factory=list)  # (pattern, handler[, when])</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code></code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>def _coerce_cap(cap: Any) -&gt; Capability:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>    &quot;&quot;&quot;dict/鸭子对象 → Capability;缺 id 一律 TLB-801 拒(非法注册)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>    if isinstance(cap, Capability):</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>        return cap</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    if isinstance(cap, dict):</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>        cid = cap.get(&quot;id&quot;)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>        if not cid:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>            raise_code(&quot;TLB-801&quot;, kind=&quot;capability&quot;, detail=&quot;能力声明缺 id 字段&quot;)</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>        return Capability(id=cid,</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                          tool_keys=list(cap.get(&quot;tool_keys&quot;, ())),</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                          tool=cap.get(&quot;tool&quot;),</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                          subscriptions=list(cap.get(&quot;subscriptions&quot;, ())))</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    if not getattr(cap, &quot;id&quot;, None):</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        raise_code(&quot;TLB-801&quot;, kind=&quot;capability&quot;, detail=&quot;能力声明缺 id 字段&quot;)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    return cap</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code></code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code></code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>class PluginHost:</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>    &quot;&quot;&quot;能力宿主:enter = 注册 capability/tool 双键 + 装载订阅(F003 双键+F002);</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>    detach = 摘订阅(owner 精确)+ 注销工具/能力(逆序,后装先卸,F004)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code></code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>    def __init__(self, registry: Registry, bus: &quot;EventBus&quot;, owner: str) -&gt; None:</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        self.registry = registry</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        self._bus = bus</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        self.owner = owner          # 插件 id:订阅 owner,uninstall 按此摘除</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code></code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>    async def enter(self, cap: Any, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        &quot;&quot;&quot;能力装载:announce 注册 + 订阅装载;半载异常自回滚,无脏数据。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        cap = _coerce_cap(cap)</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        registered_tools: list[str] = []</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        try:</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            self.registry.register(&quot;capability&quot;, cap.id, cap)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            for name in cap.tool_keys:              # tool/capability 双键</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                self.registry.register(&quot;tool&quot;, name,</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                                       cap.tool if cap.tool is not None else cap)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                registered_tools.append(name)</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>            for item in cap.subscriptions:          # 订阅装载(owner = 插件 id)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>                pattern, handler, *rest = item</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                self._bus.subscribe(pattern, handler,</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>                                    owner=self.owner,</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                                    when=rest[0] if rest else None)</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        except Exception:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>            # 半载回滚:摘已注册键 + 本插件订阅(禁留脏注册表)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            for name in registered_tools:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                try:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>                    self.registry.unregister(&quot;tool&quot;, name)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>                except Exception as exc:            # noqa: BLE001 回滚尽力而为</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>                    log.warning(&quot;host.enter 回滚摘工具失败 tool=%s: %s&quot;, name, exc)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            try:</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>                self.registry.unregister(&quot;capability&quot;, cap.id)</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>            except Exception as exc:                # noqa: BLE001</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>                log.warning(&quot;host.enter 回滚摘能力失败 cap=%s: %s&quot;, cap.id, exc)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            self._bus.unsubscribe_all(self.owner)</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            raise</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code></code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    async def detach(self, cap: Any, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        &quot;&quot;&quot;能力摘除:摘订阅 → 注销工具 → 注销能力(detach 内含 unsubscribe_all)。</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code></code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        2026-09-21 补:随工具一起**注销其声明的插件 guard 钩子**。此前只有</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        ``register_guard_hook`` 没有注销面 ⇒ ①卸载后陈旧 Guard 仍在表里,新声明</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        仍会解析到它;②含钩子的插件重装时撞 TLB-801&quot;名全库唯一&quot;,与</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        ``PluginManager.uninstall`` docstring 的&quot;支持重装(F004)&quot;矛盾。</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        钩子名取自工具定义的 ``guard_hooks``(须在注销工具**之前**读)。</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        cap = _coerce_cap(cap)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        self._bus.unsubscribe_all(self.owner)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        hooks: list[str] = []</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        for name in cap.tool_keys:</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            try:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                defn = self.registry.lookup(&quot;tool&quot;, name)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>            except Exception:                        # noqa: BLE001 已摘/不存在:跳过</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>                defn = None</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>            if defn is not None:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>                for h in tuple(getattr(defn, &quot;guard_hooks&quot;, ()) or ()):</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                    if str(h) not in hooks:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>                        hooks.append(str(h))</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            self.registry.unregister(&quot;tool&quot;, name)</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>        self.registry.unregister(&quot;capability&quot;, cap.id)</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        if hooks:</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>            try:</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>                from pyharness.core.tools_guard import unregister_guard_hook</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>            except Exception:                        # noqa: BLE001 依赖缺失不阻断摘除</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>                unregister_guard_hook = None</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>            for h in hooks:</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>                try:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                    if unregister_guard_hook is not None:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                        unregister_guard_hook(h)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                except Exception as exc:             # noqa: BLE001 摘钩失败不阻断</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                    log.warning(&quot;detach 注销 guard 钩子失败 hook=%s: %s&quot;, h, exc)</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code></code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code></code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>@dataclass</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>class PluginRecord:</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>    &quot;&quot;&quot;Registry 中 kind=plugin 的注册对象:宿主查询卸载/摘除的事实源。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code></code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    id: str</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    manifest: dict</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>    state: str = &quot;installed&quot;</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>    capabilities: list = field(default_factory=list)   # 已 enter 的能力(逆序 detach)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    tool_keys: list = field(default_factory=list)      # 已注册工具键(权威清单)</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code></code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code></code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>class PluginManager:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>    &quot;&quot;&quot;插件宿主:五态生命周期 + 热插拔(F004/F006,契约见模块 docstring)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code></code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>    # F006 五态迁移表(absent→installed 为首次安装入口;installed→uninstalled</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>    # 支持&quot;装后未激活即卸载&quot;;uninstalled 落定后记录摘除 → 可重装)</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>    _LEGAL: dict[str, tuple[str, ...]] = {</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        &quot;absent&quot;: (&quot;installed&quot;,),</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        &quot;installed&quot;: (&quot;activating&quot;, &quot;uninstalled&quot;),</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        &quot;activating&quot;: (&quot;active&quot;,),</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        &quot;active&quot;: (&quot;deactivating&quot;,),</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        &quot;deactivating&quot;: (&quot;inactive&quot;,),</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        &quot;inactive&quot;: (&quot;uninstalled&quot;, &quot;activating&quot;),</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>    }</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code></code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>    def __init__(self, registry: Optional[Registry] = None,</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                 host_factory: Optional[Callable[[str], PluginHost]] = None,</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                 api_version: str = API_VERSION) -&gt; None:</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        &quot;&quot;&quot;registry 缺省自建(EventBus+Registry 自洽实例);host_factory 缺省按</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        (registry, bus, pid) 构建默认 PluginHost(owner=pid)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        if registry is None:</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>            from pyharness.bus.event_bus import EventBus</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            bus: EventBus = EventBus()</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            registry = Registry(bus)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>        self.registry = registry</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        self._bus: EventBus = registry._bus</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>        self._host_factory = host_factory</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        self.api_version = api_version</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>        self._state: dict[str, str] = {}       # pid → 五态(absent 缺省)</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>        self._manifest: dict[str, dict] = {}   # pid → manifest(卸载重装事实源)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code></code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>    # ------------------------------------------------------------ 查询</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>    def state(self, pid: str) -&gt; str:</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        &quot;&quot;&quot;当前状态;未安装 → absent。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>        return self._state.get(pid, &quot;absent&quot;)</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code></code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>    # ------------------------------------------------------------ 状态机闸</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>    def _set_state(self, pid: str, target: str) -&gt; None:</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>        &quot;&quot;&quot;五态状态机唯一迁移闸;非法迁移 → BUS-003 拒绝(F006)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>        cur = self.state(pid)</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        if target not in self._LEGAL.get(cur, ()):</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            raise_code(&quot;BUS-003&quot;, pid=pid, detail=f&quot;{cur}→{target} 非法(F006 迁移表)&quot;)</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        self._state[pid] = target</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code></code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>    # ------------------------------------------------------------ 依赖拓扑</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>    def _dep_closure(self, pid: str, requires: list) -&gt; list[str]:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        &quot;&quot;&quot;传递依赖闭包(拓扑序,依赖在前);循环/缺失 → BUS-003(F006)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        closure: list[str] = []</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        seen: set[str] = set()</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code></code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        def visit(node: str, path: tuple) -&gt; None:</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            &quot;&quot;&quot;递归收集 node 的已装传递依赖;环与缺失在此检出。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>            for dep in self._manifest.get(node, {}).get(&quot;requires&quot;, ()):</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>                if dep in path:                  # 循环依赖检出失败</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                    raise_code(&quot;BUS-003&quot;, pid=pid,</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                               detail=f&quot;循环依赖:{&#x27;-&gt;&#x27;.join(path + (dep,))}&quot;)</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                if self.state(dep) == &quot;absent&quot;:</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>                    raise_code(&quot;BUS-003&quot;, pid=pid,</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>                               detail=f&quot;依赖 {dep} 缺失或未安装(先装依赖)&quot;)</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                visit(dep, path + (dep,))</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            if node not in seen:</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                seen.add(node)</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>                closure.append(node)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code></code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        for dep in requires:                     # 根 requires(含 pid 自环)</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>            if dep in (pid,):</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>                raise_code(&quot;BUS-003&quot;, pid=pid, detail=f&quot;循环依赖:{pid}-&gt;{dep}(自依赖)&quot;)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>            if self.state(dep) == &quot;absent&quot;:</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                raise_code(&quot;BUS-003&quot;, pid=pid,</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                           detail=f&quot;依赖 {dep} 缺失或未安装(先装依赖)&quot;)</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>            visit(dep, (pid, dep))</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        return closure</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code></code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>    # ------------------------------------------------------------ 安装</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>    async def install(self, manifest: dict, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        &quot;&quot;&quot;声明式装载:api_version → 依赖拓扑 → 状态 installed + registry 注册</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>        + ctx.session.append(&quot;plugin.installed&quot;) 留痕(F006/F004)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>        pid = manifest.get(&quot;id&quot;)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        if not pid:</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>            raise_code(&quot;TLB-801&quot;, kind=&quot;plugin&quot;, detail=&quot;manifest 缺 id(非法注册)&quot;)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>        if pid in self.registry.RESERVED:</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>            raise_code(&quot;BUS-002&quot;, key=pid, hint=&quot;脊柱名/子系统名不可装为插件(原则 5)&quot;)</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        if manifest.get(&quot;api_version&quot;) != self.api_version:</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>            raise_code(&quot;BUS-003&quot;, pid=pid,</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>                       detail=f&quot;api_version={manifest.get(&#x27;api_version&#x27;)} 不匹配 &quot;</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>                              f&quot;(框架 API_VERSION={self.api_version})&quot;)</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>        closure = self._dep_closure(pid, list(manifest.get(&quot;requires&quot;, ())))</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>        for dep in closure:                      # 依拓扑序校验依赖已激活</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>            if self.state(dep) != &quot;active&quot;:</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>                raise_code(&quot;BUS-003&quot;, pid=pid, detail=f&quot;依赖 {dep} 未激活(先 activate)&quot;)</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        self._set_state(pid, &quot;installed&quot;)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>        record = PluginRecord(id=pid, manifest=manifest, state=&quot;installed&quot;)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        self._manifest[pid] = manifest</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        self.registry.register(&quot;plugin&quot;, pid, record)</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        try:</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>            await ctx.session.append(&quot;plugin.installed&quot;,</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>                                     {&quot;plugin_id&quot;: pid,</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>                                      &quot;version&quot;: manifest[&quot;version&quot;],</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>                                      &quot;api_version&quot;: manifest[&quot;api_version&quot;]},</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>                                     actor=&quot;plugin&quot;)</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>        except Exception:                        # 留痕失败:回滚,不留半装态</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>            self.registry.unregister(&quot;plugin&quot;, pid)</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>            self._manifest.pop(pid, None)</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>            self._state.pop(pid, None)</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>            raise</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code></code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>    # ------------------------------------------------------------ 激活</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>    def _load_caps(self, manifest: dict) -&gt; list:</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>        &quot;&quot;&quot;能力清单:entry 模块的 mod.capabilities(importlib 导入);否则取</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>        manifest[&quot;capabilities&quot;](声明式,供无模块插件/单测注入)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        entry = manifest.get(&quot;entry&quot;)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        if entry:</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>            mod = importlib.import_module(entry)</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            return list(getattr(mod, &quot;capabilities&quot;, ()))</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        return list(manifest.get(&quot;capabilities&quot;, ()))</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code></code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>    def _host_for(self, pid: str) -&gt; PluginHost:</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>        &quot;&quot;&quot;取插件宿主实例(owner=pid);host_factory 可注入定制宿主。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>        if self._host_factory is None:</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>            return PluginHost(self.registry, self._bus, pid)</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>        if isinstance(self._host_factory, PluginHost):</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            return self._host_factory            # 共享宿主实例(owner 由调用方定)</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>        return self._host_factory(pid)</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code></code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>    async def activate(self, pid: str, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>        &quot;&quot;&quot;activate:导入模块 → 逐能力 enter(注册+订阅)→ active;失败回滚到</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>        installed,不留半激活态(F006)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>        self._set_state(pid, &quot;activating&quot;)       # absent/非法前驱 → BUS-003</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>        record = self.registry.lookup(&quot;plugin&quot;, pid)</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>        host = self._host_for(pid)</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>        entered: list = []</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        try:</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>            for cap in self._load_caps(record.manifest):</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>                cap = _coerce_cap(cap)</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                await host.enter(cap, ctx)       # announce:tool/capability 双键</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>                entered.append(cap)</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>                record.capabilities.append(cap)</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>                for name in cap.tool_keys:</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>                    if name not in record.tool_keys:</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>                        record.tool_keys.append(name)</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>            self._set_state(pid, &quot;active&quot;)</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>            record.state = &quot;active&quot;</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>        except Exception:</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>            # 失败回滚:状态归 installed,已 enter 能力逆序 detach 摘净</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>            self._state[pid] = &quot;installed&quot;</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>            record.state = &quot;installed&quot;</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>            record.capabilities = []</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>            record.tool_keys = []</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>            for cap in reversed(entered):</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>                try:</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>                    await host.detach(cap, ctx)</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>                except Exception as exc:         # noqa: BLE001 回滚尽力而为</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>                    log.warning(&quot;activate 回滚 detach 失败 cap=%s: %s&quot;,</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>                                getattr(cap, &quot;id&quot;, &quot;?&quot;), exc)</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>            raise</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code></code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>    async def deactivate(self, pid: str, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>        &quot;&quot;&quot;deactivate:逆序 detach 能力(摘订阅+注销工具/能力),插件记录保留在</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        Registry(仅摘订阅不注销注册表,F004);投递中(BUSY)拒绝。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>        record = self.registry.lookup(&quot;plugin&quot;, pid)</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>        if pid in self._bus._inflight:</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>            raise BusyUninstall(pid)             # 投递中不可卸(BUSY 语义)</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        self._set_state(pid, &quot;deactivating&quot;)     # 非 active 前驱 → BUS-003</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>        host = self._host_for(pid)</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>        try:</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>            for cap in reversed(list(record.capabilities)):  # 后装先卸</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>                await host.detach(cap, ctx)</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>        except Exception:</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>            self._state[pid] = &quot;active&quot;          # 失败回滚,不留半失活态</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>            record.state = &quot;active&quot;</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>            raise</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>        record.capabilities = []</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>        record.tool_keys = []</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>        self._set_state(pid, &quot;inactive&quot;)</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>        record.state = &quot;inactive&quot;</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code></code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>    async def uninstall(self, plugin_id: str, ctx: Any) -&gt; None:</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>        &quot;&quot;&quot;热卸载:运行/迁移中拒绝(BusyUninstall,BUSY 语义)→ 摘剩余工具/能力</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>        → registry 摘 plugin → plugin.uninstalled 留痕;落定后管理记录摘除,</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>        支持重装(F004)。不回溯已发生事件。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>        record = self.registry.lookup(&quot;plugin&quot;, plugin_id)  # 不存在 → 结构化错误</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        st = self.state(plugin_id)</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        if st in (&quot;active&quot;, &quot;activating&quot;, &quot;deactivating&quot;):</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>            raise BusyUninstall(plugin_id)       # running 拒绝(状态机前置)</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        host = self._host_for(plugin_id)</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>        for cap in reversed(list(record.capabilities)):    # 通常已在 deactivate 摘净</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>            await host.detach(cap, ctx)</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>        record.capabilities = []</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>        record.tool_keys = []</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>        self.registry.unregister(&quot;plugin&quot;, plugin_id)</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>        self._set_state(plugin_id, &quot;uninstalled&quot;)</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>        record.state = &quot;uninstalled&quot;</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>        self._manifest.pop(plugin_id, None)      # 记录摘除 → state(pid) 回落 absent</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>        self._state.pop(plugin_id, None)</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>        try:</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>            await ctx.session.append(&quot;plugin.uninstalled&quot;,</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>                                     {&quot;plugin_id&quot;: plugin_id}, actor=&quot;plugin&quot;)</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>        except Exception as exc:                 # 卸载已完成,留痕失败告警不阻断</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>            log.error(&quot;plugin.uninstalled 留痕失败 plugin_id=%s: %s&quot;,</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>                      plugin_id, exc)</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code></code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>    # ------------------------------------------------------------ 插件发事件</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>    async def emit_as(self, plugin_id: str, type_: str, payload: dict) -&gt; dict:</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>        &quot;&quot;&quot;插件以自身身份发事件:自动补 origin=plugin:&lt;id&gt;;类型未注册 → EVT-102</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>        (先 register_type;命名空间 plugin.&lt;id&gt;.&lt;name&gt;)。会话事件须经 session.append</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>        打 seq,插件不可自报 seq(INV-01)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        if not self._bus._type_registered(type_):</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>            raise_code(&quot;EVT-102&quot;, type_=type_,</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>                       hint=&quot;插件事件命名空间 plugin.&lt;id&gt;.&lt;name&gt;,先 register_type&quot;)</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>        return await self._bus.emit(type_, {**payload, &quot;origin&quot;: f&quot;plugin:{plugin_id}&quot;})</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code></code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code></code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>__all__ = [&quot;API_VERSION&quot;, &quot;BusyUninstall&quot;, &quot;Capability&quot;, &quot;PluginHost&quot;,</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>           &quot;PluginManager&quot;, &quot;PluginRecord&quot;]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

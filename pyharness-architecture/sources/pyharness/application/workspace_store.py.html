@@ -1,0 +1,430 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/workspace_store.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/workspace_store.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 430 行</span></nav><main class="wrap source-page"><h1>pyharness/application/workspace_store.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：b516afecf46b5e426336e28217f543add51e71a1<br>SHA-256（内容校验）：7120ece36b8703c64c6d1aeba90c61f54da4f16efe7ec50aafbe289c74de6e5b</p><p><a href="../../../architecture-detailed.html?node=workspace_store">WorkspaceControlStore（项目控制日志与内容存储）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 19 个类、函数与方法</summary><ul><li><a href="#L70">canonical（函数） · L70–L71</a></li><li><a href="#L74">digest_of（函数） · L74–L75</a></li><li><a href="#L78">WorkspaceStore（类） · L78–L430</a><ul><li><a href="#L83">WorkspaceStore.__init__（方法） · L83–L92</a></li><li><a href="#L94">WorkspaceStore._ensure_usable（方法） · L94–L98</a></li><li><a href="#L100">WorkspaceStore._open（异步方法） · L100–L101</a></li><li><a href="#L103">WorkspaceStore._open_projected（异步方法） · L103–L147</a></li><li><a href="#L149">WorkspaceStore._validate_log（方法） · L149–L151</a></li><li><a href="#L153">WorkspaceStore._validate_control_sequence（方法） · L153–L158</a></li><li><a href="#L160">WorkspaceStore._verify_commit（方法） · L160–L165</a></li><li><a href="#L167">WorkspaceStore._blob（方法） · L167–L173</a></li><li><a href="#L175">WorkspaceStore._read_definition（方法） · L175–L235</a></li><li><a href="#L237">WorkspaceStore._project（方法） · L237–L325</a></li><li><a href="#L327">WorkspaceStore.projects（异步方法） · L327–L331</a></li><li><a href="#L333">WorkspaceStore.projects_readonly（异步方法） · L333–L343</a></li><li><a href="#L345">WorkspaceStore.audit（异步方法） · L345–L348</a></li><li><a href="#L350">WorkspaceStore.audit_page（异步方法） · L350–L374</a></li><li><a href="#L376">WorkspaceStore.commit（异步方法） · L376–L418</a></li><li><a href="#L420">WorkspaceStore.close（异步方法） · L420–L430</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Tenant-private control SessionLog and immutable product-definition blobs.</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>Only committed events confer authority. No engine, queue, model or host-root access.</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>A failed append poisons this owner until close/reopen; ambiguous commits are never</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>reported as accepted using SessionLog&#x27;s in-memory cache.</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>import asyncio</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>import hashlib</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>import json</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>import re</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>import secrets</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>from pathlib import Path</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code></code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>from pyharness.bus import EventBus</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>from pyharness.core.session import open_session</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>from pyharness.core.tenant_settings import TenantSettingsStore, normalize_tenant_id</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>from pyharness.events import EVENT_TYPES</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>from pyharness.events.payload import WorkspaceResourceCommittedPayload</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>from pyharness.persistence import _FileLock, detect_truncation, open_store, session_data_paths, session_recorder</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>from pyharness.application.workspace_contracts import ProjectRevision</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>from pyharness.application.workspace_audit import AuditQuery, page_events</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>from pyharness.application.source_grants import SourceGrant</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>from pyharness.application.source_grant_store import SourceGrantStore</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>from pyharness.application.source_snapshot import SourceSnapshot,checked_private_bytes</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>from pyharness.application.snapshot_store import SnapshotStore</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>from pyharness.application.context_manifest import ContextManifest, TaskContextReference</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>from pyharness.application.context_manifest_store import ContextManifestStore</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>from pyharness.application.workspace_git_store import GitPreviewStore</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>from pyharness.application.workspace_snapshot import WorkspaceSnapshot</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>from pyharness.application.workspace_snapshot_store import WorkspaceSnapshotStore</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>from pyharness.application.workspace_manifest import ContextManifestV2</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>from pyharness.application.workspace_manifest_store import WorkspaceManifestStore</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>from pyharness.application.workspace_inventory_store import WorkspaceInventoryStore</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>from pyharness.application.workspace_owned_inputs import WorkspaceInput</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>from pyharness.application.workspace_owned_input_store import WorkspaceOwnedInputStore</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>from pyharness.application.product_task_contracts import ProductTask</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>from pyharness.application.product_task_store import ProductTaskStore</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>from pyharness.application.document_contracts import DocumentRevision, CitationRevision, DeliveryRevision</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>from pyharness.application.document_store import DocumentStore</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>from pyharness.application.document_references import DocumentReferences</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>from pyharness.application.run_attempt_contracts import RunAttempt</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>from pyharness.application.run_attempt_store import RunAttemptStore</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>from pyharness.application.execution_contracts import ExecutionAuthorization,ExecutionCancellation</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>from pyharness.application.execution_authorization_store import ExecutionAuthorizationStore</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>from pyharness.application.execution_preparation import ExecutionPreparationStore</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>from pyharness.application.execution_cancellation_store import ExecutionCancellationStore</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>from pyharness.application.correction_contracts import CorrectionRevision</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>from pyharness.application.execution_correction_store import ExecutionCorrectionStore</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>from pyharness.application.index_repair_contracts import IndexRepairRevision</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>from pyharness.application.execution_index_repair_store import ExecutionIndexRepairStore</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>from pyharness.application.execution_continuation_store import ExecutionContinuationStore</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>from pyharness.application.delivery_store import DeliveryStore</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>from pyharness.application.writeback_store import WritebackStore</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>from pyharness.application.writeback_records import WRITEBACK_MODELS</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>from pyharness.application.writeback_support import wb_id</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>from pyharness.application.delivery_records import DELIVERY_MODELS,delivery_record_id</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>from pyharness.application.handoff_budget_contracts import HandoffBudget</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>from pyharness.application.task_graph_store import TaskGraphStore</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>from pyharness.application.task_graph_contracts import TaskGraphRevision</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>from pyharness.application.task_graph_run_contracts import TaskGraphRunAuthorization,GraphDispatch,GraphCancellation</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>from pyharness.application.regression_records import REGRESSION_MODELS</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>from pyharness.application.regression_store import RegressionStore</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>from pyharness.application.experiment_records import EXPERIMENT_MODELS</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>from pyharness.application.experiment_store import ExperimentStore</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code></code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>def canonical(value) -&gt; bytes:</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(&#x27;,&#x27;, &#x27;:&#x27;), allow_nan=False).encode(&#x27;utf-8&#x27;)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>def digest_of(data: bytes) -&gt; str:</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>    return hashlib.sha256(data).hexdigest()</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code></code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code></code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>class WorkspaceStore(SourceGrantStore, SnapshotStore, ContextManifestStore, GitPreviewStore, WorkspaceSnapshotStore, WorkspaceManifestStore, WorkspaceInventoryStore, WorkspaceOwnedInputStore, ProductTaskStore, DocumentStore, DocumentReferences, RunAttemptStore, ExecutionAuthorizationStore, ExecutionPreparationStore,ExecutionCancellationStore,ExecutionCorrectionStore,ExecutionIndexRepairStore,ExecutionContinuationStore,TaskGraphStore,DeliveryStore,WritebackStore,RegressionStore,ExperimentStore):</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    SID = &#x27;s-workspace-control-v1&#x27;</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    MAX_BLOB_BYTES = 32768</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    MAX_PROJECTS = 200</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    def __init__(self, root: Path, *, tenant_id: str):</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>        self.root = Path(root)</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        self.tenant_id = normalize_tenant_id(tenant_id)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        self.log_path = self.root / &#x27;control&#x27; / f&#x27;{self.SID}.jsonl&#x27;</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        self._lock = asyncio.Lock()</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        self._store = None</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        self._session = None</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        self._lease = None</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        self._closed = False</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        self._failed = False</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code></code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    def _ensure_usable(self):</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        if self._closed:</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>            raise_code(&#x27;EVT-104&#x27;, reason=&#x27;workspace_closed&#x27;)</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        if self._failed:</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_reopen_required&#x27;)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code></code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    async def _open(self, *, initialize=True):</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        return await self._open_projected(initialize=initialize,project=self._validate_log)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code></code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    async def _open_projected(self, *, initialize, project):</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        self._ensure_usable()</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        if self._store is not None:</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>            return</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        if not initialize:</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>            try:</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>                exists = self.log_path.stat().st_size &gt; 0</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>            except FileNotFoundError:</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                exists = False</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>            except OSError:</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_log_unavailable&#x27;)</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>            if not exists:</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>                raise_code(&#x27;GRD-403&#x27;, reason=&#x27;source_grant_unavailable&#x27;)</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        lease = _FileLock(self.root / &#x27;.control-owner.lock&#x27;)</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        if not lease.try_acquire():</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_busy&#x27;)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        store = None</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        try:</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>            store = open_store(self.SID, dir=self.log_path.parent)</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>            for path in session_data_paths(self.log_path):</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>                if detect_truncation(path) is not None:</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>                    raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_log_incomplete&#x27;)</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>            events = list(store.replay())</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>            if store._quarantine:</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>                raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_log_corrupt&#x27;)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>            self._validate_control_sequence(events)</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            project(events)</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>            if not events and not initialize:</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>                raise_code(&#x27;GRD-403&#x27;, reason=&#x27;source_grant_unavailable&#x27;)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>            session = await open_session(self.SID, store, tenant_id=self.tenant_id)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            bus = EventBus()</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>            recorder = session_recorder(store, self.SID)</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            for type_ in EVENT_TYPES:</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>                bus.subscribe(type_, recorder, owner=&#x27;workspace-control&#x27;)</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            session._bus = bus</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>            if not events:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                event = await session.append(&#x27;session.created&#x27;, {&#x27;title&#x27;: &#x27;workspace-control&#x27;, &#x27;model&#x27;: &#x27;control-only&#x27;}, actor=&#x27;system&#x27;, sync=True)</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                self._verify_commit(store, event)</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>            self._store, self._session, self._lease = store, session, lease</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        except BaseException:</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            if store is not None:</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>                store.close()</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>            lease.release()</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>            raise</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code></code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    def _validate_log(self, events):</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        self._validate_control_sequence(events)</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        self._project(events)</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code></code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    def _validate_control_sequence(self, events):</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        for seq, event in enumerate(events, 1):</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>            if event.seq != seq or event.session_id != self.SID or event.tenant_id != self.tenant_id:</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>                raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_log_identity_or_sequence&#x27;)</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>            if event.type != (&#x27;session.created&#x27; if seq == 1 else &#x27;workspace.resource_committed&#x27;):</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_log_type&#x27;)</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code></code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>    def _verify_commit(store, event):</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        # EventBus isolates subscriber errors; an empty flush is not a receipt.</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        rows = list(store.replay())</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>        if store._quarantine or not rows or rows[-1].model_dump() != event.model_dump():</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_commit_unconfirmed&#x27;)</code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code></code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    def _blob(self, digest: str) -&gt; Path:</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        if not re.fullmatch(r&#x27;[0-9a-f]{64}&#x27;, digest):</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>            raise_code(&#x27;EVT-100&#x27;, field=&#x27;blob_ref&#x27;)</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>        path = self.root / &#x27;blobs&#x27; / f&#x27;{digest}.json&#x27;</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        if not path.resolve().is_relative_to(self.root.resolve()):</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_blob_escape&#x27;)</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        return path</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code></code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>    def _read_definition(self, payload):</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        digest = payload[&#x27;digest&#x27;]</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>        if not re.fullmatch(r&#x27;[0-9a-f]{64}&#x27;, digest):</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            raise_code(&#x27;EVT-100&#x27;, field=&#x27;blob_ref&#x27;)</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        path = self.root / &#x27;blobs&#x27; / f&#x27;{digest}.json&#x27;</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>        try:</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>            limit = 512 * 1024 if payload[&#x27;resource_kind&#x27;] in {&#x27;source_snapshot&#x27;, &#x27;context_manifest&#x27;, &#x27;workspace_snapshot&#x27;, &#x27;workspace_input&#x27;, &#x27;document&#x27;, &#x27;delivery_definition&#x27;,&#x27;index_repair&#x27;,&#x27;task_graph&#x27;,&#x27;task_graph_run&#x27;,&#x27;experiment_report&#x27;,&#x27;delivery_package&#x27;,&#x27;role_handoff&#x27;,&#x27;delivery_acceptance&#x27;,&#x27;delivery_export&#x27;,&#x27;writeback_grant&#x27;,&#x27;merge_plan&#x27;,&#x27;writeback_application&#x27;} else self.MAX_BLOB_BYTES</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>            data = checked_private_bytes(path,limit=limit,trusted_root=self.root)</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        except OSError:</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_blob_missing&#x27;)</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        if digest_of(data) != payload[&#x27;digest&#x27;]:</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_blob_digest&#x27;)</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>        try:</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>            model = {&#x27;project&#x27;: ProjectRevision, &#x27;source_grant&#x27;: SourceGrant,</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                     &#x27;source_snapshot&#x27;: SourceSnapshot, &#x27;context_manifest&#x27;: ContextManifest,</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>                     &#x27;task_definition&#x27;: TaskContextReference,&#x27;workspace_snapshot&#x27;:WorkspaceSnapshot,&#x27;workspace_input&#x27;:WorkspaceInput,</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>                     &#x27;document&#x27;:DocumentRevision,&#x27;citation&#x27;:CitationRevision,&#x27;delivery_definition&#x27;:DeliveryRevision,</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>                     &#x27;run_attempt&#x27;:RunAttempt,&#x27;execution_authorization&#x27;:ExecutionAuthorization,</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                     &#x27;execution_cancellation&#x27;:ExecutionCancellation,&#x27;execution_correction&#x27;:CorrectionRevision,&#x27;index_repair&#x27;:IndexRepairRevision,</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>                     &#x27;task_graph&#x27;:TaskGraphRevision,&#x27;task_graph_run&#x27;:TaskGraphRunAuthorization,&#x27;task_graph_dispatch&#x27;:GraphDispatch,&#x27;task_graph_cancellation&#x27;:GraphCancellation}.get(payload[&#x27;resource_kind&#x27;])</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            if payload[&#x27;resource_kind&#x27;]==&#x27;context_manifest&#x27; and json.loads(data).get(&#x27;schema_version&#x27;)==2:</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                model=ContextManifestV2</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>            if payload[&#x27;resource_kind&#x27;]==&#x27;document&#x27; and json.loads(data).get(&#x27;schema_version&#x27;)==2:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>                from pyharness.application.handoff_document_contracts import HandoffDocumentRevision</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>                model=HandoffDocumentRevision</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            if payload[&#x27;resource_kind&#x27;]==&#x27;workspace_input&#x27; and json.loads(data).get(&#x27;schema_version&#x27;)==2:</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                from pyharness.application.selected_owned_inputs import SelectedWorkspaceInput</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>                model=SelectedWorkspaceInput</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>            if payload[&#x27;resource_kind&#x27;] == &#x27;task_definition&#x27; and json.loads(data).get(&#x27;schema_version&#x27;) == 2:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>                model = ProductTask</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            if payload[&#x27;resource_kind&#x27;] in (&#x27;run_attempt&#x27;,&#x27;execution_authorization&#x27;) and json.loads(data).get(&#x27;schema_version&#x27;)==2:</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>                from pyharness.application.continuation_execution_contracts import ContinuedRunAttempt,ContinuedExecutionAuthorization</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                model=ContinuedRunAttempt if payload[&#x27;resource_kind&#x27;]==&#x27;run_attempt&#x27; else ContinuedExecutionAuthorization</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>            if payload[&#x27;resource_kind&#x27;] in (&#x27;run_attempt&#x27;,&#x27;execution_authorization&#x27;) and json.loads(data).get(&#x27;schema_version&#x27;)==3:</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>                from pyharness.application.task_graph_execution_contracts import GraphRunAttempt,GraphNodeExecutionAuthorization</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                model=GraphRunAttempt if payload[&#x27;resource_kind&#x27;]==&#x27;run_attempt&#x27; else GraphNodeExecutionAuthorization</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>            if payload[&#x27;resource_kind&#x27;] in DELIVERY_MODELS:</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>                model=DELIVERY_MODELS[payload[&#x27;resource_kind&#x27;]][0]</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            if payload[&#x27;resource_kind&#x27;]==&#x27;handoff_budget&#x27;:model=HandoffBudget</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>            if payload[&#x27;resource_kind&#x27;] in WRITEBACK_MODELS:model=WRITEBACK_MODELS[payload[&#x27;resource_kind&#x27;]][0]</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>            if payload[&#x27;resource_kind&#x27;] in REGRESSION_MODELS:model=REGRESSION_MODELS[payload[&#x27;resource_kind&#x27;]][0]</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>            if payload[&#x27;resource_kind&#x27;] in EXPERIMENT_MODELS:model=EXPERIMENT_MODELS[payload[&#x27;resource_kind&#x27;]][0]</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            if model is None:</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>                raise ValueError(&#x27;unsupported resource&#x27;)</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>            project = model.model_validate_json(data)</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        except ValueError:</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_blob_schema&#x27;)</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        ident = getattr(project,EXPERIMENT_MODELS[payload[&#x27;resource_kind&#x27;]][1]) if payload[&#x27;resource_kind&#x27;] in EXPERIMENT_MODELS else getattr(project,REGRESSION_MODELS[payload[&#x27;resource_kind&#x27;]][2]) if payload[&#x27;resource_kind&#x27;] in REGRESSION_MODELS else wb_id(project,payload[&#x27;resource_kind&#x27;]) if payload[&#x27;resource_kind&#x27;] in WRITEBACK_MODELS else project.budget_id if payload[&#x27;resource_kind&#x27;]==&#x27;handoff_budget&#x27; else delivery_record_id(project,payload[&#x27;resource_kind&#x27;]) if payload[&#x27;resource_kind&#x27;] in DELIVERY_MODELS else getattr(project, {&#x27;project&#x27;: &#x27;project_id&#x27;, &#x27;source_grant&#x27;: &#x27;grant_id&#x27;, &#x27;source_snapshot&#x27;: &#x27;snapshot_id&#x27;,</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>                                  &#x27;context_manifest&#x27;: &#x27;manifest_id&#x27;, &#x27;task_definition&#x27;: &#x27;product_task_id&#x27;,</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>                                  &#x27;workspace_snapshot&#x27;:&#x27;snapshot_id&#x27;,&#x27;workspace_input&#x27;:&#x27;input_id&#x27;,</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>                                  &#x27;document&#x27;:&#x27;document_id&#x27;,&#x27;citation&#x27;:&#x27;citation_id&#x27;,&#x27;delivery_definition&#x27;:&#x27;delivery_id&#x27;,</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>                                  &#x27;run_attempt&#x27;:&#x27;attempt_id&#x27;,&#x27;execution_authorization&#x27;:&#x27;execution_id&#x27;,</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>                                  &#x27;execution_cancellation&#x27;:&#x27;cancellation_id&#x27;,&#x27;execution_correction&#x27;:&#x27;correction_id&#x27;,&#x27;index_repair&#x27;:&#x27;repair_id&#x27;,</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>                                  &#x27;task_graph&#x27;:&#x27;graph_id&#x27;,&#x27;task_graph_run&#x27;:&#x27;graph_run_id&#x27;,&#x27;task_graph_dispatch&#x27;:&#x27;dispatch_id&#x27;,&#x27;task_graph_cancellation&#x27;:&#x27;cancellation_id&#x27;}[payload[&#x27;resource_kind&#x27;]])</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        if ident != payload[&#x27;resource_id&#x27;] or project.revision != payload[&#x27;revision&#x27;]:</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>            raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_blob_reference&#x27;)</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>        if isinstance(project, SourceSnapshot):</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>            self._verify_snapshot_content(project)</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>        if isinstance(project,WorkspaceSnapshot):</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>            self._verify_workspace_content(project)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>        return project</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code></code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>    def _project(self, events):</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        projects, commands, regression_history = {}, {}, {}</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>        for event in events:</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>            if event.type != &#x27;workspace.resource_committed&#x27;:</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>                continue</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>            payload = event.payload</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>            project = self._read_definition(payload)</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            kind = payload[&#x27;resource_kind&#x27;] if payload[&#x27;resource_kind&#x27;] in DELIVERY_MODELS or payload[&#x27;resource_kind&#x27;] in WRITEBACK_MODELS or payload[&#x27;resource_kind&#x27;] in REGRESSION_MODELS or payload[&#x27;resource_kind&#x27;] in EXPERIMENT_MODELS or payload[&#x27;resource_kind&#x27;]==&#x27;handoff_budget&#x27; else {&#x27;project&#x27;: &#x27;project&#x27;, &#x27;source_grant&#x27;: &#x27;grant&#x27;, &#x27;source_snapshot&#x27;: &#x27;snapshot&#x27;,</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>                    &#x27;context_manifest&#x27;: &#x27;manifest&#x27;, &#x27;task_definition&#x27;: &#x27;task_reference&#x27;,&#x27;workspace_snapshot&#x27;:&#x27;workspace_snapshot&#x27;,&#x27;workspace_input&#x27;:&#x27;workspace_input&#x27;,</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                    &#x27;document&#x27;:&#x27;document&#x27;,&#x27;citation&#x27;:&#x27;citation&#x27;,&#x27;delivery_definition&#x27;:&#x27;delivery_definition&#x27;,</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                    &#x27;run_attempt&#x27;:&#x27;run_attempt&#x27;,&#x27;execution_authorization&#x27;:&#x27;execution_authorization&#x27;,</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>                    &#x27;execution_cancellation&#x27;:&#x27;execution_cancellation&#x27;,&#x27;execution_correction&#x27;:&#x27;execution_correction&#x27;,&#x27;index_repair&#x27;:&#x27;index_repair&#x27;,</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                    &#x27;task_graph&#x27;:&#x27;task_graph&#x27;,&#x27;task_graph_run&#x27;:&#x27;task_graph_run&#x27;,&#x27;task_graph_dispatch&#x27;:&#x27;task_graph_dispatch&#x27;,&#x27;task_graph_cancellation&#x27;:&#x27;task_graph_cancellation&#x27;}[payload[&#x27;resource_kind&#x27;]]</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>            if isinstance(project, ProductTask):</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>                kind = &#x27;product_task&#x27;</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>            ident = payload[&#x27;resource_id&#x27;]</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>            previous = projects.get(ident)</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>            if previous and kind not in previous:</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>                raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_resource_kind_changed&#x27;)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            revision = previous[kind][&#x27;revision&#x27;] if previous else 0</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>            key = (payload[&#x27;actor_ref&#x27;], payload[&#x27;command_id&#x27;])</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            if payload[&#x27;parent_revision&#x27;] != revision or key in commands:</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>                raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_projection_conflict&#x27;)</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>            if kind in DELIVERY_MODELS:</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>                self._validate_delivery_record(project,projects,previous,event,kind)</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>            if kind==&#x27;handoff_budget&#x27;:self._validate_handoff_budget(project,projects,previous,event)</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            if kind in WRITEBACK_MODELS:self._validate_writeback_record(project,projects,previous,event,kind)</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>            if kind in REGRESSION_MODELS:self._validate_regression_record(project,projects,previous,event,kind,regression_history)</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>            if kind in EXPERIMENT_MODELS:self._validate_experiment_record(project,projects,previous,event,kind,regression_history)</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>            if kind in {&#x27;manifest&#x27;, &#x27;task_reference&#x27;}:</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>                if isinstance(project,ContextManifestV2):</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>                    self._validate_workspace_manifest_definition(project,projects,previous,event)</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>                else:</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>                    self._validate_context_definition(project, projects, previous, event)</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            if kind == &#x27;product_task&#x27;:</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>                self._validate_product_task_definition(project, projects, previous, event)</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>            if kind == &#x27;document&#x27;:</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>                self._validate_document_definition(project, projects, previous, event)</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>            if kind == &#x27;citation&#x27;:</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>                self._validate_citation_definition(project, projects, previous, event)</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>            if kind == &#x27;delivery_definition&#x27;:</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>                self._validate_delivery_definition(project, projects, previous, event)</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>            if kind == &#x27;run_attempt&#x27;:</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>                self._validate_run_attempt_definition(project, projects, previous, event)</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>            if kind == &#x27;execution_authorization&#x27;:</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>                self._validate_execution_authorization(project, projects, previous, event)</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>            if kind == &#x27;execution_cancellation&#x27;:</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>                self._validate_execution_cancellation(project,projects,previous,event)</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>            if kind==&#x27;execution_correction&#x27;:</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>                self._validate_execution_correction(project,projects,previous,event)</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>            if kind==&#x27;index_repair&#x27;:</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>                self._validate_index_repair(project,projects,previous,event)</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>            if kind in {&#x27;task_graph_dispatch&#x27;,&#x27;task_graph_cancellation&#x27;}:</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                self._validate_graph_control(project,projects,previous,event,kind)</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>            if kind==&#x27;task_graph_run&#x27;:</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>                self._validate_task_graph_run(project,projects,previous,event)</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            if kind==&#x27;task_graph&#x27;:</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                self._validate_task_graph(project,projects,previous,event)</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>            if kind==&#x27;workspace_snapshot&#x27;:</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>                self._validate_workspace_snapshot_definition(project,projects,previous,event)</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>            if kind==&#x27;workspace_input&#x27;:</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                self._validate_workspace_input_definition(project,projects,previous,event)</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>            if kind == &#x27;snapshot&#x27;:</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                grant = projects.get(project.grant_id, {}).get(&#x27;grant&#x27;)</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>                parent = projects.get(project.project_id, {}).get(&#x27;project&#x27;)</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                if (previous is not None or grant is None or parent is None or parent[&#x27;archived&#x27;]</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>                        or grant[&#x27;revoked&#x27;] or grant[&#x27;project_id&#x27;] != project.project_id</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>                        or grant[&#x27;root_identity&#x27;] != project.root_identity</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>                        or grant[&#x27;revision&#x27;] != project.grant_revision):</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>                    raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_snapshot_binding&#x27;)</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>            if kind == &#x27;grant&#x27;:</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>                parent = projects.get(project.project_id, {}).get(&#x27;project&#x27;)</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>                current = project.model_dump()</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>                if parent is None or (previous is None and (parent[&#x27;archived&#x27;] or project.revoked)):</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>                    raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_grant_project&#x27;)</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>                if previous is None:</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>                    if project.approved_by != payload[&#x27;actor_ref&#x27;]:</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>                        raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_grant_subject&#x27;)</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>                elif (previous[&#x27;grant&#x27;][&#x27;revoked&#x27;] or not project.revoked</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>                      or any(current[k] != v for k, v in previous[&#x27;grant&#x27;].items()</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>                             if k not in {&#x27;revision&#x27;, &#x27;revoked&#x27;})):</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>                    raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_grant_transition&#x27;)</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>            row = {kind: project.model_dump(), &#x27;digest&#x27;: payload[&#x27;digest&#x27;],</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>                   &#x27;source_seq&#x27;: event.seq, &#x27;created_at&#x27;: event.ts, &#x27;created_by&#x27;: payload[&#x27;actor_ref&#x27;]}</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>            if kind in DELIVERY_MODELS or kind in WRITEBACK_MODELS or kind in REGRESSION_MODELS or kind in EXPERIMENT_MODELS or kind in {&#x27;handoff_budget&#x27;,&#x27;run_attempt&#x27;,&#x27;execution_authorization&#x27;,&#x27;execution_cancellation&#x27;,&#x27;execution_correction&#x27;,&#x27;index_repair&#x27;,&#x27;task_graph&#x27;,&#x27;task_graph_run&#x27;,&#x27;task_graph_dispatch&#x27;,&#x27;task_graph_cancellation&#x27;}:row[&#x27;request_digest&#x27;] = payload[&#x27;request_digest&#x27;]</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>            projects[ident] = row</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>            if kind in REGRESSION_MODELS or kind in EXPERIMENT_MODELS or kind in {&#x27;product_task&#x27;,&#x27;task_graph&#x27;}:regression_history[(kind,ident,project.revision)]=row</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>            commands[key] = (payload[&#x27;request_digest&#x27;], row)</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>        return projects, commands</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code></code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>    async def projects(self):</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>            await self._open()</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>            projects, _ = self._project(self._session.events_after(0))</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>            return [row for row in projects.values() if &#x27;project&#x27; in row]</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code></code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>    async def projects_readonly(self):</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        &quot;&quot;&quot;Directory used by observation UI; no initialization or writer lease.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>            self._ensure_usable();found=False</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>            for path in session_data_paths(self.log_path):</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>                try:path.stat();found=True</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>                except FileNotFoundError:continue</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>                except OSError:raise_code(&#x27;PERS-202&#x27;,reason=&#x27;workspace_log_unavailable&#x27;)</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>            if not found:return []</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>            resources,_,_=await self._execution_read_state()</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>            return [row for row in resources.values() if &#x27;project&#x27; in row]</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code></code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>    async def audit(self):</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>            await self._open()</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>            return [event.model_dump(mode=&#x27;json&#x27;) for event in self._session.events_after(0)]</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code></code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code>    async def audit_page(self, *, subject: str, **parameters):</code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>        query = AuditQuery.model_validate(parameters)</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>            await self._open()</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>            # Read disk, not the SessionLog cache: corruption remains fail closed.</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>            for path in session_data_paths(self.log_path):</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>                if detect_truncation(path) is not None:</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>                    raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_log_incomplete&#x27;)</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>            events = list(self._store.replay())</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>            if self._store._quarantine:</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>                raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_log_corrupt&#x27;)</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>            self._validate_log(events)</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>            key_path = self.root / &#x27;.audit-cursor-key&#x27;</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>            try:</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>                if not key_path.exists():</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>                    if query.cursor:</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>                        raise_code(&#x27;EVT-100&#x27;, reason=&#x27;audit_cursor_invalid&#x27;)</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>                    TenantSettingsStore._atomic_write(key_path, secrets.token_bytes(32))</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>                key = key_path.read_bytes()</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>                if len(key) != 32:</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>                    raise_code(&#x27;PERS-202&#x27;, reason=&#x27;audit_key_unavailable&#x27;)</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>            except OSError:</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>                raise_code(&#x27;PERS-202&#x27;, reason=&#x27;audit_key_unavailable&#x27;)</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>            return page_events([e.model_dump(mode=&#x27;json&#x27;) for e in events], query,</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>                               tenant=self.tenant_id, subject=subject, key=key)</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code></code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>    async def commit(self, project: ProjectRevision, *, expected_revision: int, command_id: str, actor_ref: str):</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>            await self._open()</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>            data = canonical(project.model_dump())</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>            digest = digest_of(data)</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>            request_digest = digest_of(canonical({&#x27;project&#x27;: project.model_dump(), &#x27;expected_revision&#x27;: expected_revision}))</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>            payload = WorkspaceResourceCommittedPayload(</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>                resource_kind=&#x27;project&#x27;, resource_id=project.project_id,</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>                revision=project.revision, parent_revision=expected_revision,</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>                blob_ref=digest, digest=digest, command_id=command_id,</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>                request_digest=request_digest, actor_ref=actor_ref).model_dump()</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>            projects, commands = self._project(self._session.events_after(0))</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>            old_command = commands.get((actor_ref, command_id))</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>            if old_command:</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>                if old_command[0] != request_digest:</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>                    raise_code(&#x27;EVT-100&#x27;, reason=&#x27;idempotency_conflict&#x27;)</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>                return old_command[1]</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>            previous = projects.get(project.project_id)</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>            actual = previous[&#x27;project&#x27;][&#x27;revision&#x27;] if previous else 0</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>            if actual != expected_revision:</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>                raise_code(&#x27;EVT-101&#x27;, reason=&#x27;stale_revision&#x27;)</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>            if previous is None and sum(&#x27;project&#x27; in row for row in projects.values()) &gt;= self.MAX_PROJECTS:</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>                raise_code(&#x27;EVT-100&#x27;, reason=&#x27;workspace_project_limit&#x27;)</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>            path = self._blob(digest)</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>            if len(data) &gt; self.MAX_BLOB_BYTES:</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>                raise_code(&#x27;EVT-100&#x27;, reason=&#x27;workspace_blob_limit&#x27;)</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>            try:</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>                if path.exists():</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>                    if checked_private_bytes(path,limit=self.MAX_BLOB_BYTES) != data:</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>                        raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_blob_digest&#x27;)</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code>                else:</code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>                    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>                    TenantSettingsStore._atomic_write(path, data)</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>            except OSError:</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code>                raise_code(&#x27;PERS-202&#x27;, reason=&#x27;workspace_blob_write&#x27;)</code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>            try:</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>                event = await self._session.append(&#x27;workspace.resource_committed&#x27;, payload, actor=&#x27;user&#x27;, sync=True)</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>                self._verify_commit(self._store, event)</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>            except BaseException:</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>                self._failed = True</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>                raise</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>            projects, _ = self._project(self._session.events_after(0))</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>            return projects[project.project_id]</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code></code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>    async def close(self):</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>        async with self._lock:</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>            if self._closed:</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>                return</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code>            self._closed = True</code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>            try:</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>                if self._store is not None:</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>                    self._store.close()</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code>            finally:</code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>                if self._lease is not None:</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>                    self._lease.release()</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

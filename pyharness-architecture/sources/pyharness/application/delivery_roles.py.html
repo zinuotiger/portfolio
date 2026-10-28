@@ -1,0 +1,139 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/application/delivery_roles.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/application/delivery_roles.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 139 行</span></nav><main class="wrap source-page"><h1>pyharness/application/delivery_roles.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：a39dd9648aceca40352b79e70ee140762a58f928<br>SHA-256（内容校验）：8b2ad3b92e8de835457d37ef36b6558426734b43b3d0632332ed5f0310177432</p><p><a href="../../../architecture-detailed.html?node=delivery">ProductDelivery（交付封装与角色验收）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 11 个类、函数与方法</summary><ul><li><a href="#L7">subset_outputs（函数） · L7–L10</a></li><li><a href="#L13">DeliveryRoles（类） · L13–L139</a><ul><li><a href="#L14">DeliveryRoles._role_parent（方法） · L14–L15</a></li><li><a href="#L17">DeliveryRoles._handoff_basis（方法） · L17–L28</a></li><li><a href="#L30">DeliveryRoles._handoff_record（方法） · L30–L35</a></li><li><a href="#L37">DeliveryRoles._handoff_acknowledged（方法） · L37–L41</a></li><li><a href="#L43">DeliveryRoles._review_basis（方法） · L43–L60</a></li><li><a href="#L62">DeliveryRoles._acceptance_verdict（方法） · L62–L65</a></li><li><a href="#L67">DeliveryRoles._validate_role_delivery（方法） · L67–L108</a></li><li><a href="#L110">DeliveryRoles._handoff_current（方法） · L110–L122</a></li><li><a href="#L124">DeliveryRoles._acceptance_current（方法） · L124–L139</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;Historical role/handoff/review binding and current exact grant checks.&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code>from pyharness.application.delivery_support import delivery_ref,selected_outputs</code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>from pyharness.application.delivery_records import DELIVERY_MODELS</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code></code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>def subset_outputs(values,allowed):</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>    from pyharness.application.workspace_store import canonical</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>    keys={canonical(v) for v in allowed}</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>    if any(canonical(v) not in keys for v in values):raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_output_outside_grant&#x27;)</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code></code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>class DeliveryRoles:</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>    def _role_parent(self,resources,project,command,actor):</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>        return self._s05_exact(resources,project,&#x27;execution_authorization&#x27;,command.parent_execution_ref.model_dump(),&#x27;execution_id&#x27;,actor)</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code></code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>    def _handoff_basis(self,resources,project,selection):</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>        command=selection.model_dump() if hasattr(selection,&#x27;model_dump&#x27;) else selection</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>        role=self._delivery_exact(resources,project,&#x27;role_contract&#x27;,command[&#x27;role_ref&#x27;])</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>        package=self._delivery_exact(resources,project,&#x27;delivery_package&#x27;,command[&#x27;package_ref&#x27;])</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>        r=role[&#x27;role_contract&#x27;];p=package[&#x27;delivery_package&#x27;]</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>        if (r[&#x27;selection&#x27;][&#x27;retired&#x27;] or r[&#x27;created_by&#x27;]!=p[&#x27;created_by&#x27;] or</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>                r[&#x27;selection&#x27;][&#x27;parent_execution_ref&#x27;]!=p[&#x27;selection&#x27;][&#x27;execution_ref&#x27;]):</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_role_package_mismatch&#x27;)</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>        subset_outputs(command[&#x27;outputs&#x27;],selected_outputs(p))</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>        if len(command[&#x27;minimum_context&#x27;].encode(&#x27;utf-8&#x27;))&gt;r[&#x27;selection&#x27;][&#x27;max_context_bytes&#x27;]:</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>            raise_code(&#x27;EVT-100&#x27;,reason=&#x27;handoff_context_limit&#x27;)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>        return role,package</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code></code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>    def _handoff_record(self,resources,project,ref):</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>        row=self._delivery_exact(resources,project,&#x27;role_handoff&#x27;,ref)</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>        role,package=self._handoff_basis(resources,project,row[&#x27;role_handoff&#x27;][&#x27;selection&#x27;])</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>        if row[&#x27;role_handoff&#x27;][&#x27;recipient_id&#x27;]!=role[&#x27;role_contract&#x27;][&#x27;recipient_id&#x27;]:</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>            raise_code(&#x27;PERS-202&#x27;,reason=&#x27;handoff_recipient_binding&#x27;)</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>        return row,role,package</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>    def _handoff_acknowledged(resources,handoff,actor):</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>        reference=delivery_ref(handoff,&#x27;role_handoff&#x27;)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>        return any(row.get(&#x27;handoff_ack&#x27;,{}).get(&#x27;created_by&#x27;)==actor and</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code>            row[&#x27;handoff_ack&#x27;][&#x27;selection&#x27;][&#x27;handoff_ref&#x27;]==reference for row in resources.values())</code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code></code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>    def _review_basis(self,resources,project,command,actor):</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>        handoff,role,package=self._handoff_record(resources,project,command.handoff_ref.model_dump())</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>        p=package[&#x27;delivery_package&#x27;];h=handoff[&#x27;role_handoff&#x27;];r=role[&#x27;role_contract&#x27;]</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code>        if (actor==p[&#x27;created_by&#x27;] or actor!=h[&#x27;recipient_id&#x27;] or r[&#x27;selection&#x27;][&#x27;role&#x27;]!=&#x27;reviewer&#x27; or</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>                command.package_ref.model_dump()!=delivery_ref(package,&#x27;delivery_package&#x27;) or</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>                not self._handoff_acknowledged(resources,handoff,actor)):</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;independent_acknowledged_reviewer_required&#x27;)</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>        from pyharness.application.delivery_contracts import DeliveryPackageCommand</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>        _,_,definition=self._delivery_package_basis(resources,project,DeliveryPackageCommand.model_validate(p[&#x27;selection&#x27;]),p[&#x27;created_by&#x27;])</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>        items={item[&#x27;item_id&#x27;]:item for item in definition[&#x27;delivery_definition&#x27;][&#x27;items&#x27;]}</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>        required={item[&#x27;item_id&#x27;] for item in items.values() if item[&#x27;required&#x27;]}</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>        required_outputs=[o for binding in p[&#x27;selection&#x27;][&#x27;bindings&#x27;] if binding[&#x27;item_id&#x27;] in required for o in binding[&#x27;outputs&#x27;]]</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code>        subset_outputs(required_outputs,h[&#x27;selection&#x27;][&#x27;outputs&#x27;])</code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>        expected={(key,i) for key in required for i in range(len(items[key][&#x27;acceptance_criteria&#x27;]))}</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>        decisions={(d.item_id,d.criterion_index) for d in command.decisions}</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code>        if not expected.issubset(decisions) or any(key not in items or i&gt;=len(items[key][&#x27;acceptance_criteria&#x27;]) for key,i in decisions):</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>            raise_code(&#x27;EVT-100&#x27;,reason=&#x27;delivery_criterion_decisions_incomplete&#x27;)</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>        return handoff,role,package</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code></code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    def _acceptance_verdict(value):</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        verdicts=[d[&#x27;verdict&#x27;] for d in value[&#x27;selection&#x27;][&#x27;decisions&#x27;]]</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>        return &#x27;rejected&#x27; if &#x27;fail&#x27; in verdicts else &#x27;pending&#x27; if &#x27;unknown&#x27; in verdicts else &#x27;passed&#x27;</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>    def _validate_role_delivery(self,definition,resources,previous,kind):</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>        value=definition.model_dump();command=definition.selection;actor=value[&#x27;created_by&#x27;];project=value[&#x27;project_id&#x27;]</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        if kind==&#x27;role_contract&#x27;:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            parent=self._role_parent(resources,project,command,actor)[&#x27;execution_authorization&#x27;]</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>            if value[&#x27;project_revision&#x27;]!=parent[&#x27;project_revision&#x27;] or definition.revision!=command.expected_revision+1:</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code>                raise ValueError(&#x27;role parent project revision&#x27;)</code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>            if previous:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>                prior=previous[kind]</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                if prior[&#x27;created_by&#x27;]!=actor or prior[&#x27;project_id&#x27;]!=project or prior[&#x27;selection&#x27;][&#x27;retired&#x27;]:</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                    raise ValueError(&#x27;role ownership/retirement&#x27;)</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>            if command.role==&#x27;consumer&#x27;:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>                from pyharness.application.delivery_identity import consumer_ceiling</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>                from pyharness.application.workspace_store import digest_of</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>                import json</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>                child=consumer_ceiling(parent[&#x27;environment&#x27;][&#x27;agent_snapshot&#x27;],definition.consumer_snapshot)</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>                ref=command.consumer_agent_ref</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>                if (child[&#x27;agent_id&#x27;]!=ref.agent_id or child[&#x27;current_version&#x27;]!=ref.version or</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                        digest_of(json.dumps(child,sort_keys=True).encode())!=ref.sha256):</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>                    raise ValueError(&#x27;role fixed consumer snapshot&#x27;)</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>            elif definition.consumer_snapshot is not None:raise ValueError(&#x27;reviewer has no execution snapshot&#x27;)</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        elif kind==&#x27;role_handoff&#x27;:</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>            role,package=self._handoff_basis(resources,project,command)</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>            if actor!=role[&#x27;role_contract&#x27;][&#x27;created_by&#x27;] or definition.recipient_id!=role[&#x27;role_contract&#x27;][&#x27;recipient_id&#x27;]:</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                raise ValueError(&#x27;handoff grantor/recipient&#x27;)</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        elif kind==&#x27;handoff_ack&#x27;:</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>            handoff,_,_=self._handoff_record(resources,project,command.handoff_ref.model_dump())</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>            if actor!=handoff[&#x27;role_handoff&#x27;][&#x27;recipient_id&#x27;]:raise ValueError(&#x27;ack real subject&#x27;)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        elif kind==&#x27;delivery_acceptance&#x27;:</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>            self._review_basis(resources,project,command,actor)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        elif kind==&#x27;delivery_export&#x27;:</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>            handoff,role,package=self._handoff_record(resources,project,command.handoff_ref.model_dump())</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>            h=handoff[&#x27;role_handoff&#x27;];p=package[&#x27;delivery_package&#x27;]</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>            if (actor!=p[&#x27;created_by&#x27;] or command.package_ref.model_dump()!=delivery_ref(package,&#x27;delivery_package&#x27;) or</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>                    definition.recipient_id!=h[&#x27;recipient_id&#x27;] or not self._handoff_acknowledged(resources,handoff,h[&#x27;recipient_id&#x27;])):</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>                raise ValueError(&#x27;export grantor/package/recipient/ack&#x27;)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>            subset_outputs([o.model_dump() for o in command.outputs],h[&#x27;selection&#x27;][&#x27;outputs&#x27;])</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>            if command.acceptance_ref:</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>                accepted=self._delivery_exact(resources,project,&#x27;delivery_acceptance&#x27;,command.acceptance_ref.model_dump())</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>                a=accepted[&#x27;delivery_acceptance&#x27;]</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>                if a[&#x27;selection&#x27;][&#x27;package_ref&#x27;]!=command.package_ref.model_dump() or self._acceptance_verdict(a)!=&#x27;passed&#x27;:</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>                    raise ValueError(&#x27;export independent acceptance&#x27;)</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        else:raise ValueError(&#x27;unsupported delivery fact&#x27;)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>    def _handoff_current(self,resources,handoff,actor,authorize,service,*,package_granted=False):</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>        from pyharness.application.delivery_identity import recipient_id,require_member</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        h=handoff[&#x27;role_handoff&#x27;];role,package=self._handoff_basis(resources,h[&#x27;project_id&#x27;],h[&#x27;selection&#x27;])</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>        r=role[&#x27;role_contract&#x27;]</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        if actor not in (h[&#x27;created_by&#x27;],h[&#x27;recipient_id&#x27;]) and not package_granted:raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_private&#x27;)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>        if recipient_id(service,r[&#x27;selection&#x27;][&#x27;recipient_username&#x27;])!=h[&#x27;recipient_id&#x27;]:</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>            raise_code(&#x27;GRD-403&#x27;,reason=&#x27;handoff_recipient_changed&#x27;)</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>        require_member(service,h[&#x27;created_by&#x27;])</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        observed=self._delivery_package_gate(resources,package,actor,authorize,service,granted=True)</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        subset_outputs(h[&#x27;selection&#x27;][&#x27;outputs&#x27;],selected_outputs(package[&#x27;delivery_package&#x27;]))</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>        from pyharness.application.workspace_store import canonical</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>        allowed={canonical(o) for o in h[&#x27;selection&#x27;][&#x27;outputs&#x27;]}</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        return role,package,[o for o in observed if canonical(o[&#x27;reference&#x27;]) in allowed]</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code></code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>    def _acceptance_current(self,resources,row,actor,authorize,service,*,package_granted=False):</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>        from pyharness.application.delivery_contracts import DeliveryAcceptanceCommand</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>        value=row[&#x27;delivery_acceptance&#x27;];command=DeliveryAcceptanceCommand.model_validate(value[&#x27;selection&#x27;])</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        handoff,_,package=self._review_basis(resources,value[&#x27;project_id&#x27;],command,value[&#x27;created_by&#x27;])</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>        self._handoff_current(resources,handoff,actor,authorize,service,package_granted=package_granted)</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        later=any(r.get(&#x27;delivery_acceptance&#x27;,{}).get(&#x27;selection&#x27;,{}).get(&#x27;package_ref&#x27;)==command.package_ref.model_dump()</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>            and r[&#x27;source_seq&#x27;]&gt;row[&#x27;source_seq&#x27;] for r in resources.values())</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        superseded=any(r.get(&#x27;delivery_package&#x27;,{}).get(&#x27;selection&#x27;,{}).get(&#x27;execution_ref&#x27;)==package[&#x27;delivery_package&#x27;][&#x27;selection&#x27;][&#x27;execution_ref&#x27;]</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>            and r[&#x27;source_seq&#x27;]&gt;package[&#x27;source_seq&#x27;] for r in resources.values())</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        if later or superseded:raise_code(&#x27;EVT-101&#x27;,reason=&#x27;delivery_acceptance_superseded&#x27;)</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        verdict=self._acceptance_verdict(value)</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>        if verdict==&#x27;passed&#x27;:</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>            from pyharness.application.execution_quality import require_package_quality</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>            execution=resources[package[&#x27;delivery_package&#x27;][&#x27;selection&#x27;][&#x27;execution_ref&#x27;][&#x27;execution_id&#x27;]]</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>            require_package_quality(service,execution,selected=selected_outputs(package[&#x27;delivery_package&#x27;]))</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        return verdict</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

@@ -1,0 +1,403 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/governance/policy.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/governance/policy.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 403 行</span></nav><main class="wrap source-page"><h1>pyharness/governance/policy.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：539c7245c0938e8d96fd4fe59d596eb22b5d90c1<br>SHA-256（内容校验）：f9ef77d3de0d59826acb2ef5e6715116b663edc1bdf52919bbffdf63701405da</p><p><a href="../../../architecture-detailed.html?node=policy">Governance Authorization（策略与治理授权）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 30 个类、函数与方法</summary><ul><li><a href="#L51">_is_callable（函数） · L51–L53</a></li><li><a href="#L56">_canonical_params（函数） · L56–L71</a></li><li><a href="#L74">compute_fingerprint（函数） · L74–L96</a></li><li><a href="#L99">_disabled_from_cfg（函数） · L99–L107</a></li><li><a href="#L110">PolicyRule（类） · L110–L141</a><ul><li><a href="#L125">PolicyRule.from_descriptor（方法） · L125–L141</a></li></ul></li><li><a href="#L144">Policy（类） · L144–L205</a><ul><li><a href="#L160">Policy.__post_init__（方法） · L160–L164</a></li><li><a href="#L166">Policy.enabled_rules（方法） · L166–L168</a></li><li><a href="#L170">Policy.rule_of（方法） · L170–L171</a></li><li><a href="#L173">Policy._derive（方法） · L173–L176</a></li><li><a href="#L178">Policy.with_rule_disabled（方法） · L178–L199</a></li><li><a href="#L201">Policy.with_rule_enabled（方法） · L201–L205</a></li></ul></li><li><a href="#L208">PolicyRegistry（类） · L208–L268</a><ul><li><a href="#L215">PolicyRegistry.__init__（方法） · L215–L216</a></li><li><a href="#L218">PolicyRegistry.register_rule（方法） · L218–L225</a></li><li><a href="#L227">PolicyRegistry.rules（方法） · L227–L229</a></li><li><a href="#L231">PolicyRegistry.emit_updated（异步方法） · L231–L268</a></li></ul></li><li><a href="#L271">PolicyEngine（类） · L271–L396</a><ul><li><a href="#L279">PolicyEngine.__init__（方法） · L279–L287</a></li><li><a href="#L290">PolicyEngine.from_config（方法） · L290–L335</a></li><li><a href="#L338">PolicyEngine.current（方法） · L338–L340</a></li><li><a href="#L342">PolicyEngine.resolve（方法） · L342–L345</a></li><li><a href="#L347">PolicyEngine.fingerprint（方法） · L347–L349</a></li><li><a href="#L351">PolicyEngine.registry（方法） · L351–L352</a></li><li><a href="#L354">PolicyEngine.policy（方法） · L354–L356</a></li><li><a href="#L358">PolicyEngine.chain（方法） · L358–L361</a></li><li><a href="#L364">PolicyEngine.disable_rule（异步方法） · L364–L379</a></li><li><a href="#L381">PolicyEngine.enable_rule（异步方法） · L381–L390</a></li><li><a href="#L392">PolicyEngine.emit_assembled（异步方法） · L392–L396</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/governance/policy.py — 治理层策略一等对象(ADR-018;S2-1 骨架)。</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>一句话职责:把&quot;规则集 + 求值序 + policy_refs + 声明式参数&quot;提为 Policy 一等对象,</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>算出内容哈希指纹、管理策略版本、发 policy.updated 事件——**只描述策略,不做决策、</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>不执行**(G-4/INV-G5;关 2 出口升格属 S3)。</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code></code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>依赖方向(ADR-018:308,强制):本模块**只允许** import ``pyharness.events`` 与</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code>``pyharness.errors``;**禁止** import ``pyharness.core.*``(tools_guard/executor/</code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>scope/llm)。规则的 ``match``/``check`` 可调用对象由装配层注入,本层只**持有**、</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>不探测来源(Δ-4,见 S2-1_GOVERNANCE_SKELETON_DESIGN.md §1)。类型标注若需引用</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>``ToolCall``/``Scope`` 一律用 ``Any``——不得用 TYPE_CHECKING 变通(保留 import</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code>即保留方向依赖)。</code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code></code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>契约增量(2026-09-14 S2-1 人工裁定;设计与本实现的差异均列于此):</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>1. **op 取值 = {add, enable, disable}**(Δ-1):``tighten`` 归 ``scope.updated``</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>   ——禁止 ``policy.updated`` 与 ``scope.updated`` 表达同一种策略变化。</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>2. **无 ``with_tightened``**(Δ-2):运行时收紧属 ``Scope``;治理动作为</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>   ``with_rule_enabled`` / ``with_rule_disabled``,禁用必须携带 ``config_ref``。</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>3. **INV-G6**(Δ-3):策略状态变化必经显式治理动作;任何放宽/禁用必须</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>   **有 ``policy.updated`` 事件 + 有 ``config_ref`` + 可审计追踪**;禁止静默改变。</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>4. **``from_config`` 注入式**(Δ-4):``chain_factory`` 与 ``rules`` 由装配层传入,</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>   治理层不 import ``tools_guard``。</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>5. **``authorize()`` 不在本步声明**(Δ-5):属 S3 Decision 模型。</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>6. **``config_ref`` 经 ``Envelope.trace`` 携带**(Δ-6,本步实现选择):沿用</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   ``tools_guard``/``approval`` 的&quot;传输元数据走 trace&quot;先例,不扩 payload 模型。</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code></code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>import hashlib</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>import json</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>import logging</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>from typing import Any, Iterable, Mapping, Optional</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code></code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>from pyharness.errors import raise_code</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code></code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>log = logging.getLogger(&quot;pyharness.governance.policy&quot;)</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code></code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code># policy.updated 的唯一合法 op 集(Δ-1:去 tighten、加 enable)</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>POLICY_OPS: frozenset = frozenset({&quot;add&quot;, &quot;enable&quot;, &quot;disable&quot;})</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code># 事件类型名(冻结名:ADR-018 §0.1/契约冻结清单)。词表注册属 S2-2;</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code># 注册前 emit_updated 按仓库惯例降级(见 PolicyRegistry.emit_updated)。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>EVENT_POLICY_UPDATED: str = &quot;policy.updated&quot;</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code></code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code># policy.updated payload 的字段契约(冻结设计 §2.3;S2-2 的 payload 模型须与之一致)</code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>POLICY_UPDATED_FIELDS: tuple[str, ...] = (</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>    &quot;policy_id&quot;, &quot;version&quot;, &quot;fingerprint&quot;, &quot;op&quot;, &quot;added&quot;, &quot;reason&quot;)</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code></code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code></code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>def _is_callable(v: Any) -&gt; bool:</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>    &quot;&quot;&quot;函数对象判定(指纹排除面;见 compute_fingerprint)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>    return callable(v)</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code></code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>def _canonical_params(params: Optional[Mapping[str, Any]]) -&gt; dict:</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code>    &quot;&quot;&quot;声明式参数规范化 + 边界校验:含 callable 一律拒(防指纹失稳,R-A)。</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code></code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code>    list/tuple/set 归一为**有序**字符串列表——集合序不稳定会让同一配置算出不同</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code>    指纹,直接破坏 M2 判据 ①。</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code>    out: dict = {}</code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code>    for k, v in (params or {}).items():</code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code>        if _is_callable(v):</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code>            raise_code(&quot;CYC-999&quot;, module=&quot;governance.policy&quot;, field=str(k),</code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code>                       hint=&quot;policy params 只允许声明式值(函数对象不入指纹)&quot;)</code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code>        if isinstance(v, (list, tuple, set, frozenset)):</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code>            out[str(k)] = sorted(str(x) for x in v)</code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code>        else:</code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code>            out[str(k)] = v</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>    return out</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code></code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>def compute_fingerprint(*, policy_id: str, version: str,</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code>                        rules: Iterable[&quot;PolicyRule&quot;],</code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>                        disabled: Iterable[str],</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>                        params: Optional[Mapping[str, Any]]) -&gt; str:</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    &quot;&quot;&quot;策略内容哈希 = sha256(规范化 JSON)。</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code></code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    ★ **只含声明式内容**:policy_id / version / **元组序** rule_id / policy_refs /</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>      forced / disabled / params。</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code>    ★ **排除 match/check**(函数对象):否则每次装配指纹都变,M2 判据 ①</code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>      (&quot;指纹随规则内容变化&quot;)会退化为&quot;每次都变&quot;(R-A)。</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>    payload = {</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code>        &quot;policy_id&quot;: str(policy_id),</code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        &quot;version&quot;: str(version),</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        &quot;rules&quot;: [{&quot;rule_id&quot;: r.rule_id,</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>                   &quot;policy_refs&quot;: list(r.policy_refs),</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>                   &quot;forced&quot;: bool(r.forced)} for r in rules],</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        &quot;disabled&quot;: sorted(str(x) for x in disabled),</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        &quot;params&quot;: _canonical_params(params),</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>    }</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>    canon = json.dumps(payload, sort_keys=True, ensure_ascii=False,</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>                       separators=(&quot;,&quot;, &quot;:&quot;), default=str)</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>    return hashlib.sha256(canon.encode(&quot;utf-8&quot;)).hexdigest()</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code></code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code></code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>def _disabled_from_cfg(cfg: Any) -&gt; tuple[str, ...]:</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>    &quot;&quot;&quot;读 ``cfg.security.guards.disabled``(声明的初始禁用面;只读,容错)。</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code></code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>    与既有 ``tools_guard.from_config`` 同源键面(ADR-019 的 W1 修复面),</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>    此处仅为策略指纹提供&quot;初始 disabled 集&quot;,**不做装配**(装配在 S2-3)。</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>    node = getattr(getattr(cfg, &quot;security&quot;, None), &quot;guards&quot;, None)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>    vals = getattr(node, &quot;disabled&quot;, None) if node is not None else None</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>    return tuple(str(x) for x in (vals or ()))</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code></code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code></code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>class PolicyRule:</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>    &quot;&quot;&quot;单条策略规则描述(``match``/``check`` 由装配层注入,本层只持有)。</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code></code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>    ``rule_id`` 全链唯一(重名注册被拒 TLB-801);``policy_refs`` 是该规则可能产出的</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code>    策略引用(如 (&quot;POL-FS-1&quot;,&quot;POL-FS-2&quot;,&quot;POL-FS-3&quot;)),供审计与凭证引用;</code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    ``forced`` 对应 ``tools_guard.FORCED_GUARDS``(恒在不可禁)。</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code></code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>    rule_id: str</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code>    policy_refs: tuple[str, ...] = ()</code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    match: Any = None</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>    check: Any = None</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>    forced: bool = False</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code></code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>    @classmethod</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>    def from_descriptor(cls, desc: Any) -&gt; &quot;PolicyRule&quot;:</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code>        &quot;&quot;&quot;鸭子描述符(如 ``tools_guard.RuleDescriptor``)→ PolicyRule。</code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code></code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>        只按属性读取,**不 import 描述符来源模块**(Δ-4:治理层不得反向依赖 core);</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        缺 ``rule_id`` 视为非法描述 → TLB-801。</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code>        rid = getattr(desc, &quot;rule_id&quot;, None)</code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>        if not isinstance(rid, str) or not rid:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>            raise_code(&quot;TLB-801&quot;, rule=type(desc).__name__,</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code>                       advice=&quot;规则描述符缺 rule_id(非法描述);须含 &quot;</code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>                              &quot;rule_id/policy_refs/forced/match/check&quot;)</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        refs = tuple(str(r) for r in (getattr(desc, &quot;policy_refs&quot;, ()) or ()))</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        return cls(rule_id=rid, policy_refs=refs,</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>                   match=getattr(desc, &quot;match&quot;, None),</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>                   check=getattr(desc, &quot;check&quot;, None),</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>                   forced=bool(getattr(desc, &quot;forced&quot;, False)))</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code></code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code></code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>@dataclass(frozen=True)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code>class Policy:</code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    &quot;&quot;&quot;策略集**一等对象**(不可变):规则 + 求值序 + 禁用面 + 声明式参数 + 指纹。</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code></code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code>    ``rules`` 的**元组序即求值序**(对齐 ``tools_guard._BUILTIN_IDS``);</code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>    ``fingerprint`` 在构造期算定(见 ``compute_fingerprint``),内容变则指纹变。</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>    派生(禁用/启用)只经 ``with_rule_*`` 返回**新对象**,不改本对象。</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code></code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>    policy_id: str</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>    version: str</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>    rules: tuple[PolicyRule, ...] = ()</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>    disabled: frozenset = frozenset()</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>    params: Mapping[str, Any] = field(default_factory=dict)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>    fingerprint: str = &quot;&quot;</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code></code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>    def __post_init__(self) -&gt; None:</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>        if not self.fingerprint:                     # 构造即算(不可变对象)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>            object.__setattr__(self, &quot;fingerprint&quot;, compute_fingerprint(</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>                policy_id=self.policy_id, version=self.version,</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>                rules=self.rules, disabled=self.disabled, params=self.params))</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code></code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    def enabled_rules(self) -&gt; tuple[PolicyRule, ...]:</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>        &quot;&quot;&quot;当前生效规则(排除禁用项);求值序保持。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>        return tuple(r for r in self.rules if r.rule_id not in self.disabled)</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code></code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code>    def rule_of(self, rule_id: str) -&gt; Optional[PolicyRule]:</code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        return next((r for r in self.rules if r.rule_id == rule_id), None)</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code></code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>    def _derive(self, *, disabled: frozenset) -&gt; &quot;Policy&quot;:</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        &quot;&quot;&quot;派生新 Policy(重算指纹;原对象不变)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>        return Policy(policy_id=self.policy_id, version=self.version,</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>                      rules=self.rules, disabled=disabled, params=self.params)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code></code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>    def with_rule_disabled(self, rule_id: str, *, config_ref: str) -&gt; &quot;Policy&quot;:</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>        &quot;&quot;&quot;禁用一条规则(治理动作,Δ-2)。</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code></code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>        必填 ``config_ref``(谁在何处声明了这次放宽)——缺则 CFG-601 拒;</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>        规则不在策略内 → CFG-601;``forced`` 规则恒在不可禁 → CFG-601</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        (与既有 ``GuardChain.disable`` 的 FORCED_GUARDS 复核同源)。</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>        幂等:已禁用 → 原样返回(不产生新对象,不重复留痕)。</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        if not str(config_ref or &quot;&quot;).strip():</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>            raise_code(&quot;CFG-601&quot;, reason=&quot;越权&quot;, fields=[&quot;config_ref&quot;],</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>                       detail=&quot;禁用规则必须携带 config_ref(治理动作须可审计,&quot;</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>                              &quot;INV-G6)&quot;)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        rule = self.rule_of(rule_id)</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        if rule is None:</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>            raise_code(&quot;CFG-601&quot;, guard=rule_id,</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>                       why=&quot;规则不在当前策略内(禁用无从谈起)&quot;)</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>        if rule.forced:</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>            raise_code(&quot;CFG-601&quot;, guard=rule_id,</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>                       why=&quot;forced 规则恒在不可禁(对应 FORCED_GUARDS)&quot;)</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        if rule_id in self.disabled:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            return self                              # 幂等:不重复留痕</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>        return self._derive(disabled=self.disabled | {rule_id})</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code></code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>    def with_rule_enabled(self, rule_id: str) -&gt; &quot;Policy&quot;:</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>        &quot;&quot;&quot;重新启用一条规则(治理动作,Δ-2)。幂等:未禁用 → 原样返回。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>        if rule_id not in self.disabled:</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>            return self</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>        return self._derive(disabled=self.disabled - {rule_id})</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code></code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code></code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>class PolicyRegistry:</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>    &quot;&quot;&quot;规则注册表(只增链尾,延续 ``register_plugin_guard`` 单调性)。</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code></code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>    重名注册被拒(TLB-801);无移除/重排 API——规则面的变更只经 Policy 的</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>    治理动作表达,并落 ``policy.updated``。</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code></code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>    def __init__(self) -&gt; None:</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>        self._rules: list[PolicyRule] = []</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code></code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>    def register_rule(self, rule: Any) -&gt; None:</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code>        &quot;&quot;&quot;登记一条规则(``PolicyRule`` 或同形描述符);重名 → TLB-801。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>        if not isinstance(rule, PolicyRule):</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>            rule = PolicyRule.from_descriptor(rule)</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        if any(r.rule_id == rule.rule_id for r in self._rules):</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code>            raise_code(&quot;TLB-801&quot;, rule=rule.rule_id,</code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>                       advice=&quot;rule_id 全链唯一(重复注册被拒)&quot;)</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        self._rules.append(rule)</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code></code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>    def rules(self) -&gt; tuple[PolicyRule, ...]:</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        &quot;&quot;&quot;已登记规则(登记序 = 求值序)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        return tuple(self._rules)</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code></code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>    async def emit_updated(self, policy: Policy, op: str, *, reason: str,</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                           config_ref: Optional[str] = None,</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                           session: Any = None) -&gt; bool:</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>        &quot;&quot;&quot;发 ``policy.updated``(强同步,Q3)。返回 True=已落盘,False=降级未发。</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code></code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>        - **op 白名单**:非 ``POLICY_OPS`` → CYC-999 拒(Δ-1);</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>        - **op=disable 必带 config_ref** → 缺则 CFG-601 拒(Δ-3:禁止静默放宽);</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>        - **词表未注册时降级**(S2-1 阶段常态):记日志、不抛——与</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>          ``approval._emit_trust``/``tools_guard._record`` 同款惯例;S2-2 注册</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>          ``policy.updated`` 后**同路径自动生效,不需改调用方**;</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>        - ``config_ref`` 经 ``Envelope.trace`` 携带(Δ-6)。</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>        if op not in POLICY_OPS:</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            raise_code(&quot;CYC-999&quot;, module=&quot;governance.policy&quot;, op=str(op),</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>                       hint=f&quot;policy.updated 的 op 必须 ∈ {sorted(POLICY_OPS)}&quot;</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                            &quot;(tighten 归 scope.updated)&quot;)</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>        if op == &quot;disable&quot; and not str(config_ref or &quot;&quot;).strip():</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>            raise_code(&quot;CFG-601&quot;, reason=&quot;越权&quot;, fields=[&quot;config_ref&quot;],</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>                       detail=&quot;op=disable 必须携带 config_ref(禁止静默放宽)&quot;)</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>        from pyharness.events.vocab import is_registered   # 允许:events(ADR-018)</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>        if not is_registered(EVENT_POLICY_UPDATED):</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>            log.debug(&quot;policy.updated 未入词表(S2-2 注册),降级未发 op=%s&quot;, op)</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>            return False</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>        if session is None:</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>            log.warning(&quot;policy.updated 未接线 session,降级未发 op=%s&quot;, op)</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>            return False</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>        payload = {</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>            &quot;policy_id&quot;: policy.policy_id,</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code>            &quot;version&quot;: policy.version,</code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>            &quot;fingerprint&quot;: policy.fingerprint,</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>            &quot;op&quot;: op,</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>            &quot;added&quot;: sorted(policy.disabled) if op == &quot;disable&quot; else [],</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code>            &quot;reason&quot;: str(reason),</code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        }</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        trace = {&quot;config_ref&quot;: str(config_ref)} if config_ref else None</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        await session.append(EVENT_POLICY_UPDATED, payload, actor=&quot;system&quot;,</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>                             sync=True, trace=trace)</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        return True</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code></code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code></code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>class PolicyEngine:</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>    &quot;&quot;&quot;策略的装配、解析与版本治理。**只提供策略,不做决策、不执行**。</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code></code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>    构造经 ``from_config``(Δ-4 注入式);执行对象(``GuardChain``)由装配层经</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>    ``chain_factory`` 注入——治理层只持有引用,``chain`` 为 None 时表示&quot;尚未接线</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>    (S2-1 常态)&quot;。</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code></code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>    def __init__(self, *, policy: Policy, registry: PolicyRegistry,</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>                 session: Any = None, bus: Any = None, chain: Any = None,</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                 chain_factory: Any = None) -&gt; None:</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>        self._policy: Policy = policy</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        self._registry: PolicyRegistry = registry</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        self._session: Any = session</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        self._bus: Any = bus</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        self._chain: Any = chain</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        self._chain_factory: Any = chain_factory</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code></code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>    # ------------------------------------------------------------ 装配</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>    @classmethod</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>    def from_config(cls, cfg: Any, *, session: Any = None, bus: Any = None,</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>                    rules: Iterable[Any] = (), params: Optional[Mapping] = None,</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>                    chain_factory: Any = None,</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>                    validator: Any = None, credential_paths: Any = None,</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>                    path_exists: Any = None, link_resolver: Any = None,</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>                    approval_channel: Optional[bool] = None,</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>                    policy_id: str = &quot;builtin:v1&quot;,</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                    version: str = &quot;1.0.0&quot;) -&gt; &quot;PolicyEngine&quot;:</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>        &quot;&quot;&quot;装配策略引擎(**注入式**,Δ-4)。</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code></code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>        - ``rules``:规则描述(``PolicyRule`` 或鸭子描述符,如</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>          ``tools_guard.describe_rules()`` 的产物)→ 登记进取注册表,登记序 = 求值序;</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>        - ``chain_factory``:执行对象的构造入口,由装配层传入</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>          (生产值 = ``tools_guard.from_config``);**治理层不 import 它**;</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>        - ``validator``/``credential_paths``/``path_exists``/``link_resolver``/</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>          ``approval_channel``:透传给 ``chain_factory``,并把**其声明式形态**</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>          (布尔/清单/注入存在性)纳入指纹 params——函数对象本身不入指纹;</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>        - 初始禁用面读 ``cfg.security.guards.disabled``(只读)。</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>        registry = PolicyRegistry()</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>        for r in rules:</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>            registry.register_rule(r)</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>        p = _canonical_params(params)</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>        if approval_channel is not None:</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>            p[&quot;approval_channel&quot;] = bool(approval_channel)</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>        if credential_paths is not None:</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>            p[&quot;credential_paths&quot;] = sorted(str(x) for x in credential_paths)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>        p[&quot;injected&quot;] = sorted(n for n, v in ((&quot;validator&quot;, validator),</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>                                              (&quot;path_exists&quot;, path_exists),</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>                                              (&quot;link_resolver&quot;, link_resolver))</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>                               if v is not None)</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        policy = Policy(policy_id=policy_id, version=version,</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>                        rules=registry.rules(),</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>                        disabled=frozenset(_disabled_from_cfg(cfg)),</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>                        params=p)</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>        chain = None</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>        if callable(chain_factory):</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>            chain = chain_factory(cfg, session=session, bus=bus,</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>                                  validator=validator,</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>                                  credential_paths=credential_paths,</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>                                  path_exists=path_exists,</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>                                  link_resolver=link_resolver,</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>                                  approval_channel=approval_channel)</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>        return cls(policy=policy, registry=registry, session=session, bus=bus,</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>                   chain=chain, chain_factory=chain_factory)</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code></code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>    # ------------------------------------------------------------ 只读解析</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>    def current(self, scope: Any = None) -&gt; Policy:</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code>        &quot;&quot;&quot;会话当前绑定的策略(纯只读)。M2 单策略集 → 返回本引擎的 Policy。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>        return self._policy</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code></code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>    def resolve(self, call: Any, scope: Any = None) -&gt; Policy:</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>        &quot;&quot;&quot;解析调用命中的策略(纯只读)。M2:恒为 ``current()``——</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>        规则级命中在 S3 的 ``DecisionEngine`` 中展开(本步不做决策)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>        return self.current(scope)</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code></code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code>    def fingerprint(self, policy: Optional[Policy] = None) -&gt; str:</code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>        &quot;&quot;&quot;策略指纹(内容哈希);缺省取当前策略。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>        return (policy or self._policy).fingerprint</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code></code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>    def registry(self) -&gt; PolicyRegistry:</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>        return self._registry</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code></code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>    @property</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>    def policy(self) -&gt; Policy:</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        return self._policy</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code></code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>    @property</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>    def chain(self) -&gt; Any:</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>        &quot;&quot;&quot;执行对象(未接线 → None;S2-1 常态)。治理层不执行它。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>        return self._chain</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code></code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>    # ------------------------------------------------------------ 治理动作</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>    async def disable_rule(self, rule_id: str, *, config_ref: str,</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>                           reason: str = &quot;guard-disabled&quot;) -&gt; Policy:</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>        &quot;&quot;&quot;禁用一条规则并留痕(Δ-2/Δ-3):Policy 派生 + 发 policy.updated(op=disable)。</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code></code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>        返回新 Policy(已禁用);事件未注册/未接线时 ``emit_updated`` 降级返回</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code>        False,**策略状态仍已派生**——留痕缺口由 S2-2 注册后消除(此前为降级态)。</code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>        new_policy = self._policy.with_rule_disabled(rule_id,</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code>                                                     config_ref=config_ref)</code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>        if new_policy is not self._policy:</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>            self._policy = new_policy</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>            await self._registry.emit_updated(new_policy, &quot;disable&quot;,</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>                                              reason=reason,</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>                                              config_ref=config_ref,</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>                                              session=self._session)</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>        return self._policy</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code></code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>    async def enable_rule(self, rule_id: str, *,</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>                          reason: str = &quot;guard-enabled&quot;) -&gt; Policy:</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>        &quot;&quot;&quot;重新启用一条规则并留痕:Policy 派生 + 发 policy.updated(op=enable)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code>        new_policy = self._policy.with_rule_enabled(rule_id)</code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>        if new_policy is not self._policy:</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>            self._policy = new_policy</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code>            await self._registry.emit_updated(new_policy, &quot;enable&quot;,</code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>                                              reason=reason,</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>                                              session=self._session)</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>        return self._policy</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code></code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>    async def emit_assembled(self, *, reason: str = &quot;assembly&quot;) -&gt; bool:</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>        &quot;&quot;&quot;装配期留痕(op=add;S2-3 装配后调用)。未注册/未接线 → 降级 False。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>        return await self._registry.emit_updated(self._policy, &quot;add&quot;,</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>                                                 reason=reason,</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>                                                 session=self._session)</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code></code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code></code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>__all__ = [</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>    &quot;POLICY_OPS&quot;, &quot;EVENT_POLICY_UPDATED&quot;, &quot;POLICY_UPDATED_FIELDS&quot;,</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code>    &quot;PolicyRule&quot;, &quot;Policy&quot;, &quot;PolicyRegistry&quot;, &quot;PolicyEngine&quot;,</code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>    &quot;compute_fingerprint&quot;,</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>

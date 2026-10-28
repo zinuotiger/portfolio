@@ -1,0 +1,598 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>pyharness/core/task_queue.py · GitHub 源码预览</title><link rel="stylesheet" href="../../../assets/app.css"></head><body><nav class="source-nav"><a id="back" href="../../../architecture-detailed.html">← 返回架构图</a><a id="remote" target="_blank" rel="noopener noreferrer" href="https://github.com/zinuotiger/pyharness/blob/f29863a664a78862b3bdf4e8f1224f36e8e5d67e/pyharness/core/task_queue.py">GitHub 固定提交 ↗</a><span>main · f29863a664a7 · 598 行</span></nav><main class="wrap source-page"><h1>pyharness/core/task_queue.py</h1><p class="muted">完整文件预览。Git blob（文件对象）：745a8f0a6b64bfbff8d65f776dd65f8fc4806d00<br>SHA-256（内容校验）：52a404164211c9ba03611b3814267517bbf7c0a5002a83f3a5001f52c363ac12</p><p><a href="../../../architecture-detailed.html?node=task_queue">Task Queue（会话任务队列）</a></p><!-- source-structure:start --><details id="source-structure"><summary>源码结构目录 · 25 个类、函数与方法</summary><ul><li><a href="#L73">TaskQueue（类） · L73–L593</a><ul><li><a href="#L83">TaskQueue.__init__（方法） · L83–L114</a></li><li><a href="#L117">TaskQueue._suspended（方法） · L117–L119</a></li><li><a href="#L121">TaskQueue._next_id（方法） · L121–L126</a></li><li><a href="#L128">TaskQueue._ms_since（方法） · L128–L131</a></li><li><a href="#L133">TaskQueue._settle（方法） · L133–L144</a></li><li><a href="#L146">TaskQueue._request_cancel（异步方法） · L146–L164</a></li><li><a href="#L167">TaskQueue.submit（异步方法） · L167–L218</a></li><li><a href="#L221">TaskQueue._pump（异步方法） · L221–L258</a></li><li><a href="#L261">TaskQueue._run_task（异步方法） · L261–L338</a></li><li><a href="#L340">TaskQueue._terminal_event（异步方法） · L340–L346</a></li><li><a href="#L348">TaskQueue._write_terminal_event（异步方法） · L348–L368</a></li><li><a href="#L370">TaskQueue._close_segment_guarded（异步方法） · L370–L383</a></li><li><a href="#L385">TaskQueue._run_runner（异步方法） · L385–L400</a></li><li><a href="#L403">TaskQueue.pause（异步方法） · L403–L405</a></li><li><a href="#L407">TaskQueue._pause_owned（异步方法） · L407–L423</a></li><li><a href="#L425">TaskQueue.resume（异步方法） · L425–L427</a></li><li><a href="#L429">TaskQueue._resume_owned（异步方法） · L429–L446</a></li><li><a href="#L449">TaskQueue.shutdown（异步方法） · L449–L464</a></li><li><a href="#L466">TaskQueue._shutdown_owned（异步方法） · L466–L500</a></li><li><a href="#L502">TaskQueue.cancel（异步方法） · L502–L525</a></li><li><a href="#L528">TaskQueue.status（方法） · L528–L536</a></li><li><a href="#L539">TaskQueue.wait_for（异步方法） · L539–L565</a></li><li><a href="#L568">TaskQueue.open_segment（异步方法） · L568–L580</a></li><li><a href="#L582">TaskQueue.close_segment（异步方法） · L582–L593</a></li></ul></li></ul></details><!-- source-structure:end --><div class="source-code"><div class="code-line" id="L1"><a class="line-number" href="#L1">1</a><code>&quot;&quot;&quot;pyharness/core/task_queue.py — 会话级 FIFO 顺序任务队列 (specs/task_queue.py.md 契约;阶段 4)</code></div>
+<div class="code-line" id="L2"><a class="line-number" href="#L2">2</a><code></code></div>
+<div class="code-line" id="L3"><a class="line-number" href="#L3">3</a><code>功能编号:F043(顺序任务队列)· F044(每任务独立日志段)· F025(取消传播联动)· F015(审批等待暂停联动)。</code></div>
+<div class="code-line" id="L4"><a class="line-number" href="#L4">4</a><code>一句话:一次用户意图 = 一个任务;同一时刻仅一个 running、其余 waiting(F043,一个做完下一个);</code></div>
+<div class="code-line" id="L5"><a class="line-number" href="#L5">5</a><code>每个任务执行期由泵写 segment.start(强同步)/segment.end 围出独立日志段(F044,以 task_id 切分</code></div>
+<div class="code-line" id="L6"><a class="line-number" href="#L6">6</a><code>查询/回放/预算);暂停/恢复/取消/状态查询全部事件化;plan_mode(F046)/schedule(F048)/jobs(F051)</code></div>
+<div class="code-line" id="L7"><a class="line-number" href="#L7">7</a><code>均经本模块入队复用纪律(编排地基)。</code></div>
+<div class="code-line" id="L8"><a class="line-number" href="#L8">8</a><code></code></div>
+<div class="code-line" id="L9"><a class="line-number" href="#L9">9</a><code>本模块为纯编排内核:消费 session.append(事件)、注入 runner(执行器,阶段 4 agent_loop 的</code></div>
+<div class="code-line" id="L10"><a class="line-number" href="#L10">10</a><code>run_for_task seam)、errors(PyHError/F020);不 import agent_loop/llm/scope 等外围能力(INV-08),</code></div>
+<div class="code-line" id="L11"><a class="line-number" href="#L11">11</a><code>执行器一律经构造参数注入,入队者(plan/schedule/CLI)只认 submit/wait_for 面。</code></div>
+<div class="code-line" id="L12"><a class="line-number" href="#L12">12</a><code></code></div>
+<div class="code-line" id="L13"><a class="line-number" href="#L13">13</a><code>偏离说明(契约=specs/task_queue.py.md;以下为与既有实现/规格冲突处的取舍,均列理由,</code></div>
+<div class="code-line" id="L14"><a class="line-number" href="#L14">14</a><code>与 agent.py/commands.py 同款先例,已入模块 docstring 供审查):</code></div>
+<div class="code-line" id="L15"><a class="line-number" href="#L15">15</a><code>1. agent_loop.run_for_task(t)/cancel_current(task_id) 是阶段 4 agent_loop 的未来接口</code></div>
+<div class="code-line" id="L16"><a class="line-number" href="#L16">16</a><code>   (当前 agent_loop.py 仅提供 run(ctx)/wake(env, ctx) 旧面,见 specs/agent_loop.py.md)→</code></div>
+<div class="code-line" id="L17"><a class="line-number" href="#L17">17</a><code>   本模块以注入 runner seam 实现执行:构造参数 runner 需提供 async run_for_task(task)</code></div>
+<div class="code-line" id="L18"><a class="line-number" href="#L18">18</a><code>   (Task 对象,内含 id/intent/meta,runner 自行绑定 envelope.task_id);未注入 runner 时</code></div>
+<div class="code-line" id="L19"><a class="line-number" href="#L19">19</a><code>   任务按 CYC-999 快速失败(防 S-1&quot;伪造已执行&quot;:宁失败不静默假完成)。不 import agent_loop。</code></div>
+<div class="code-line" id="L20"><a class="line-number" href="#L20">20</a><code>2. 取消传播(F025)实现:cancel(running) 先落 system.cancelled 审计,再尽力调用</code></div>
+<div class="code-line" id="L21"><a class="line-number" href="#L21">21</a><code>   runner.cancel_current(task_id)(若存在,允许同步/异步),最后兜底取消&quot;执行子任务&quot;</code></div>
+<div class="code-line" id="L22"><a class="line-number" href="#L22">22</a><code>   (self._exec,包裹 run_for_task 的独立 asyncio.Task)——协作式取消把 CancelledError 注入</code></div>
+<div class="code-line" id="L23"><a class="line-number" href="#L23">23</a><code>   执行协程,runner 内部 re-raise 不吞语义由 agent_loop 自身保证;spec 伪码在泵内联布局下</code></div>
+<div class="code-line" id="L24"><a class="line-number" href="#L24">24</a><code>   re-raise 会直接杀死泵单例(与&quot;running 取消后队首自动接&quot;GWT-F043-02 互斥),故泵吸收</code></div>
+<div class="code-line" id="L25"><a class="line-number" href="#L25">25</a><code>   任务级取消并自动接队首;&quot;取消不吞&quot;由 system.cancelled + task.failed(cancelled) 事件、</code></div>
+<div class="code-line" id="L26"><a class="line-number" href="#L26">26</a><code>   cancel() 返回 True、wait_for 返回 code=&quot;cancelled&quot; 三通道表达。</code></div>
+<div class="code-line" id="L27"><a class="line-number" href="#L27">27</a><code>3. pause() 伪码&quot;先计数再判 _suspended()&quot;恒真导致 queue.suspended 永不落盘(spec 伪码 bug)</code></div>
+<div class="code-line" id="L28"><a class="line-number" href="#L28">28</a><code>   → 按&quot;挂起状态从无到有(全部计数 0→1)才发 queue.suspended;已挂期间任何新 pause</code></div>
+<div class="code-line" id="L29"><a class="line-number" href="#L29">29</a><code>   (同/异原因)仅计数合并不发事件&quot;实现——与 spec 注释&quot;已挂:仅计数,event 不重复&quot;</code></div>
+<div class="code-line" id="L30"><a class="line-number" href="#L30">30</a><code>   及 EVENT-SCHEMA §3.5.3&quot;重复挂起合并&quot;一致(先判后计数)。</code></div>
+<div class="code-line" id="L31"><a class="line-number" href="#L31">31</a><code>4. queue.resumed 的 payload 模型(EVENT-SCHEMA §3.5.3 权威,extra=forbid)无 by 字段——</code></div>
+<div class="code-line" id="L32"><a class="line-number" href="#L32">32</a><code>   伪码 resumed 带 by 会 EVT-100 拒写 → resumed 事件只落 reason;resume(by=...) 参数</code></div>
+<div class="code-line" id="L33"><a class="line-number" href="#L33">33</a><code>   保留签名对称但事件不带 by(与 EVENT-SCHEMA 字段级权威一致)。</code></div>
+<div class="code-line" id="L34"><a class="line-number" href="#L34">34</a><code>5. QUE-001 为 ERR §2.11 功能特性码,errors.py 的 register_default_codes 未收录;raise_code</code></div>
+<div class="code-line" id="L35"><a class="line-number" href="#L35">35</a><code>   会把未登记码改写为 CYC-999(语义不符)→ 按 BUSY 同款先例直接构造 PyHError(&quot;QUE-001&quot;)</code></div>
+<div class="code-line" id="L36"><a class="line-number" href="#L36">36</a><code>   (code 字段保持字面量 QUE-001,供调用方/测试按 .code 断言)。</code></div>
+<div class="code-line" id="L37"><a class="line-number" href="#L37">37</a><code>6. wait_for 增加 _done 终态缓存:伪码&quot;pop 后 result&quot;使终态任务的二次 wait_for 悬挂(新 future</code></div>
+<div class="code-line" id="L38"><a class="line-number" href="#L38">38</a><code>   永不落);缓存 + 未知 task_id 显式 EVT-100(防挂死)保证重复等待幂等;_futures 只记在途等待。</code></div>
+<div class="code-line" id="L39"><a class="line-number" href="#L39">39</a><code>7. 构造签名含 session/runner/max_queue(默认 32,与 CFG 锁死/loop.task_queue_max 一致)——</code></div>
+<div class="code-line" id="L40"><a class="line-number" href="#L40">40</a><code>   spec 数据结构表未给构造参数;按 INV-08 注入纪律落地(session 事件源 + runner 执行器)。</code></div>
+<div class="code-line" id="L41"><a class="line-number" href="#L41">41</a><code></code></div>
+<div class="code-line" id="L42"><a class="line-number" href="#L42">42</a><code>数据纪律:队列自身的状态位(running/_q/_pause_reasons)为可弃重建的执行态;任务终态一律以</code></div>
+<div class="code-line" id="L43"><a class="line-number" href="#L43">43</a><code>事件为准(INV-01),Task 对象不含状态位;status()/wait_for 结果均由事件流派生/配对。</code></div>
+<div class="code-line" id="L44"><a class="line-number" href="#L44">44</a><code>&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L45"><a class="line-number" href="#L45">45</a><code>from __future__ import annotations</code></div>
+<div class="code-line" id="L46"><a class="line-number" href="#L46">46</a><code></code></div>
+<div class="code-line" id="L47"><a class="line-number" href="#L47">47</a><code>import asyncio</code></div>
+<div class="code-line" id="L48"><a class="line-number" href="#L48">48</a><code>import inspect</code></div>
+<div class="code-line" id="L49"><a class="line-number" href="#L49">49</a><code>import itertools</code></div>
+<div class="code-line" id="L50"><a class="line-number" href="#L50">50</a><code>import logging</code></div>
+<div class="code-line" id="L51"><a class="line-number" href="#L51">51</a><code>import time</code></div>
+<div class="code-line" id="L52"><a class="line-number" href="#L52">52</a><code>from collections import Counter, deque</code></div>
+<div class="code-line" id="L53"><a class="line-number" href="#L53">53</a><code>from dataclasses import dataclass, field</code></div>
+<div class="code-line" id="L54"><a class="line-number" href="#L54">54</a><code>from typing import Any, Deque, Optional</code></div>
+<div class="code-line" id="L55"><a class="line-number" href="#L55">55</a><code></code></div>
+<div class="code-line" id="L56"><a class="line-number" href="#L56">56</a><code>from pyharness.errors import PyHError, raise_code</code></div>
+<div class="code-line" id="L57"><a class="line-number" href="#L57">57</a><code># 唯一的外围 import(与 agent_loop 同款):BudgetExhausted 是**循环控制信号**,</code></div>
+<div class="code-line" id="L58"><a class="line-number" href="#L58">58</a><code># 非 PyHError 子类;不引用它则预算终态会落入 `except Exception` 兜底被记成</code></div>
+<div class="code-line" id="L59"><a class="line-number" href="#L59">59</a><code># CYC-999,丢掉 ERR.md 已登记的 LLM-305/`reason=budget` 语义(O-3)。scope 是</code></div>
+<div class="code-line" id="L60"><a class="line-number" href="#L60">60</a><code># 纯策略容器(无下游脊柱依赖),不违反&quot;不 import 外围执行件&quot;的装配纪律。</code></div>
+<div class="code-line" id="L61"><a class="line-number" href="#L61">61</a><code>from pyharness.core.scope import BudgetExhausted  # noqa: E402</code></div>
+<div class="code-line" id="L62"><a class="line-number" href="#L62">62</a><code></code></div>
+<div class="code-line" id="L63"><a class="line-number" href="#L63">63</a><code></code></div>
+<div class="code-line" id="L64"><a class="line-number" href="#L64">64</a><code># 队深上限默认值(CFG 锁死 32;PARAMETER-ANCHOR 配置默认值列)</code></div>
+<div class="code-line" id="L65"><a class="line-number" href="#L65">65</a><code></code></div>
+<div class="code-line" id="L66"><a class="line-number" href="#L66">66</a><code></code></div>
+<div class="code-line" id="L67"><a class="line-number" href="#L67">67</a><code># ------------------------------------------------------------------ 数据结构</code></div>
+<div class="code-line" id="L68"><a class="line-number" href="#L68">68</a><code></code></div>
+<div class="code-line" id="L69"><a class="line-number" href="#L69">69</a><code></code></div>
+<div class="code-line" id="L70"><a class="line-number" href="#L70">70</a><code># ------------------------------------------------------------------ TaskQueue</code></div>
+<div class="code-line" id="L71"><a class="line-number" href="#L71">71</a><code>from pyharness.core.task_models import (log, DEFAULT_MAX_QUEUE, queue_kwargs_of, Task, TaskResult, QueueStatus)</code></div>
+<div class="code-line" id="L72"><a class="line-number" href="#L72">72</a><code></code></div>
+<div class="code-line" id="L73"><a class="line-number" href="#L73">73</a><code>class TaskQueue:</code></div>
+<div class="code-line" id="L74"><a class="line-number" href="#L74">74</a><code>    &quot;&quot;&quot;会话级 FIFO 顺序任务队列(F043/F044 编排地基)。</code></div>
+<div class="code-line" id="L75"><a class="line-number" href="#L75">75</a><code></code></div>
+<div class="code-line" id="L76"><a class="line-number" href="#L76">76</a><code>    私有字段(spec 清单):_q(waiting deque,尾插头弹)、_running(执行中任务,至多一个)、</code></div>
+<div class="code-line" id="L77"><a class="line-number" href="#L77">77</a><code>    _pause_reasons(Counter,计数&gt;0 即 suspended)、_pump_task(泵单例句柄)、_futures</code></div>
+<div class="code-line" id="L78"><a class="line-number" href="#L78">78</a><code>    (task_id → 终态 Future,wait_for 填充);实现附加:_done(终态 TaskResult 缓存,幂等</code></div>
+<div class="code-line" id="L79"><a class="line-number" href="#L79">79</a><code>    等待)、_exec(当前执行子任务,取消目标)、_segments(已开段 task_id 集合,段配对闸)、</code></div>
+<div class="code-line" id="L80"><a class="line-number" href="#L80">80</a><code>    _cancel_pending(取消请求在子任务创建前到达的传递旗标)、_id_counter(t-N 单调源)。</code></div>
+<div class="code-line" id="L81"><a class="line-number" href="#L81">81</a><code>    &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L82"><a class="line-number" href="#L82">82</a><code></code></div>
+<div class="code-line" id="L83"><a class="line-number" href="#L83">83</a><code>    def __init__(self, session: Any, *, runner: Any = None,</code></div>
+<div class="code-line" id="L84"><a class="line-number" href="#L84">84</a><code>                 max_queue: int = DEFAULT_MAX_QUEUE) -&gt; None:</code></div>
+<div class="code-line" id="L85"><a class="line-number" href="#L85">85</a><code>        &quot;&quot;&quot;构造队列。</code></div>
+<div class="code-line" id="L86"><a class="line-number" href="#L86">86</a><code></code></div>
+<div class="code-line" id="L87"><a class="line-number" href="#L87">87</a><code>        session = SessionLog 事件源(append 唯一写口);runner = 执行器,须提供 async</code></div>
+<div class="code-line" id="L88"><a class="line-number" href="#L88">88</a><code>        run_for_task(task)(阶段 4 agent_loop 接口 seam,见偏离 1),可选 cancel_current</code></div>
+<div class="code-line" id="L89"><a class="line-number" href="#L89">89</a><code>        (task_id);max_queue = waiting 队深上限(默认 32,CFG 锁死;满 → QUE-001)。</code></div>
+<div class="code-line" id="L90"><a class="line-number" href="#L90">90</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L91"><a class="line-number" href="#L91">91</a><code>        self._session = session</code></div>
+<div class="code-line" id="L92"><a class="line-number" href="#L92">92</a><code>        self._runner = runner</code></div>
+<div class="code-line" id="L93"><a class="line-number" href="#L93">93</a><code>        self._max_queue: int = int(max_queue)</code></div>
+<div class="code-line" id="L94"><a class="line-number" href="#L94">94</a><code>        self._q: Deque[Task] = deque()</code></div>
+<div class="code-line" id="L95"><a class="line-number" href="#L95">95</a><code>        self._running: Optional[Task] = None</code></div>
+<div class="code-line" id="L96"><a class="line-number" href="#L96">96</a><code>        self._pause_reasons: Counter[str] = Counter()</code></div>
+<div class="code-line" id="L97"><a class="line-number" href="#L97">97</a><code>        self._pause_lock = asyncio.Lock()       # pause/resume 的落盘与唤醒不可交错</code></div>
+<div class="code-line" id="L98"><a class="line-number" href="#L98">98</a><code>        self._resume_evt = asyncio.Event()               # 泵挂起唤醒(非忙等)</code></div>
+<div class="code-line" id="L99"><a class="line-number" href="#L99">99</a><code>        self._enqueue_ready = asyncio.Event()            # 入队事件写完后才允许泵消费</code></div>
+<div class="code-line" id="L100"><a class="line-number" href="#L100">100</a><code>        self._pump_task: Optional[asyncio.Task] = None   # 泵单例句柄(防多泵)</code></div>
+<div class="code-line" id="L101"><a class="line-number" href="#L101">101</a><code>        self._exec: Optional[asyncio.Task] = None        # 执行子任务(取消目标)</code></div>
+<div class="code-line" id="L102"><a class="line-number" href="#L102">102</a><code>        self._futures: dict[str, asyncio.Future] = {}    # 在途等待(task_id → Future)</code></div>
+<div class="code-line" id="L103"><a class="line-number" href="#L103">103</a><code>        self._done: dict[str, TaskResult] = {}           # 终态缓存(重复等待幂等)</code></div>
+<div class="code-line" id="L104"><a class="line-number" href="#L104">104</a><code>        self._segments: set[str] = set()                 # 已开段 task_id(配对闸,F044)</code></div>
+<div class="code-line" id="L105"><a class="line-number" href="#L105">105</a><code>        self._cancel_pending: Optional[str] = None       # 取消旗标(见 _run_task)</code></div>
+<div class="code-line" id="L106"><a class="line-number" href="#L106">106</a><code>        self._terminal_lock = asyncio.Lock()</code></div>
+<div class="code-line" id="L107"><a class="line-number" href="#L107">107</a><code>        self._terminals: dict[str, str] = {}</code></div>
+<div class="code-line" id="L108"><a class="line-number" href="#L108">108</a><code>        self._closing: bool = False                      # 收尾闸(shutdown 幂等位)</code></div>
+<div class="code-line" id="L109"><a class="line-number" href="#L109">109</a><code>        history = getattr(session, &#x27;events_after&#x27;, None)</code></div>
+<div class="code-line" id="L110"><a class="line-number" href="#L110">110</a><code>        self._used_ids = {e.payload[&#x27;task_id&#x27;] for e in history(0)</code></div>
+<div class="code-line" id="L111"><a class="line-number" href="#L111">111</a><code>                          if e.type.startswith(&#x27;task.&#x27;) and e.payload.get(&#x27;task_id&#x27;)} if callable(history) else set()</code></div>
+<div class="code-line" id="L112"><a class="line-number" href="#L112">112</a><code>        numbers = [int(ident[2:]) for ident in self._used_ids</code></div>
+<div class="code-line" id="L113"><a class="line-number" href="#L113">113</a><code>                   if ident.startswith(&#x27;t-&#x27;) and ident[2:].isdigit() and len(ident) &lt; 22]</code></div>
+<div class="code-line" id="L114"><a class="line-number" href="#L114">114</a><code>        self._id_counter = itertools.count(max(numbers, default=0) + 1)</code></div>
+<div class="code-line" id="L115"><a class="line-number" href="#L115">115</a><code></code></div>
+<div class="code-line" id="L116"><a class="line-number" href="#L116">116</a><code>    # ============================================================ 内部辅助</code></div>
+<div class="code-line" id="L117"><a class="line-number" href="#L117">117</a><code>    def _suspended(self) -&gt; bool:</code></div>
+<div class="code-line" id="L118"><a class="line-number" href="#L118">118</a><code>        &quot;&quot;&quot;挂起判定:任一原因计数 &gt; 0 即 suspended(重复挂起合并)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L119"><a class="line-number" href="#L119">119</a><code>        return bool(self._pause_reasons)</code></div>
+<div class="code-line" id="L120"><a class="line-number" href="#L120">120</a><code></code></div>
+<div class="code-line" id="L121"><a class="line-number" href="#L121">121</a><code>    def _next_id(self) -&gt; str:</code></div>
+<div class="code-line" id="L122"><a class="line-number" href="#L122">122</a><code>        &quot;&quot;&quot;自动 task_id:t-N 单调(self._seq.next() 语义,itertools 计数实现)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L123"><a class="line-number" href="#L123">123</a><code>        while True:</code></div>
+<div class="code-line" id="L124"><a class="line-number" href="#L124">124</a><code>            ident = f&quot;t-{next(self._id_counter)}&quot;</code></div>
+<div class="code-line" id="L125"><a class="line-number" href="#L125">125</a><code>            if ident not in self._used_ids:</code></div>
+<div class="code-line" id="L126"><a class="line-number" href="#L126">126</a><code>                return ident</code></div>
+<div class="code-line" id="L127"><a class="line-number" href="#L127">127</a><code></code></div>
+<div class="code-line" id="L128"><a class="line-number" href="#L128">128</a><code>    @staticmethod</code></div>
+<div class="code-line" id="L129"><a class="line-number" href="#L129">129</a><code>    def _ms_since(t0: float) -&gt; int:</code></div>
+<div class="code-line" id="L130"><a class="line-number" href="#L130">130</a><code>        &quot;&quot;&quot;耗时毫秒(perf_counter 差,仅计量,不参与事件字段)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L131"><a class="line-number" href="#L131">131</a><code>        return int((time.perf_counter() - t0) * 1000)</code></div>
+<div class="code-line" id="L132"><a class="line-number" href="#L132">132</a><code></code></div>
+<div class="code-line" id="L133"><a class="line-number" href="#L133">133</a><code>    def _settle(self, task_id: str, result: TaskResult) -&gt; None:</code></div>
+<div class="code-line" id="L134"><a class="line-number" href="#L134">134</a><code>        &quot;&quot;&quot;终态记账:结果入 _done 缓存 + 填充在途 Future(如有等待者)。</code></div>
+<div class="code-line" id="L135"><a class="line-number" href="#L135">135</a><code></code></div>
+<div class="code-line" id="L136"><a class="line-number" href="#L136">136</a><code>        与终态事件 append 同点调用(每任务至多一个终态);_done 供 wait_for 幂等读取,</code></div>
+<div class="code-line" id="L137"><a class="line-number" href="#L137">137</a><code>        _futures 记录在途等待(settle 后移除,防泄漏;等待者持本地引用不受影响)。</code></div>
+<div class="code-line" id="L138"><a class="line-number" href="#L138">138</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L139"><a class="line-number" href="#L139">139</a><code>        if task_id in self._done:</code></div>
+<div class="code-line" id="L140"><a class="line-number" href="#L140">140</a><code>            return</code></div>
+<div class="code-line" id="L141"><a class="line-number" href="#L141">141</a><code>        self._done[task_id] = result</code></div>
+<div class="code-line" id="L142"><a class="line-number" href="#L142">142</a><code>        fut = self._futures.pop(task_id, None)</code></div>
+<div class="code-line" id="L143"><a class="line-number" href="#L143">143</a><code>        if fut is not None and not fut.done():</code></div>
+<div class="code-line" id="L144"><a class="line-number" href="#L144">144</a><code>            fut.set_result(result)</code></div>
+<div class="code-line" id="L145"><a class="line-number" href="#L145">145</a><code></code></div>
+<div class="code-line" id="L146"><a class="line-number" href="#L146">146</a><code>    async def _request_cancel(self, task_id: str) -&gt; None:</code></div>
+<div class="code-line" id="L147"><a class="line-number" href="#L147">147</a><code>        &quot;&quot;&quot;请求取消执行中任务:先给 runner 协作通道,再兜底取消执行子任务。</code></div>
+<div class="code-line" id="L148"><a class="line-number" href="#L148">148</a><code></code></div>
+<div class="code-line" id="L149"><a class="line-number" href="#L149">149</a><code>        runner.cancel_current(task_id) 存在则先调用(同步/异步兼容,失败记日志不阻断);</code></div>
+<div class="code-line" id="L150"><a class="line-number" href="#L150">150</a><code>        随后无论 runner 是否已处理,都向 self._exec(包裹 run_for_task 的子任务)注入</code></div>
+<div class="code-line" id="L151"><a class="line-number" href="#L151">151</a><code>        协作取消——F025 语义:取消信号必达执行协程,由 agent_loop 自身 re-raise 不吞。</code></div>
+<div class="code-line" id="L152"><a class="line-number" href="#L152">152</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L153"><a class="line-number" href="#L153">153</a><code>        runner = self._runner</code></div>
+<div class="code-line" id="L154"><a class="line-number" href="#L154">154</a><code>        cc = getattr(runner, &quot;cancel_current&quot;, None) if runner is not None else None</code></div>
+<div class="code-line" id="L155"><a class="line-number" href="#L155">155</a><code>        if callable(cc):</code></div>
+<div class="code-line" id="L156"><a class="line-number" href="#L156">156</a><code>            try:</code></div>
+<div class="code-line" id="L157"><a class="line-number" href="#L157">157</a><code>                res = cc(task_id)</code></div>
+<div class="code-line" id="L158"><a class="line-number" href="#L158">158</a><code>                if inspect.isawaitable(res):</code></div>
+<div class="code-line" id="L159"><a class="line-number" href="#L159">159</a><code>                    await res</code></div>
+<div class="code-line" id="L160"><a class="line-number" href="#L160">160</a><code>            except Exception:  # noqa: BLE001 协作钩子失败不阻断兜底取消</code></div>
+<div class="code-line" id="L161"><a class="line-number" href="#L161">161</a><code>                log.exception(&quot;runner.cancel_current failed task=%s&quot;, task_id)</code></div>
+<div class="code-line" id="L162"><a class="line-number" href="#L162">162</a><code>        child = self._exec</code></div>
+<div class="code-line" id="L163"><a class="line-number" href="#L163">163</a><code>        if child is not None and not child.done():</code></div>
+<div class="code-line" id="L164"><a class="line-number" href="#L164">164</a><code>            child.cancel()                       # 兜底传播:不依赖 runner 实现细节</code></div>
+<div class="code-line" id="L165"><a class="line-number" href="#L165">165</a><code></code></div>
+<div class="code-line" id="L166"><a class="line-number" href="#L166">166</a><code>    # ============================================================ 入队(F043)</code></div>
+<div class="code-line" id="L167"><a class="line-number" href="#L167">167</a><code>    async def submit(self, intent: str, *, meta: Optional[dict] = None,</code></div>
+<div class="code-line" id="L168"><a class="line-number" href="#L168">168</a><code>                     task_id: Optional[str] = None) -&gt; str:</code></div>
+<div class="code-line" id="L169"><a class="line-number" href="#L169">169</a><code>        &quot;&quot;&quot;用户意图尾插入队并返回 task_id(F043)。</code></div>
+<div class="code-line" id="L170"><a class="line-number" href="#L170">170</a><code></code></div>
+<div class="code-line" id="L171"><a class="line-number" href="#L171">171</a><code>        空意图 EVT-100 拒;队深(仅 waiting)≥ max_queue 抛 QUE-001;写 task.enqueued</code></div>
+<div class="code-line" id="L172"><a class="line-number" href="#L172">172</a><code>        {pos};泵未在跑(或已退出)则启动泵单例——入队后即由队列接管执行。</code></div>
+<div class="code-line" id="L173"><a class="line-number" href="#L173">173</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L174"><a class="line-number" href="#L174">174</a><code>        if not intent or not intent.strip():      # 空意图拒入队(白名单前置)</code></div>
+<div class="code-line" id="L175"><a class="line-number" href="#L175">175</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;空任务意图,submit 拒绝&quot;)</code></div>
+<div class="code-line" id="L176"><a class="line-number" href="#L176">176</a><code>        if self._closing:                         # R12-3 三阶:收尾后拒新(不留悬挂等待者)</code></div>
+<div class="code-line" id="L177"><a class="line-number" href="#L177">177</a><code>            # 收尾后泵已退场(挂起态也直接退场)⇒ 入队任务永不执行、其等待者悬挂。</code></div>
+<div class="code-line" id="L178"><a class="line-number" href="#L178">178</a><code>            # 用队列自己的功能码 QUE-001(拒新);**直接构造**(该码未登记,raise_code</code></div>
+<div class="code-line" id="L179"><a class="line-number" href="#L179">179</a><code>            # 会改写为 CYC-999,见模块偏离 5),ctx.reason 区分&quot;满&quot;与&quot;已收尾&quot;。</code></div>
+<div class="code-line" id="L180"><a class="line-number" href="#L180">180</a><code>            raise PyHError(&quot;QUE-001&quot;, ctx={</code></div>
+<div class="code-line" id="L181"><a class="line-number" href="#L181">181</a><code>                &quot;reason&quot;: &quot;closed&quot;, &quot;queue&quot;: &quot;closed&quot;,</code></div>
+<div class="code-line" id="L182"><a class="line-number" href="#L182">182</a><code>                &quot;advice&quot;: &quot;会话队列已收尾(shutdown 后不再接新任务)&quot;})</code></div>
+<div class="code-line" id="L183"><a class="line-number" href="#L183">183</a><code>        if len(self._q) &gt;= self._max_queue:       # 队深上限(F043 边界:满拒)</code></div>
+<div class="code-line" id="L184"><a class="line-number" href="#L184">184</a><code>            raise PyHError(&quot;QUE-001&quot;, ctx={&quot;advice&quot;:</code></div>
+<div class="code-line" id="L185"><a class="line-number" href="#L185">185</a><code>                f&quot;队列已满(≥{self._max_queue}),请等当前任务结束或取消&quot;})</code></div>
+<div class="code-line" id="L186"><a class="line-number" href="#L186">186</a><code>        t = Task(id=task_id or self._next_id(),   # 显式 task_id 供 plan/schedule 溯源</code></div>
+<div class="code-line" id="L187"><a class="line-number" href="#L187">187</a><code>                 intent=intent, meta=meta)</code></div>
+<div class="code-line" id="L188"><a class="line-number" href="#L188">188</a><code>        if t.id in self._used_ids:</code></div>
+<div class="code-line" id="L189"><a class="line-number" href="#L189">189</a><code>            raise_code(&#x27;EVT-100&#x27;, hint=&#x27;Task ID has already been used in this session&#x27;)</code></div>
+<div class="code-line" id="L190"><a class="line-number" href="#L190">190</a><code>        # Reserve before the first await, including for concurrent submissions.</code></div>
+<div class="code-line" id="L191"><a class="line-number" href="#L191">191</a><code>        self._used_ids.add(t.id)</code></div>
+<div class="code-line" id="L192"><a class="line-number" href="#L192">192</a><code>        self._q.append(t)                         # FIFO:尾插</code></div>
+<div class="code-line" id="L193"><a class="line-number" href="#L193">193</a><code>        try:</code></div>
+<div class="code-line" id="L194"><a class="line-number" href="#L194">194</a><code>            env = await self._session.append(</code></div>
+<div class="code-line" id="L195"><a class="line-number" href="#L195">195</a><code>                &quot;task.enqueued&quot;, {&quot;task_id&quot;: t.id, &quot;pos&quot;: len(self._q)}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L196"><a class="line-number" href="#L196">196</a><code>            t.enqueued_seq = env.seq</code></div>
+<div class="code-line" id="L197"><a class="line-number" href="#L197">197</a><code>        except BaseException as exc:</code></div>
+<div class="code-line" id="L198"><a class="line-number" href="#L198">198</a><code>            # 拒写/取消不可遗留可执行任务；其容量预留也必须释放。</code></div>
+<div class="code-line" id="L199"><a class="line-number" href="#L199">199</a><code>            # 泵等待 enqueued_seq，故不会在此 await 窗口提前执行。</code></div>
+<div class="code-line" id="L200"><a class="line-number" href="#L200">200</a><code>            if t in self._q:</code></div>
+<div class="code-line" id="L201"><a class="line-number" href="#L201">201</a><code>                self._q.remove(t)</code></div>
+<div class="code-line" id="L202"><a class="line-number" href="#L202">202</a><code>            code = &quot;cancelled&quot; if isinstance(exc, asyncio.CancelledError) else \</code></div>
+<div class="code-line" id="L203"><a class="line-number" href="#L203">203</a><code>                getattr(exc, &quot;code&quot;, &quot;CYC-999&quot;)</code></div>
+<div class="code-line" id="L204"><a class="line-number" href="#L204">204</a><code>            self._settle(t.id, TaskResult(ok=False, code=code, summary=code))</code></div>
+<div class="code-line" id="L205"><a class="line-number" href="#L205">205</a><code>            try:</code></div>
+<div class="code-line" id="L206"><a class="line-number" href="#L206">206</a><code>                await self._terminal_event(&quot;task.failed&quot;, {</code></div>
+<div class="code-line" id="L207"><a class="line-number" href="#L207">207</a><code>                    &quot;task_id&quot;: t.id, &quot;reason&quot;: &quot;cancelled&quot; if code == &quot;cancelled&quot;</code></div>
+<div class="code-line" id="L208"><a class="line-number" href="#L208">208</a><code>                    else &quot;error&quot;, &quot;error&quot;: code})</code></div>
+<div class="code-line" id="L209"><a class="line-number" href="#L209">209</a><code>            except Exception:</code></div>
+<div class="code-line" id="L210"><a class="line-number" href="#L210">210</a><code>                log.warning(&quot;入队失败终态无法落盘 task=%s&quot;, t.id, exc_info=True)</code></div>
+<div class="code-line" id="L211"><a class="line-number" href="#L211">211</a><code>            raise</code></div>
+<div class="code-line" id="L212"><a class="line-number" href="#L212">212</a><code>        finally:</code></div>
+<div class="code-line" id="L213"><a class="line-number" href="#L213">213</a><code>            self._enqueue_ready.set()</code></div>
+<div class="code-line" id="L214"><a class="line-number" href="#L214">214</a><code>        # 泵单例(防重入):running 非空或泵仍在跑(含 done 的旧句柄)不重启</code></div>
+<div class="code-line" id="L215"><a class="line-number" href="#L215">215</a><code>        if self._running is None and (self._pump_task is None</code></div>
+<div class="code-line" id="L216"><a class="line-number" href="#L216">216</a><code>                                      or self._pump_task.done()):</code></div>
+<div class="code-line" id="L217"><a class="line-number" href="#L217">217</a><code>            self._pump_task = asyncio.create_task(self._pump())</code></div>
+<div class="code-line" id="L218"><a class="line-number" href="#L218">218</a><code>        return t.id</code></div>
+<div class="code-line" id="L219"><a class="line-number" href="#L219">219</a><code></code></div>
+<div class="code-line" id="L220"><a class="line-number" href="#L220">220</a><code>    # ============================================================ 泵(F043)</code></div>
+<div class="code-line" id="L221"><a class="line-number" href="#L221">221</a><code>    async def _pump(self) -&gt; None:</code></div>
+<div class="code-line" id="L222"><a class="line-number" href="#L222">222</a><code>        &quot;&quot;&quot;单飞泵:唯一执行放行口(F043 核心)。</code></div>
+<div class="code-line" id="L223"><a class="line-number" href="#L223">223</a><code></code></div>
+<div class="code-line" id="L224"><a class="line-number" href="#L224">224</a><code>        暂停期不弹任务(等裁决不饿死,resume 置位唤醒);队空即退场由下次 submit 唤醒;</code></div>
+<div class="code-line" id="L225"><a class="line-number" href="#L225">225</a><code>        否则队首 popleft 置 running 并执行,finally 清位使队首自动接续。任务级取消</code></div>
+<div class="code-line" id="L226"><a class="line-number" href="#L226">226</a><code>        (CancelledError)已在 _run_task 归一化事件化,泵吸收后继续;其余未预期异常</code></div>
+<div class="code-line" id="L227"><a class="line-number" href="#L227">227</a><code>        记堆栈仅本地(保泵活,队列继续);泵自身被外部取消则让路(不在此吞)。</code></div>
+<div class="code-line" id="L228"><a class="line-number" href="#L228">228</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L229"><a class="line-number" href="#L229">229</a><code>        while True:</code></div>
+<div class="code-line" id="L230"><a class="line-number" href="#L230">230</a><code>            if self._suspended():                 # 暂停期:只停消费,不丢队不超时</code></div>
+<div class="code-line" id="L231"><a class="line-number" href="#L231">231</a><code>                if self._closing:                 # 收尾中:挂起无意义,直接退场</code></div>
+<div class="code-line" id="L232"><a class="line-number" href="#L232">232</a><code>                    # R12-3 二阶:审批真挂起后,&quot;挂起态收尾&quot;成为常态;若在此继续等</code></div>
+<div class="code-line" id="L233"><a class="line-number" href="#L233">233</a><code>                    # `_resume_evt`,shutdown 会走 5s 超时兜底(会话收尾平白多等 5 秒)。</code></div>
+<div class="code-line" id="L234"><a class="line-number" href="#L234">234</a><code>                    # **不清** `_pause_reasons`:让审批侧(close 后 detach → cancel_all)</code></div>
+<div class="code-line" id="L235"><a class="line-number" href="#L235">235</a><code>                    # 照常补一条 `queue.resumed`,事件对保持配对。</code></div>
+<div class="code-line" id="L236"><a class="line-number" href="#L236">236</a><code>                    self._pump_task = None</code></div>
+<div class="code-line" id="L237"><a class="line-number" href="#L237">237</a><code>                    return</code></div>
+<div class="code-line" id="L238"><a class="line-number" href="#L238">238</a><code>                await self._resume_evt.wait()     # resume 时置位唤醒(非忙等)</code></div>
+<div class="code-line" id="L239"><a class="line-number" href="#L239">239</a><code>                self._resume_evt.clear()</code></div>
+<div class="code-line" id="L240"><a class="line-number" href="#L240">240</a><code>                continue</code></div>
+<div class="code-line" id="L241"><a class="line-number" href="#L241">241</a><code>            if not self._q:                       # 队空:泵退场;下次 submit 重启泵</code></div>
+<div class="code-line" id="L242"><a class="line-number" href="#L242">242</a><code>                self._pump_task = None</code></div>
+<div class="code-line" id="L243"><a class="line-number" href="#L243">243</a><code>                return</code></div>
+<div class="code-line" id="L244"><a class="line-number" href="#L244">244</a><code>            if not self._q[0].enqueued_seq:</code></div>
+<div class="code-line" id="L245"><a class="line-number" href="#L245">245</a><code>                await self._enqueue_ready.wait()</code></div>
+<div class="code-line" id="L246"><a class="line-number" href="#L246">246</a><code>                self._enqueue_ready.clear()</code></div>
+<div class="code-line" id="L247"><a class="line-number" href="#L247">247</a><code>                continue</code></div>
+<div class="code-line" id="L248"><a class="line-number" href="#L248">248</a><code>            t = self._q.popleft()</code></div>
+<div class="code-line" id="L249"><a class="line-number" href="#L249">249</a><code>            self._running = t                     # 队首接跑</code></div>
+<div class="code-line" id="L250"><a class="line-number" href="#L250">250</a><code>            try:</code></div>
+<div class="code-line" id="L251"><a class="line-number" href="#L251">251</a><code>                await self._run_task(t)           # 执行(内部含段锚与终态事件)</code></div>
+<div class="code-line" id="L252"><a class="line-number" href="#L252">252</a><code>            except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L253"><a class="line-number" href="#L253">253</a><code>                # 泵自身被外部取消:不伪造任务终态,让路(任务级取消在 _run_task 内已吸收)</code></div>
+<div class="code-line" id="L254"><a class="line-number" href="#L254">254</a><code>                raise</code></div>
+<div class="code-line" id="L255"><a class="line-number" href="#L255">255</a><code>            except Exception:                     # 泵自身兜底:单任务失败已事件化</code></div>
+<div class="code-line" id="L256"><a class="line-number" href="#L256">256</a><code>                log.exception(&quot;task pump crash task=%s&quot;, t.id)   # CYC-999 不吞但保泵活</code></div>
+<div class="code-line" id="L257"><a class="line-number" href="#L257">257</a><code>            finally:</code></div>
+<div class="code-line" id="L258"><a class="line-number" href="#L258">258</a><code>                self._running = None              # 释放 → while 自动接队首(F043)</code></div>
+<div class="code-line" id="L259"><a class="line-number" href="#L259">259</a><code></code></div>
+<div class="code-line" id="L260"><a class="line-number" href="#L260">260</a><code>    # ============================================================ 单任务执行</code></div>
+<div class="code-line" id="L261"><a class="line-number" href="#L261">261</a><code>    async def _run_task(self, t: Task) -&gt; None:</code></div>
+<div class="code-line" id="L262"><a class="line-number" href="#L262">262</a><code>        &quot;&quot;&quot;单任务生命周期执行器(F043/F044)。</code></div>
+<div class="code-line" id="L263"><a class="line-number" href="#L263">263</a><code></code></div>
+<div class="code-line" id="L264"><a class="line-number" href="#L264">264</a><code>        started → segment.start(强同步,经 open_segment) → runner.run_for_task</code></div>
+<div class="code-line" id="L265"><a class="line-number" href="#L265">265</a><code>        (执行子任务,可独立取消)→ 终态事件(completed/failed,每任务至多一个)→</code></div>
+<div class="code-line" id="L266"><a class="line-number" href="#L266">266</a><code>        segment.end 配对关闭。失败分级:PyHError 原码 / 未预期 CYC-999 / 取消</code></div>
+<div class="code-line" id="L267"><a class="line-number" href="#L267">267</a><code>        cancelled(归一化后泵吸收,接队首);终态落事件即 _settle(唤醒 wait_for)。</code></div>
+<div class="code-line" id="L268"><a class="line-number" href="#L268">268</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L269"><a class="line-number" href="#L269">269</a><code>        t0 = time.perf_counter()</code></div>
+<div class="code-line" id="L270"><a class="line-number" href="#L270">270</a><code>        try:</code></div>
+<div class="code-line" id="L271"><a class="line-number" href="#L271">271</a><code>            await self._session.append(&quot;task.started&quot;, {&quot;task_id&quot;: t.id},</code></div>
+<div class="code-line" id="L272"><a class="line-number" href="#L272">272</a><code>                                       actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L273"><a class="line-number" href="#L273">273</a><code>            # 强同步段锚:先落盘再执行,崩溃后回放段不悬空(F044)</code></div>
+<div class="code-line" id="L274"><a class="line-number" href="#L274">274</a><code>            start_seq = await self.open_segment(t.id)</code></div>
+<div class="code-line" id="L275"><a class="line-number" href="#L275">275</a><code>        except PyHError as e:                     # 会话已终态/日志拒写:任务不得悬挂</code></div>
+<div class="code-line" id="L276"><a class="line-number" href="#L276">276</a><code>            # 2026-09-21:此前 started/段锚在 try **之外**,会话若已终态(EVT-104)</code></div>
+<div class="code-line" id="L277"><a class="line-number" href="#L277">277</a><code>            # 会直接抛出 → 泵记 crash、`_settle` 被跳过 → **等待者永久悬挂**。</code></div>
+<div class="code-line" id="L278"><a class="line-number" href="#L278">278</a><code>            log.warning(&quot;任务无法开始(会话终态/日志拒写)task=%s code=%s&quot;,</code></div>
+<div class="code-line" id="L279"><a class="line-number" href="#L279">279</a><code>                        t.id, e.code)</code></div>
+<div class="code-line" id="L280"><a class="line-number" href="#L280">280</a><code>            self._settle(t.id, TaskResult(ok=False, code=e.code, summary=e.code,</code></div>
+<div class="code-line" id="L281"><a class="line-number" href="#L281">281</a><code>                                          duration_ms=0.0))</code></div>
+<div class="code-line" id="L282"><a class="line-number" href="#L282">282</a><code>            return                                # 未开段:无需关段</code></div>
+<div class="code-line" id="L283"><a class="line-number" href="#L283">283</a><code>        # 执行子任务:协作取消注入点(F025,取消不伤泵);runner 内部事件带 task_id 由</code></div>
+<div class="code-line" id="L284"><a class="line-number" href="#L284">284</a><code>        # agent_loop 自绑(本模块只引用 segment 围栏,不越权写执行期事件)</code></div>
+<div class="code-line" id="L285"><a class="line-number" href="#L285">285</a><code>        child = asyncio.create_task(self._run_runner(t))</code></div>
+<div class="code-line" id="L286"><a class="line-number" href="#L286">286</a><code>        self._exec = child</code></div>
+<div class="code-line" id="L287"><a class="line-number" href="#L287">287</a><code>        try:</code></div>
+<div class="code-line" id="L288"><a class="line-number" href="#L288">288</a><code>            # 取消请求在子任务创建前已到达(如 started/segment.start 落盘窗口)→ 补取消</code></div>
+<div class="code-line" id="L289"><a class="line-number" href="#L289">289</a><code>            if self._cancel_pending == t.id:</code></div>
+<div class="code-line" id="L290"><a class="line-number" href="#L290">290</a><code>                self._cancel_pending = None</code></div>
+<div class="code-line" id="L291"><a class="line-number" href="#L291">291</a><code>                child.cancel()</code></div>
+<div class="code-line" id="L292"><a class="line-number" href="#L292">292</a><code>            result = await child</code></div>
+<div class="code-line" id="L293"><a class="line-number" href="#L293">293</a><code>            reason = getattr(result, &quot;reason&quot;, None)</code></div>
+<div class="code-line" id="L294"><a class="line-number" href="#L294">294</a><code>            explicit_ok = reason == &quot;complete&quot; or (isinstance(result, TaskResult) and result.ok)</code></div>
+<div class="code-line" id="L295"><a class="line-number" href="#L295">295</a><code>            if not explicit_ok:</code></div>
+<div class="code-line" id="L296"><a class="line-number" href="#L296">296</a><code>                code = getattr(result, &quot;error_code&quot;, None) or getattr(result, &quot;code&quot;, None) or {</code></div>
+<div class="code-line" id="L297"><a class="line-number" href="#L297">297</a><code>                    &quot;cancelled&quot;: &quot;cancelled&quot;, &quot;budget&quot;: &quot;LLM-305&quot;, &quot;max_turns&quot;: &quot;CYC-999&quot;,</code></div>
+<div class="code-line" id="L298"><a class="line-number" href="#L298">298</a><code>                    &quot;stall&quot;: &quot;CYC-999&quot;}.get(reason, &quot;CYC-999&quot;)</code></div>
+<div class="code-line" id="L299"><a class="line-number" href="#L299">299</a><code>                await self._terminal_event(&quot;task.failed&quot;, {&quot;task_id&quot;: t.id,</code></div>
+<div class="code-line" id="L300"><a class="line-number" href="#L300">300</a><code>                    &quot;reason&quot;: &quot;cancelled&quot; if reason == &quot;cancelled&quot; else &quot;error&quot;, &quot;error&quot;: code})</code></div>
+<div class="code-line" id="L301"><a class="line-number" href="#L301">301</a><code>                self._settle(t.id, TaskResult(ok=False, code=code, summary=code,</code></div>
+<div class="code-line" id="L302"><a class="line-number" href="#L302">302</a><code>                    duration_ms=self._ms_since(t0)))</code></div>
+<div class="code-line" id="L303"><a class="line-number" href="#L303">303</a><code>                return</code></div>
+<div class="code-line" id="L304"><a class="line-number" href="#L304">304</a><code>            await self._terminal_event(&quot;task.completed&quot;,</code></div>
+<div class="code-line" id="L305"><a class="line-number" href="#L305">305</a><code>                {&quot;task_id&quot;: t.id, &quot;reason&quot;: &quot;ok&quot;})</code></div>
+<div class="code-line" id="L306"><a class="line-number" href="#L306">306</a><code>            self._settle(t.id, TaskResult(ok=True, duration_ms=self._ms_since(t0)))</code></div>
+<div class="code-line" id="L307"><a class="line-number" href="#L307">307</a><code>        except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L308"><a class="line-number" href="#L308">308</a><code>            if child.cancelled():                 # 取消源 = 执行子任务(API cancel)</code></div>
+<div class="code-line" id="L309"><a class="line-number" href="#L309">309</a><code>                # F025:归一化 failed(cancelled);事件 + settle 双通道表达&quot;取消不吞&quot;</code></div>
+<div class="code-line" id="L310"><a class="line-number" href="#L310">310</a><code>                await self._terminal_event(&quot;task.failed&quot;, {&quot;task_id&quot;: t.id,</code></div>
+<div class="code-line" id="L311"><a class="line-number" href="#L311">311</a><code>                    &quot;reason&quot;: &quot;cancelled&quot;, &quot;error&quot;: &quot;cancelled&quot;})</code></div>
+<div class="code-line" id="L312"><a class="line-number" href="#L312">312</a><code>                self._settle(t.id, TaskResult(ok=False, code=&quot;cancelled&quot;,</code></div>
+<div class="code-line" id="L313"><a class="line-number" href="#L313">313</a><code>                    summary=&quot;cancelled&quot;, duration_ms=self._ms_since(t0)))</code></div>
+<div class="code-line" id="L314"><a class="line-number" href="#L314">314</a><code>                # 不向泵 re-raise:取消已事件化,泵自动接队首(GWT-F043-02,见偏离 2)</code></div>
+<div class="code-line" id="L315"><a class="line-number" href="#L315">315</a><code>            else:</code></div>
+<div class="code-line" id="L316"><a class="line-number" href="#L316">316</a><code>                raise                             # 泵自身被外部取消:让路</code></div>
+<div class="code-line" id="L317"><a class="line-number" href="#L317">317</a><code>        except PyHError as e:                     # 业务失败:事件化并继续队列(F043)</code></div>
+<div class="code-line" id="L318"><a class="line-number" href="#L318">318</a><code>            await self._terminal_event(&quot;task.failed&quot;, {&quot;task_id&quot;: t.id,</code></div>
+<div class="code-line" id="L319"><a class="line-number" href="#L319">319</a><code>                &quot;reason&quot;: &quot;error&quot;, &quot;error&quot;: e.code})</code></div>
+<div class="code-line" id="L320"><a class="line-number" href="#L320">320</a><code>            self._settle(t.id, TaskResult(ok=False, code=e.code, summary=e.code,</code></div>
+<div class="code-line" id="L321"><a class="line-number" href="#L321">321</a><code>                duration_ms=self._ms_since(t0)))</code></div>
+<div class="code-line" id="L322"><a class="line-number" href="#L322">322</a><code>        except BudgetExhausted:                   # F032 预算硬闸:保预算终态语义</code></div>
+<div class="code-line" id="L323"><a class="line-number" href="#L323">323</a><code>            # 常态下 agent_loop 自行收敛 BudgetExhausted(reason=budget)不会到此处;</code></div>
+<div class="code-line" id="L324"><a class="line-number" href="#L324">324</a><code>            # 本分支是防御路径(预算在循环 try 之外被抛/执行器直抛)。无此分支则</code></div>
+<div class="code-line" id="L325"><a class="line-number" href="#L325">325</a><code>            # 落入下面的兜底 → error:CYC-999,丢掉 budget(ERR.md 登记 LLM-305)。</code></div>
+<div class="code-line" id="L326"><a class="line-number" href="#L326">326</a><code>            await self._terminal_event(&quot;task.failed&quot;, {&quot;task_id&quot;: t.id,</code></div>
+<div class="code-line" id="L327"><a class="line-number" href="#L327">327</a><code>                &quot;reason&quot;: &quot;budget&quot;, &quot;error&quot;: &quot;LLM-305&quot;})</code></div>
+<div class="code-line" id="L328"><a class="line-number" href="#L328">328</a><code>            self._settle(t.id, TaskResult(ok=False, code=&quot;LLM-305&quot;,</code></div>
+<div class="code-line" id="L329"><a class="line-number" href="#L329">329</a><code>                summary=&quot;budget&quot;, duration_ms=self._ms_since(t0)))</code></div>
+<div class="code-line" id="L330"><a class="line-number" href="#L330">330</a><code>        except Exception as e:                    # 未预期:归 CYC-999,堆栈仅本地</code></div>
+<div class="code-line" id="L331"><a class="line-number" href="#L331">331</a><code>            log.exception(&quot;task failed unexpected task=%s&quot;, t.id)</code></div>
+<div class="code-line" id="L332"><a class="line-number" href="#L332">332</a><code>            await self._terminal_event(&quot;task.failed&quot;, {&quot;task_id&quot;: t.id,</code></div>
+<div class="code-line" id="L333"><a class="line-number" href="#L333">333</a><code>                &quot;reason&quot;: &quot;error&quot;, &quot;error&quot;: &quot;CYC-999&quot;})</code></div>
+<div class="code-line" id="L334"><a class="line-number" href="#L334">334</a><code>            self._settle(t.id, TaskResult(ok=False, code=&quot;CYC-999&quot;,</code></div>
+<div class="code-line" id="L335"><a class="line-number" href="#L335">335</a><code>                summary=f&quot;{type(e).__name__}: {e}&quot;[:200], duration_ms=self._ms_since(t0)))</code></div>
+<div class="code-line" id="L336"><a class="line-number" href="#L336">336</a><code>        finally:</code></div>
+<div class="code-line" id="L337"><a class="line-number" href="#L337">337</a><code>            self._exec = None</code></div>
+<div class="code-line" id="L338"><a class="line-number" href="#L338">338</a><code>            await self._close_segment_guarded(t.id, start_seq)  # 配对关闭(F058)</code></div>
+<div class="code-line" id="L339"><a class="line-number" href="#L339">339</a><code></code></div>
+<div class="code-line" id="L340"><a class="line-number" href="#L340">340</a><code>    async def _terminal_event(self, type_: str, payload: dict) -&gt; None:</code></div>
+<div class="code-line" id="L341"><a class="line-number" href="#L341">341</a><code>        async with self._terminal_lock:</code></div>
+<div class="code-line" id="L342"><a class="line-number" href="#L342">342</a><code>            ident = payload[&#x27;task_id&#x27;]</code></div>
+<div class="code-line" id="L343"><a class="line-number" href="#L343">343</a><code>            if ident in self._terminals:</code></div>
+<div class="code-line" id="L344"><a class="line-number" href="#L344">344</a><code>                return</code></div>
+<div class="code-line" id="L345"><a class="line-number" href="#L345">345</a><code>            await self._write_terminal_event(type_, payload)</code></div>
+<div class="code-line" id="L346"><a class="line-number" href="#L346">346</a><code>            self._terminals[ident] = type_</code></div>
+<div class="code-line" id="L347"><a class="line-number" href="#L347">347</a><code></code></div>
+<div class="code-line" id="L348"><a class="line-number" href="#L348">348</a><code>    async def _write_terminal_event(self, type_: str, payload: dict) -&gt; None:</code></div>
+<div class="code-line" id="L349"><a class="line-number" href="#L349">349</a><code>        &quot;&quot;&quot;终态事件写入(**会话已终态时不吞结算**)。</code></div>
+<div class="code-line" id="L350"><a class="line-number" href="#L350">350</a><code></code></div>
+<div class="code-line" id="L351"><a class="line-number" href="#L351">351</a><code>        会话可在任务在途时收尾(`session.finished` 落盘 + 终态位置位)⇒ 本任务的</code></div>
+<div class="code-line" id="L352"><a class="line-number" href="#L352">352</a><code>        终态事件被 EVT-104 拒写。拒写只应损失&quot;事件留痕&quot;,**不得**让 `_settle` 被</code></div>
+<div class="code-line" id="L353"><a class="line-number" href="#L353">353</a><code>        跳过(等待者永久悬挂)。失败终态也允许在磁盘故障时结算失败，但成功终态</code></div>
+<div class="code-line" id="L354"><a class="line-number" href="#L354">354</a><code>        的 PERS-202 必须上抛，转为失败，禁止把落盘故障报告为成功。</code></div>
+<div class="code-line" id="L355"><a class="line-number" href="#L355">355</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L356"><a class="line-number" href="#L356">356</a><code>        try:</code></div>
+<div class="code-line" id="L357"><a class="line-number" href="#L357">357</a><code>            await self._session.append(type_, payload, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L358"><a class="line-number" href="#L358">358</a><code>        except PyHError as e:</code></div>
+<div class="code-line" id="L359"><a class="line-number" href="#L359">359</a><code>            if type_ == &quot;task.failed&quot; and e.code == &quot;PERS-202&quot;:</code></div>
+<div class="code-line" id="L360"><a class="line-number" href="#L360">360</a><code>                log.warning(&quot;失败终态无法落盘 task=%s code=%s;仍向等待者报告失败&quot;,</code></div>
+<div class="code-line" id="L361"><a class="line-number" href="#L361">361</a><code>                            payload.get(&quot;task_id&quot;), e.code)</code></div>
+<div class="code-line" id="L362"><a class="line-number" href="#L362">362</a><code>                return</code></div>
+<div class="code-line" id="L363"><a class="line-number" href="#L363">363</a><code>            if e.code == &quot;EVT-104&quot;:</code></div>
+<div class="code-line" id="L364"><a class="line-number" href="#L364">364</a><code>                log.warning(&quot;终态事件被拒(会话已终态)type=%s task=%s;&quot;</code></div>
+<div class="code-line" id="L365"><a class="line-number" href="#L365">365</a><code>                            &quot;结算继续(以 _done 缓存为准)&quot;,</code></div>
+<div class="code-line" id="L366"><a class="line-number" href="#L366">366</a><code>                            type_, payload.get(&quot;task_id&quot;))</code></div>
+<div class="code-line" id="L367"><a class="line-number" href="#L367">367</a><code>                return</code></div>
+<div class="code-line" id="L368"><a class="line-number" href="#L368">368</a><code>            raise</code></div>
+<div class="code-line" id="L369"><a class="line-number" href="#L369">369</a><code></code></div>
+<div class="code-line" id="L370"><a class="line-number" href="#L370">370</a><code>    async def _close_segment_guarded(self, task_id: str, start_seq: int) -&gt; None:</code></div>
+<div class="code-line" id="L371"><a class="line-number" href="#L371">371</a><code>        &quot;&quot;&quot;终态会话/磁盘故障关段失败时告警并释放内存段标记，不伪造落盘成功。</code></div>
+<div class="code-line" id="L372"><a class="line-number" href="#L372">372</a><code></code></div>
+<div class="code-line" id="L373"><a class="line-number" href="#L373">373</a><code>        此前 `close_segment` 直调 append ⇒ 会话已终态时在 finally 中抛出,泵记</code></div>
+<div class="code-line" id="L374"><a class="line-number" href="#L374">374</a><code>        &quot;task pump crash&quot; 且段锚永久不闭合(证据生产者不触发 ⇒ 该任务零证据)。</code></div>
+<div class="code-line" id="L375"><a class="line-number" href="#L375">375</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L376"><a class="line-number" href="#L376">376</a><code>        try:</code></div>
+<div class="code-line" id="L377"><a class="line-number" href="#L377">377</a><code>            await self.close_segment(task_id, start_seq)</code></div>
+<div class="code-line" id="L378"><a class="line-number" href="#L378">378</a><code>        except PyHError as e:</code></div>
+<div class="code-line" id="L379"><a class="line-number" href="#L379">379</a><code>            if e.code in {&quot;EVT-104&quot;, &quot;PERS-202&quot;}:</code></div>
+<div class="code-line" id="L380"><a class="line-number" href="#L380">380</a><code>                self._segments.discard(task_id)</code></div>
+<div class="code-line" id="L381"><a class="line-number" href="#L381">381</a><code>                log.warning(&quot;段锚未落盘闭合 task=%s code=%s&quot;, task_id, e.code)</code></div>
+<div class="code-line" id="L382"><a class="line-number" href="#L382">382</a><code>                return</code></div>
+<div class="code-line" id="L383"><a class="line-number" href="#L383">383</a><code>            raise</code></div>
+<div class="code-line" id="L384"><a class="line-number" href="#L384">384</a><code></code></div>
+<div class="code-line" id="L385"><a class="line-number" href="#L385">385</a><code>    async def _run_runner(self, t: Task) -&gt; Any:</code></div>
+<div class="code-line" id="L386"><a class="line-number" href="#L386">386</a><code>        &quot;&quot;&quot;执行器调用(子任务体):runner 须可调用 run_for_task(task)。</code></div>
+<div class="code-line" id="L387"><a class="line-number" href="#L387">387</a><code></code></div>
+<div class="code-line" id="L388"><a class="line-number" href="#L388">388</a><code>        未装配 runner 时按 CYC-999 快速失败(防 S-1 伪造已执行);接受对象方法或</code></div>
+<div class="code-line" id="L389"><a class="line-number" href="#L389">389</a><code>        裸可调用(同步/异步兼容,INV-08:执行器经构造注入,本模块不 import 外围)。</code></div>
+<div class="code-line" id="L390"><a class="line-number" href="#L390">390</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L391"><a class="line-number" href="#L391">391</a><code>        runner = self._runner</code></div>
+<div class="code-line" id="L392"><a class="line-number" href="#L392">392</a><code>        if runner is None:</code></div>
+<div class="code-line" id="L393"><a class="line-number" href="#L393">393</a><code>            raise_code(&quot;CYC-999&quot;, hint=&quot;队列未装配执行器(run_for_task),任务拒绝执行&quot;)</code></div>
+<div class="code-line" id="L394"><a class="line-number" href="#L394">394</a><code>        fn = getattr(runner, &quot;run_for_task&quot;, runner)</code></div>
+<div class="code-line" id="L395"><a class="line-number" href="#L395">395</a><code>        if not callable(fn):</code></div>
+<div class="code-line" id="L396"><a class="line-number" href="#L396">396</a><code>            raise_code(&quot;CYC-999&quot;, hint=f&quot;执行器不可调用: {type(runner).__name__}&quot;)</code></div>
+<div class="code-line" id="L397"><a class="line-number" href="#L397">397</a><code>        res = fn(t)</code></div>
+<div class="code-line" id="L398"><a class="line-number" href="#L398">398</a><code>        if inspect.isawaitable(res):</code></div>
+<div class="code-line" id="L399"><a class="line-number" href="#L399">399</a><code>            return await res</code></div>
+<div class="code-line" id="L400"><a class="line-number" href="#L400">400</a><code>        return res</code></div>
+<div class="code-line" id="L401"><a class="line-number" href="#L401">401</a><code></code></div>
+<div class="code-line" id="L402"><a class="line-number" href="#L402">402</a><code>    # ============================================================ 暂停/恢复</code></div>
+<div class="code-line" id="L403"><a class="line-number" href="#L403">403</a><code>    async def pause(self, reason: str, *, by: str = &quot;system&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L404"><a class="line-number" href="#L404">404</a><code>        async with self._pause_lock:</code></div>
+<div class="code-line" id="L405"><a class="line-number" href="#L405">405</a><code>            await self._pause_owned(reason, by=by)</code></div>
+<div class="code-line" id="L406"><a class="line-number" href="#L406">406</a><code></code></div>
+<div class="code-line" id="L407"><a class="line-number" href="#L407">407</a><code>    async def _pause_owned(self, reason: str, *, by: str) -&gt; None:</code></div>
+<div class="code-line" id="L408"><a class="line-number" href="#L408">408</a><code>        &quot;&quot;&quot;队列挂起(F015 联动):审批等待/预算暂停时停消费——只停弹任务,运行中任务</code></div>
+<div class="code-line" id="L409"><a class="line-number" href="#L409">409</a><code>        不受影响,等待不超时饿死。</code></div>
+<div class="code-line" id="L410"><a class="line-number" href="#L410">410</a><code></code></div>
+<div class="code-line" id="L411"><a class="line-number" href="#L411">411</a><code>        重复挂起合并:已挂期间任何新 pause(同/异原因)仅计数累加,不发事件;仅挂起</code></div>
+<div class="code-line" id="L412"><a class="line-number" href="#L412">412</a><code>        状态&quot;从无到有&quot;(全部计数 0→1)才写 queue.suspended——先 suspended 后 resumed</code></div>
+<div class="code-line" id="L413"><a class="line-number" href="#L413">413</a><code>        事件序,resume 全解除才写 resumed(EVENT-SCHEMA §3.5.3,见偏离 3)。</code></div>
+<div class="code-line" id="L414"><a class="line-number" href="#L414">414</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L415"><a class="line-number" href="#L415">415</a><code>        if not reason or not reason.strip():      # 空原因拒(防计数污染挂起态)</code></div>
+<div class="code-line" id="L416"><a class="line-number" href="#L416">416</a><code>            raise_code(&quot;EVT-100&quot;, hint=&quot;pause 原因不能为空(approval-pending/budget 等)&quot;)</code></div>
+<div class="code-line" id="L417"><a class="line-number" href="#L417">417</a><code>        if self._suspended():                     # 已挂:仅计数合并,event 不重复(EVT 词表)</code></div>
+<div class="code-line" id="L418"><a class="line-number" href="#L418">418</a><code>            self._pause_reasons[reason] += 1</code></div>
+<div class="code-line" id="L419"><a class="line-number" href="#L419">419</a><code>            return</code></div>
+<div class="code-line" id="L420"><a class="line-number" href="#L420">420</a><code>        self._pause_reasons[reason] += 1          # 首挂起(0→1):发事件 + 泵阻塞</code></div>
+<div class="code-line" id="L421"><a class="line-number" href="#L421">421</a><code>        self._resume_evt.clear()                  # 在落盘 await 前关闭消费闸</code></div>
+<div class="code-line" id="L422"><a class="line-number" href="#L422">422</a><code>        await self._session.append(&quot;queue.suspended&quot;,</code></div>
+<div class="code-line" id="L423"><a class="line-number" href="#L423">423</a><code>            {&quot;reason&quot;: reason, &quot;by&quot;: by}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L424"><a class="line-number" href="#L424">424</a><code></code></div>
+<div class="code-line" id="L425"><a class="line-number" href="#L425">425</a><code>    async def resume(self, reason: str, *, by: str = &quot;system&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L426"><a class="line-number" href="#L426">426</a><code>        async with self._pause_lock:</code></div>
+<div class="code-line" id="L427"><a class="line-number" href="#L427">427</a><code>            await self._resume_owned(reason, by=by)</code></div>
+<div class="code-line" id="L428"><a class="line-number" href="#L428">428</a><code></code></div>
+<div class="code-line" id="L429"><a class="line-number" href="#L429">429</a><code>    async def _resume_owned(self, reason: str, *, by: str) -&gt; None:</code></div>
+<div class="code-line" id="L430"><a class="line-number" href="#L430">430</a><code>        &quot;&quot;&quot;解除一个挂起原因:计数减一;仍有其他原因保持挂起;全部解除才写</code></div>
+<div class="code-line" id="L431"><a class="line-number" href="#L431">431</a><code>        queue.resumed 并唤醒泵。未挂起的 reason 幂等无害(无事件)。</code></div>
+<div class="code-line" id="L432"><a class="line-number" href="#L432">432</a><code></code></div>
+<div class="code-line" id="L433"><a class="line-number" href="#L433">433</a><code>        by 参数保留签名对称;queue.resumed payload 模型无 by 字段(偏离 4),事件只落 reason。</code></div>
+<div class="code-line" id="L434"><a class="line-number" href="#L434">434</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L435"><a class="line-number" href="#L435">435</a><code>        if self._pause_reasons.get(reason, 0) &lt;= 0:    # 未挂起的 reason:幂等,无事件</code></div>
+<div class="code-line" id="L436"><a class="line-number" href="#L436">436</a><code>            return</code></div>
+<div class="code-line" id="L437"><a class="line-number" href="#L437">437</a><code>        if self._pause_reasons[reason] &gt; 1:            # 该原因多层挂起:仅减计数</code></div>
+<div class="code-line" id="L438"><a class="line-number" href="#L438">438</a><code>            self._pause_reasons[reason] -= 1</code></div>
+<div class="code-line" id="L439"><a class="line-number" href="#L439">439</a><code>            return</code></div>
+<div class="code-line" id="L440"><a class="line-number" href="#L440">440</a><code>        if len(self._pause_reasons) &gt; 1:                # 仍有其他原因 → 维持挂起</code></div>
+<div class="code-line" id="L441"><a class="line-number" href="#L441">441</a><code>            del self._pause_reasons[reason]</code></div>
+<div class="code-line" id="L442"><a class="line-number" href="#L442">442</a><code>            return</code></div>
+<div class="code-line" id="L443"><a class="line-number" href="#L443">443</a><code>        await self._session.append(&quot;queue.resumed&quot;,</code></div>
+<div class="code-line" id="L444"><a class="line-number" href="#L444">444</a><code>            {&quot;reason&quot;: reason}, actor=&quot;system&quot;)        # 全解除才写 resumed(偏离 4)</code></div>
+<div class="code-line" id="L445"><a class="line-number" href="#L445">445</a><code>        del self._pause_reasons[reason]                # 落盘失败时保留暂停及重试能力</code></div>
+<div class="code-line" id="L446"><a class="line-number" href="#L446">446</a><code>        self._resume_evt.set()                         # 唤醒泵(先 resumed 后放行)</code></div>
+<div class="code-line" id="L447"><a class="line-number" href="#L447">447</a><code></code></div>
+<div class="code-line" id="L448"><a class="line-number" href="#L448">448</a><code>    # ============================================================ 取消(F025)</code></div>
+<div class="code-line" id="L449"><a class="line-number" href="#L449">449</a><code>    async def shutdown(self, *, reason: str = &quot;close&quot;) -&gt; None:</code></div>
+<div class="code-line" id="L450"><a class="line-number" href="#L450">450</a><code>        &quot;&quot;&quot;会话收尾**前置**排空(幂等):取消在途任务、等泵退场、兜底结算。</code></div>
+<div class="code-line" id="L451"><a class="line-number" href="#L451">451</a><code></code></div>
+<div class="code-line" id="L452"><a class="line-number" href="#L452">452</a><code>        为什么必须在 `session.finished` **之前**:任务终态事件与 `segment.end` 都是</code></div>
+<div class="code-line" id="L453"><a class="line-number" href="#L453">453</a><code>        append,会话终态位一旦置位即 EVT-104 拒写 ⇒ 在途任务**丢终态、丢段锚、</code></div>
+<div class="code-line" id="L454"><a class="line-number" href="#L454">454</a><code>        等待者悬挂**(2026-09-21 实测复现:`task.completed=0/segment.end=0/wait_for</code></div>
+<div class="code-line" id="L455"><a class="line-number" href="#L455">455</a><code>        3s 未返回`)。取消路径本身已归一化为 `task.failed{cancelled}` + `finally`</code></div>
+<div class="code-line" id="L456"><a class="line-number" href="#L456">456</a><code>        关段,故&quot;先取消并等泵退场&quot;即得完整终局。</code></div>
+<div class="code-line" id="L457"><a class="line-number" href="#L457">457</a><code></code></div>
+<div class="code-line" id="L458"><a class="line-number" href="#L458">458</a><code>        超时/异常路径不放弃:仍在途等待者统一按 `cancelled` 结算(绝不悬挂)。</code></div>
+<div class="code-line" id="L459"><a class="line-number" href="#L459">459</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L460"><a class="line-number" href="#L460">460</a><code>        task = getattr(self, &#x27;_shutdown_task&#x27;, None)</code></div>
+<div class="code-line" id="L461"><a class="line-number" href="#L461">461</a><code>        if task is None:</code></div>
+<div class="code-line" id="L462"><a class="line-number" href="#L462">462</a><code>            self._closing = True</code></div>
+<div class="code-line" id="L463"><a class="line-number" href="#L463">463</a><code>            task = self._shutdown_task = asyncio.create_task(self._shutdown_owned(reason))</code></div>
+<div class="code-line" id="L464"><a class="line-number" href="#L464">464</a><code>        await asyncio.shield(task)</code></div>
+<div class="code-line" id="L465"><a class="line-number" href="#L465">465</a><code></code></div>
+<div class="code-line" id="L466"><a class="line-number" href="#L466">466</a><code>    async def _shutdown_owned(self, reason):</code></div>
+<div class="code-line" id="L467"><a class="line-number" href="#L467">467</a><code>        # ① 队内等待任务:直接摘除并记 failed(cancelled)(不执行 —— 收尾不是&quot;继续跑&quot;)</code></div>
+<div class="code-line" id="L468"><a class="line-number" href="#L468">468</a><code>        for t in list(self._q):</code></div>
+<div class="code-line" id="L469"><a class="line-number" href="#L469">469</a><code>            try:</code></div>
+<div class="code-line" id="L470"><a class="line-number" href="#L470">470</a><code>                await self.cancel(t.id, by=reason)</code></div>
+<div class="code-line" id="L471"><a class="line-number" href="#L471">471</a><code>            except PyHError as e:</code></div>
+<div class="code-line" id="L472"><a class="line-number" href="#L472">472</a><code>                log.warning(&quot;queue shutdown:摘除等待任务失败 code=%s task=%s&quot;,</code></div>
+<div class="code-line" id="L473"><a class="line-number" href="#L473">473</a><code>                            e.code, t.id)</code></div>
+<div class="code-line" id="L474"><a class="line-number" href="#L474">474</a><code>        # ② 在途任务:取消 → 归一化 failed(cancelled) + finally 关段</code></div>
+<div class="code-line" id="L475"><a class="line-number" href="#L475">475</a><code>        running = self._running</code></div>
+<div class="code-line" id="L476"><a class="line-number" href="#L476">476</a><code>        if running is not None:</code></div>
+<div class="code-line" id="L477"><a class="line-number" href="#L477">477</a><code>            try:</code></div>
+<div class="code-line" id="L478"><a class="line-number" href="#L478">478</a><code>                await self.cancel(running.id, by=reason)</code></div>
+<div class="code-line" id="L479"><a class="line-number" href="#L479">479</a><code>            except PyHError as e:                 # 审计失败不阻断排空</code></div>
+<div class="code-line" id="L480"><a class="line-number" href="#L480">480</a><code>                log.warning(&quot;queue shutdown:取消在途任务失败 code=%s&quot;, e.code)</code></div>
+<div class="code-line" id="L481"><a class="line-number" href="#L481">481</a><code>        # ②&#x27; **先唤醒泵**(R12-3 二阶):队列若处于挂起态(如等审批),泵阻塞在</code></div>
+<div class="code-line" id="L482"><a class="line-number" href="#L482">482</a><code>        # `_resume_evt.wait()` ⇒ 直接 await 会走 5s 超时兜底才退场(会话收尾平白</code></div>
+<div class="code-line" id="L483"><a class="line-number" href="#L483">483</a><code>        # 多等 5 秒)。置位唤醒后泵醒来即见空队退场。</code></div>
+<div class="code-line" id="L484"><a class="line-number" href="#L484">484</a><code>        self._resume_evt.set()</code></div>
+<div class="code-line" id="L485"><a class="line-number" href="#L485">485</a><code>        self._enqueue_ready.set()                 # 也唤醒等待入队提交完成的泵</code></div>
+<div class="code-line" id="L486"><a class="line-number" href="#L486">486</a><code>        pump = self._pump_task</code></div>
+<div class="code-line" id="L487"><a class="line-number" href="#L487">487</a><code>        if pump is not None and not pump.done():</code></div>
+<div class="code-line" id="L488"><a class="line-number" href="#L488">488</a><code>            try:</code></div>
+<div class="code-line" id="L489"><a class="line-number" href="#L489">489</a><code>                await asyncio.wait_for(asyncio.shield(pump), timeout=5.0)</code></div>
+<div class="code-line" id="L490"><a class="line-number" href="#L490">490</a><code>            except asyncio.TimeoutError:</code></div>
+<div class="code-line" id="L491"><a class="line-number" href="#L491">491</a><code>                if not pump.cancelling(): pump.cancel()</code></div>
+<div class="code-line" id="L492"><a class="line-number" href="#L492">492</a><code>                await asyncio.gather(pump, return_exceptions=True)</code></div>
+<div class="code-line" id="L493"><a class="line-number" href="#L493">493</a><code>            except asyncio.CancelledError:</code></div>
+<div class="code-line" id="L494"><a class="line-number" href="#L494">494</a><code>                raise</code></div>
+<div class="code-line" id="L495"><a class="line-number" href="#L495">495</a><code>            except Exception:</code></div>
+<div class="code-line" id="L496"><a class="line-number" href="#L496">496</a><code>                log.warning(&quot;queue shutdown: pump failed&quot;, exc_info=True)</code></div>
+<div class="code-line" id="L497"><a class="line-number" href="#L497">497</a><code>        # 兜底:任何仍未结算的等待者不得悬挂(泵被外部取消/超时/崩溃路径)</code></div>
+<div class="code-line" id="L498"><a class="line-number" href="#L498">498</a><code>        for tid in list(self._futures):</code></div>
+<div class="code-line" id="L499"><a class="line-number" href="#L499">499</a><code>            self._settle(tid, TaskResult(ok=False, code=&quot;cancelled&quot;,</code></div>
+<div class="code-line" id="L500"><a class="line-number" href="#L500">500</a><code>                                         summary=&quot;session-close&quot;))</code></div>
+<div class="code-line" id="L501"><a class="line-number" href="#L501">501</a><code></code></div>
+<div class="code-line" id="L502"><a class="line-number" href="#L502">502</a><code>    async def cancel(self, task_id: str, *, by: str = &quot;system&quot;) -&gt; bool:</code></div>
+<div class="code-line" id="L503"><a class="line-number" href="#L503">503</a><code>        &quot;&quot;&quot;任务取消(F025):running → system.cancelled 审计 + 传播取消,队首自动接;</code></div>
+<div class="code-line" id="L504"><a class="line-number" href="#L504">504</a><code>        waiting → 直接摘除并记 failed(cancelled);不存在/已终态 → 幂等 False。</code></div>
+<div class="code-line" id="L505"><a class="line-number" href="#L505">505</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L506"><a class="line-number" href="#L506">506</a><code>        if self._running is not None and self._running.id == task_id:</code></div>
+<div class="code-line" id="L507"><a class="line-number" href="#L507">507</a><code>            if self._cancel_pending == task_id:</code></div>
+<div class="code-line" id="L508"><a class="line-number" href="#L508">508</a><code>                return False</code></div>
+<div class="code-line" id="L509"><a class="line-number" href="#L509">509</a><code>            self._cancel_pending = task_id</code></div>
+<div class="code-line" id="L510"><a class="line-number" href="#L510">510</a><code>            await self._request_cancel(task_id)</code></div>
+<div class="code-line" id="L511"><a class="line-number" href="#L511">511</a><code>            # Cancellation must survive any audit failure; the error remains visible.</code></div>
+<div class="code-line" id="L512"><a class="line-number" href="#L512">512</a><code>            await self._session.append(&quot;system.cancelled&quot;,</code></div>
+<div class="code-line" id="L513"><a class="line-number" href="#L513">513</a><code>                {&quot;what&quot;: f&quot;task:{task_id}&quot;, &quot;reason&quot;: by}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L514"><a class="line-number" href="#L514">514</a><code>            return True</code></div>
+<div class="code-line" id="L515"><a class="line-number" href="#L515">515</a><code>        for i, w in enumerate(self._q):                # waiting:摘除,无需通知循环</code></div>
+<div class="code-line" id="L516"><a class="line-number" href="#L516">516</a><code>            if w.id == task_id:</code></div>
+<div class="code-line" id="L517"><a class="line-number" href="#L517">517</a><code>                del self._q[i]</code></div>
+<div class="code-line" id="L518"><a class="line-number" href="#L518">518</a><code>                try:</code></div>
+<div class="code-line" id="L519"><a class="line-number" href="#L519">519</a><code>                    await self._session.append(&quot;task.failed&quot;, {&quot;task_id&quot;: task_id,</code></div>
+<div class="code-line" id="L520"><a class="line-number" href="#L520">520</a><code>                        &quot;reason&quot;: &quot;cancelled&quot;}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L521"><a class="line-number" href="#L521">521</a><code>                finally:</code></div>
+<div class="code-line" id="L522"><a class="line-number" href="#L522">522</a><code>                    self._settle(task_id, TaskResult(ok=False, code=&quot;cancelled&quot;,</code></div>
+<div class="code-line" id="L523"><a class="line-number" href="#L523">523</a><code>                        summary=&quot;cancelled&quot;))</code></div>
+<div class="code-line" id="L524"><a class="line-number" href="#L524">524</a><code>                return True</code></div>
+<div class="code-line" id="L525"><a class="line-number" href="#L525">525</a><code>        return False                                   # 已终态/不存在:幂等 False(防重放)</code></div>
+<div class="code-line" id="L526"><a class="line-number" href="#L526">526</a><code></code></div>
+<div class="code-line" id="L527"><a class="line-number" href="#L527">527</a><code>    # ============================================================ 状态查询</code></div>
+<div class="code-line" id="L528"><a class="line-number" href="#L528">528</a><code>    def status(self) -&gt; QueueStatus:</code></div>
+<div class="code-line" id="L529"><a class="line-number" href="#L529">529</a><code>        &quot;&quot;&quot;队列状态快照(F043,纯读):running/waiting/paused/depth 全貌,供 UI/CLI</code></div>
+<div class="code-line" id="L530"><a class="line-number" href="#L530">530</a><code>        查询——用户可见&quot;后面还有几个&quot;(waiting FIFO 序)。&quot;&quot;&quot;</code></div>
+<div class="code-line" id="L531"><a class="line-number" href="#L531">531</a><code>        return QueueStatus(</code></div>
+<div class="code-line" id="L532"><a class="line-number" href="#L532">532</a><code>            running=self._running.id if self._running else None,</code></div>
+<div class="code-line" id="L533"><a class="line-number" href="#L533">533</a><code>            waiting=[t.id for t in self._q],           # FIFO 顺序展示</code></div>
+<div class="code-line" id="L534"><a class="line-number" href="#L534">534</a><code>            paused=bool(self._pause_reasons),          # 挂起中(含原因明细)</code></div>
+<div class="code-line" id="L535"><a class="line-number" href="#L535">535</a><code>            pause_reasons=sorted(self._pause_reasons),</code></div>
+<div class="code-line" id="L536"><a class="line-number" href="#L536">536</a><code>            depth=len(self._q))</code></div>
+<div class="code-line" id="L537"><a class="line-number" href="#L537">537</a><code></code></div>
+<div class="code-line" id="L538"><a class="line-number" href="#L538">538</a><code>    # ============================================================ 终态等待</code></div>
+<div class="code-line" id="L539"><a class="line-number" href="#L539">539</a><code>    async def wait_for(self, task_id: str, *,</code></div>
+<div class="code-line" id="L540"><a class="line-number" href="#L540">540</a><code>                       timeout: Optional[float] = None) -&gt; TaskResult:</code></div>
+<div class="code-line" id="L541"><a class="line-number" href="#L541">541</a><code>        &quot;&quot;&quot;外部等待任务终态(F046/jobs 复用):终态缓存/Future 填充后返回 TaskResult;</code></div>
+<div class="code-line" id="L542"><a class="line-number" href="#L542">542</a><code>        timeout=None 永久等(审批挂起不饿死),超时抛 BUSY 显式拒——等待不影响任务本身</code></div>
+<div class="code-line" id="L543"><a class="line-number" href="#L543">543</a><code>        (shield)。未知 task_id 显式 EVT-100(防永久悬挂,偏离 6)。</code></div>
+<div class="code-line" id="L544"><a class="line-number" href="#L544">544</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L545"><a class="line-number" href="#L545">545</a><code>        done = self._done.get(task_id)                 # 已终态:直接返回(幂等)</code></div>
+<div class="code-line" id="L546"><a class="line-number" href="#L546">546</a><code>        if done is not None:</code></div>
+<div class="code-line" id="L547"><a class="line-number" href="#L547">547</a><code>            return done</code></div>
+<div class="code-line" id="L548"><a class="line-number" href="#L548">548</a><code>        known = (self._running is not None and self._running.id == task_id) \</code></div>
+<div class="code-line" id="L549"><a class="line-number" href="#L549">549</a><code>            or any(w.id == task_id for w in self._q) or task_id in self._futures</code></div>
+<div class="code-line" id="L550"><a class="line-number" href="#L550">550</a><code>        if not known:                                  # 从未入队/已结算但缓存被清理</code></div>
+<div class="code-line" id="L551"><a class="line-number" href="#L551">551</a><code>            raise_code(&quot;EVT-100&quot;, task_id=task_id,</code></div>
+<div class="code-line" id="L552"><a class="line-number" href="#L552">552</a><code>                       hint=&quot;wait_for 目标任务不存在(未入队或非本队列任务)&quot;)</code></div>
+<div class="code-line" id="L553"><a class="line-number" href="#L553">553</a><code>        fut = self._futures.get(task_id)</code></div>
+<div class="code-line" id="L554"><a class="line-number" href="#L554">554</a><code>        if fut is None:                                # 每 task_id 一个终态 Future</code></div>
+<div class="code-line" id="L555"><a class="line-number" href="#L555">555</a><code>            fut = asyncio.get_running_loop().create_future()</code></div>
+<div class="code-line" id="L556"><a class="line-number" href="#L556">556</a><code>            self._futures[task_id] = fut</code></div>
+<div class="code-line" id="L557"><a class="line-number" href="#L557">557</a><code>        try:</code></div>
+<div class="code-line" id="L558"><a class="line-number" href="#L558">558</a><code>            if timeout is None:</code></div>
+<div class="code-line" id="L559"><a class="line-number" href="#L559">559</a><code>                await asyncio.shield(fut)              # 等待可被外部取消,任务不受牵连</code></div>
+<div class="code-line" id="L560"><a class="line-number" href="#L560">560</a><code>            else:</code></div>
+<div class="code-line" id="L561"><a class="line-number" href="#L561">561</a><code>                await asyncio.wait_for(asyncio.shield(fut), timeout)</code></div>
+<div class="code-line" id="L562"><a class="line-number" href="#L562">562</a><code>        except asyncio.TimeoutError:</code></div>
+<div class="code-line" id="L563"><a class="line-number" href="#L563">563</a><code>            raise PyHError(&quot;BUSY&quot;, ctx={&quot;hint&quot;: f&quot;等待任务 {task_id} 超时&quot;,</code></div>
+<div class="code-line" id="L564"><a class="line-number" href="#L564">564</a><code>                                        &quot;advice&quot;: &quot;查任务是否仍 running/挂起&quot;})</code></div>
+<div class="code-line" id="L565"><a class="line-number" href="#L565">565</a><code>        return fut.result()                            # TaskResult(ok/code/summary)</code></div>
+<div class="code-line" id="L566"><a class="line-number" href="#L566">566</a><code></code></div>
+<div class="code-line" id="L567"><a class="line-number" href="#L567">567</a><code>    # ============================================================ 段锚(F044)</code></div>
+<div class="code-line" id="L568"><a class="line-number" href="#L568">568</a><code>    async def open_segment(self, task_id: str) -&gt; int:</code></div>
+<div class="code-line" id="L569"><a class="line-number" href="#L569">569</a><code>        &quot;&quot;&quot;开段:写 segment.start(强同步)返回其 seq(F044 验收直译)。</code></div>
+<div class="code-line" id="L570"><a class="line-number" href="#L570">570</a><code></code></div>
+<div class="code-line" id="L571"><a class="line-number" href="#L571">571</a><code>        段锚先落盘再执行(崩溃后回放段不悬空);同一 task_id 嵌套开段 → EVT-100</code></div>
+<div class="code-line" id="L572"><a class="line-number" href="#L572">572</a><code>        (segment.start/end 必须一一配对,子 Agent 用独立 session 段不嵌套)。</code></div>
+<div class="code-line" id="L573"><a class="line-number" href="#L573">573</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L574"><a class="line-number" href="#L574">574</a><code>        if task_id in self._segments:</code></div>
+<div class="code-line" id="L575"><a class="line-number" href="#L575">575</a><code>            raise_code(&quot;EVT-100&quot;, task_id=task_id,</code></div>
+<div class="code-line" id="L576"><a class="line-number" href="#L576">576</a><code>                       hint=&quot;段已打开:segment.start/end 必须一一配对,禁嵌套开段&quot;)</code></div>
+<div class="code-line" id="L577"><a class="line-number" href="#L577">577</a><code>        env = await self._session.append(&quot;segment.start&quot;,</code></div>
+<div class="code-line" id="L578"><a class="line-number" href="#L578">578</a><code>            {&quot;task_id&quot;: task_id}, actor=&quot;system&quot;, sync=True)   # 强同步:段锚先落</code></div>
+<div class="code-line" id="L579"><a class="line-number" href="#L579">579</a><code>        self._segments.add(task_id)</code></div>
+<div class="code-line" id="L580"><a class="line-number" href="#L580">580</a><code>        return env.seq</code></div>
+<div class="code-line" id="L581"><a class="line-number" href="#L581">581</a><code></code></div>
+<div class="code-line" id="L582"><a class="line-number" href="#L582">582</a><code>    async def close_segment(self, task_id: str, start_seq: int) -&gt; None:</code></div>
+<div class="code-line" id="L583"><a class="line-number" href="#L583">583</a><code>        &quot;&quot;&quot;关段:写 segment.end 与 open_segment 的 start_seq 配对(F044)。</code></div>
+<div class="code-line" id="L584"><a class="line-number" href="#L584">584</a><code></code></div>
+<div class="code-line" id="L585"><a class="line-number" href="#L585">585</a><code>        段查询经 session.events_between(start_seq, end_seq) 闭区间(回放/复算/预算审计);</code></div>
+<div class="code-line" id="L586"><a class="line-number" href="#L586">586</a><code>        未开段即关(不配对)→ EVT-100。</code></div>
+<div class="code-line" id="L587"><a class="line-number" href="#L587">587</a><code>        &quot;&quot;&quot;</code></div>
+<div class="code-line" id="L588"><a class="line-number" href="#L588">588</a><code>        if task_id not in self._segments:</code></div>
+<div class="code-line" id="L589"><a class="line-number" href="#L589">589</a><code>            raise_code(&quot;EVT-100&quot;, task_id=task_id, start_seq=start_seq,</code></div>
+<div class="code-line" id="L590"><a class="line-number" href="#L590">590</a><code>                       hint=&quot;段未打开:close_segment 须配对已 open 的段&quot;)</code></div>
+<div class="code-line" id="L591"><a class="line-number" href="#L591">591</a><code>        await self._session.append(&quot;segment.end&quot;,</code></div>
+<div class="code-line" id="L592"><a class="line-number" href="#L592">592</a><code>            {&quot;task_id&quot;: task_id, &quot;start_seq&quot;: start_seq}, actor=&quot;system&quot;)</code></div>
+<div class="code-line" id="L593"><a class="line-number" href="#L593">593</a><code>        self._segments.discard(task_id)</code></div>
+<div class="code-line" id="L594"><a class="line-number" href="#L594">594</a><code></code></div>
+<div class="code-line" id="L595"><a class="line-number" href="#L595">595</a><code></code></div>
+<div class="code-line" id="L596"><a class="line-number" href="#L596">596</a><code>__all__ = [</code></div>
+<div class="code-line" id="L597"><a class="line-number" href="#L597">597</a><code>    &quot;TaskQueue&quot;, &quot;Task&quot;, &quot;TaskResult&quot;, &quot;QueueStatus&quot;, &quot;DEFAULT_MAX_QUEUE&quot;,</code></div>
+<div class="code-line" id="L598"><a class="line-number" href="#L598">598</a><code>]</code></div></div></main><script>const q=new URLSearchParams(location.search),s=Number(q.get('start')),e=Number(q.get('end'));const backParams=new URLSearchParams();for(const key of ['node','edge','view','topic','stage','kind'])if(q.has(key))backParams.set(key,q.get(key));if(backParams.size)document.getElementById('back').href+='?'+backParams;if(s>0)document.getElementById('remote').href+='#L'+s+'-L'+Math.max(s,e);for(let i=s;i>0&&i<=e;i++)document.getElementById('L'+i)?.classList.add('highlight');</script><script src="../../../assets/views/source-return.js"></script></body></html>
